@@ -1,6 +1,6 @@
 # 实时语音 API 服务架构设计
 
-> 修订日期：2026-08-17
+> 修订日期：2026-08-18
 > 本文只列出目标架构和各工程需要新增或改造的能力。
 
 ## 1. 目标
@@ -10,7 +10,7 @@
 - 支持约 30 个客户端同时连接，并保证 30 个客户端可能同时结束说话进入处理流程。
 - 从最后一个有效说话采样点到首段回复音频，目标为 P95 不超过 5 秒、P99 不超过 8 秒。
 - ASR 全部使用本地部署的千问 ASR 实例，LLM 使用远程服务，TTS 使用本地 PromptDialogAPI。
-- 允许通过配置增加 ASR 和 TTS 实例，并由调用方进行负载分配。
+- ASR 和 TTS 分别使用固定的 Nginx 代理地址，由 Nginx 负责把请求分配到后端实例。
 - 网关不保存短期历史、长期历史或 Mem0 数据，所有对话内容由 BerryThinker 管理。
 - 不要求客户端增加主动取消、清空播放缓冲区、回声消除或自动重连能力。
 - 所有服务直接运行在服务器环境中，不使用容器部署。
@@ -21,22 +21,89 @@
 flowchart LR
     C["客户端\nWebSocket\n16kHz音频"] <--> G["独立实时语音网关\nVAD / 流程控制 / 打断\nTTS调度 / 音频转发"]
     G -->|"完整语音段"| B["BerryThinker\nASR编排 / LLM\n历史和Mem0"]
-    B --> A["本地千问ASR实例池"]
+    B -->|"固定地址"| AN["ASR Nginx代理"]
+    AN --> A["本地千问ASR实例\nsupervisord管理"]
     B --> L["远程LLM"]
     B -->|"文本和状态"| G
-    G -->|"完整LLM回复"| T["PromptDialogAPI实例池\nsupervisord管理"]
+    G -->|"完整LLM回复 / 固定地址"| TN["TTS Nginx代理"]
+    TN --> T["PromptDialogAPI实例\nsupervisord管理"]
     T -->|"流式音频"| G
 ```
+
+处理时序：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as 客户端
+    participant G as 实时语音网关
+    participant B as BerryThinker
+    participant AN as ASR Nginx
+    participant A as 本地ASR实例
+    participant L as 远程LLM
+    participant TN as TTS Nginx
+    participant T as PromptDialogAPI实例
+
+    C->>G: 建立WebSocket会话
+    loop 持续上传16kHz音频
+        C->>G: AudioFrame
+        G->>G: VAD检测
+    end
+    G->>G: speech_end，生成turn_id
+
+    par 网关继续监听下一轮语音
+        loop WebSocket连接期间持续收音
+            C->>G: 新音频帧
+            G->>G: VAD检测speech_start
+            opt 前一轮仍在处理
+                G-->>C: INTERRUPTED（旧turn_id）
+                G->>G: 标记旧轮打断并停止旧轮后续音频
+            end
+        end
+        Note over G,B: 新轮speech_end后，使用新的turn_id重复处理流程
+    and 处理当前轮
+        G->>B: 完整语音段（user_id、session_id、turn_id）
+        B->>AN: ASR请求（固定代理地址）
+        AN->>A: 转发到ASR实例
+        A-->>AN: 识别文本
+        AN-->>B: 识别文本
+        B->>L: LLM请求（同Session按turn_id排队）
+        L-->>B: 完整回复文本
+        B->>B: 写短期历史，异步派发Mem0
+        B-->>G: 回复文本和interrupted状态
+        G-->>C: 文本回复
+
+        alt 当前轮在TTS前未被打断
+            G->>TN: TTS请求（固定代理地址）
+            TN->>T: 转发到PromptDialogAPI实例
+            loop 流式生成音频
+                T-->>TN: 24kHz PCM16音频块
+                TN-->>G: 音频块
+                alt 当前轮仍未被打断
+                    G->>G: 转换为16kHz
+                    G-->>C: AUDIO_DELTA
+                else 当前轮已被打断
+                    G->>G: 读取并丢弃旧轮音频
+                end
+            end
+        else 当前轮在TTS前已被打断
+            G->>G: 不创建或移除TTS任务
+        end
+        G-->>C: RESPONSE_END
+    end
+```
+
+图中的两条并行流程表示：当前轮进入ASR、LLM或TTS后，网关仍然持续接收客户端音频。因此，新一轮`speech_start`可能出现在旧轮的任何处理阶段。
 
 正常流程：
 
 ```text
 客户端音频
 → 网关VAD切段
-→ BerryThinker调用本地ASR和远程LLM
+→ BerryThinker通过固定Nginx地址调用本地ASR，再调用远程LLM
 → BerryThinker写入短期历史并派发Mem0后台任务
 → 网关取得完整回复文本
-→ PromptDialogAPI流式生成音频
+→ 网关通过固定Nginx地址调用PromptDialogAPI流式生成音频
 → 网关转换为16kHz并发送给客户端
 ```
 
@@ -92,9 +159,8 @@ LLM按turn_id顺序执行
 - 收到完整LLM回复后创建TTS任务；旧轮未开始TTS时从网关队列移除。
 - 旧轮正在TTS时继续读取流但丢弃音频，让模型自然生成结束。
 - 把PromptDialogAPI的24kHz PCM16音频转换成客户端要求的16kHz音频。
-- 从配置中读取BerryThinker和PromptDialogAPI地址列表，并支持重新加载配置。
-- 在网关内记录每个TTS实例的占用状态，一个实例同一时间只分配一个任务。
-- 为TTS建立全局有界队列，并根据空闲状态和历史耗时选择实例。
+- 使用固定的BerryThinker地址和TTS Nginx代理地址，不读取PromptDialogAPI实例列表。
+- 为TTS建立全局有界队列并限制总在途请求数，但不记录单个实例状态，也不选择具体实例。
 - 对下行音频按`user_id + session_id + turn_id`校验，禁止旧轮音频继续发送。
 - 记录阶段延迟、队列长度、打断数、丢弃音频量和首音频时间。
 
@@ -121,12 +187,11 @@ LLM按turn_id顺序执行
    - 被打断轮次继续完成ASR、LLM和已有记忆流程，并在返回事件中携带`interrupted=true`。
    - 为下一轮LLM注入上一轮被打断信息，但不能取消或丢弃上一轮历史和Mem0写入。
 
-4. **本地ASR负载分配**
-   - 把当前固定ASR地址改成可配置的本地ASR地址列表。
-   - BerryThinker在本地记录每个地址的在途请求数、成功率和历史耗时。
-   - 优先选择在途请求少且历史耗时低的实例。
-   - 调用失败或超时的实例进入短暂冷却期，再选择其他本地实例重试一次。
-   - 支持重新加载地址列表，新增ASR实例不需要修改ASR服务接口。
+4. **本地ASR调用**
+   - ASR客户端只配置一个固定的ASR Nginx代理地址。
+   - BerryThinker不读取ASR实例列表，不记录单个实例状态，也不选择具体实例。
+   - ASR负载分配和故障实例摘除由Nginx负责。
+   - 调用失败或超时时，只针对同一个Nginx代理地址按规则重试，不直接切换实例地址。
 
 5. **限制后台任务数量**
    - 把每轮直接创建记忆后台线程改成固定大小的有界工作队列。
@@ -147,7 +212,8 @@ PromptDialogAPI只做一项代码改造：
 - 每个进程使用独立端口。
 - 每个进程绑定指定GPU。
 - 每个进程加载一个模型实例。
-- 网关从配置中读取这些地址，并保证同一实例同一时间只分配一个TTS任务。
+- 各实例地址只配置在TTS Nginx的upstream中，网关只调用固定的TTS Nginx代理地址。
+- Nginx使用最少连接数策略分配请求；PromptDialogAPI继续使用现有生成锁，保证单个实例同步生成。
 
 用户打断时不向PromptDialogAPI发送模型取消命令。网关继续读取旧TTS流并丢弃音频，让同步生成器自然结束。
 
@@ -157,36 +223,31 @@ PromptDialogAPI只做一项代码改造：
 
 - 请求和返回接口保持现状。
 - 不增加任何业务字段或控制接口。
-- 多实例地址由BerryThinker配置和选择。
-- ASR实例异常由BerryThinker根据调用失败或超时进行判断。
+- 多实例由`supervisord`启动和守护。
+- 各实例地址只配置在ASR Nginx的upstream中，BerryThinker只调用固定的ASR Nginx代理地址。
+- ASR实例异常和负载分配由Nginx处理，不要求ASR向BerryThinker发送心跳或注册信息。
 
-## 6. 负载均衡与资源
+## 6. Nginx负载均衡
 
-负载均衡采用配置列表和调用方本地状态：
+ASR和TTS各自提供一个固定的Nginx代理地址：
 
-- BerryThinker读取本地ASR地址列表并选择实例。
-- 网关读取PromptDialogAPI地址列表并选择空闲实例。
-- 若后续增加BerryThinker实例，网关读取BerryThinker地址列表并按Session固定路由。
+- BerryThinker始终调用固定的ASR代理地址，由ASR Nginx把请求分配到本地ASR实例。
+- 网关始终调用固定的TTS代理地址，由TTS Nginx把请求分配到PromptDialogAPI实例。
+- ASR和PromptDialogAPI实例均由`supervisord`负责启动、停止、异常重启和进程守护。
+- 实例地址只存在于Nginx的upstream配置中，业务服务不读取实例地址列表。
+- 新增或移除实例时，只修改对应Nginx的upstream并平滑重新加载Nginx，不修改业务接口。
+- TTS Nginx采用最少连接数策略，网关只维护总量有界队列，不参与具体实例选择。
 
-新增或移除实例时修改对应配置并重新加载，不要求服务主动注册或上报心跳。
-
-系统支持两种36卡共享资源方案：
-
-- 36张真武810，每张96GB。
-- 36张RTX 5090，每张24GB。
-
-PromptDialogAPI模型加载约占5GB显存，但不能通过显存除法决定同卡实例数。两种硬件必须分别压测ASR/TTS卡数、每卡实例数、首结果时间、完整占槽时间和混部影响。
-
-被打断但仍在生成的TTS会继续占用实例，因此容量测试必须包含“30路同时处理并随机在TTS阶段打断”的场景。
+Nginx只负责代理、负载分配和故障转移，不保存对话状态。服务端不需要增加注册、心跳或实例发现接口。
 
 ## 7. 部署与验收
 
 ### 7.1 部署
 
 - 所有服务直接运行在服务器的Python/Conda环境中。
-- PromptDialogAPI使用`supervisord`管理多进程、多端口和GPU绑定。
+- ASR和PromptDialogAPI都使用`supervisord`管理多进程、多端口和GPU绑定。
+- Nginx分别为ASR和TTS提供固定代理地址，并管理各自的upstream实例。
 - 网关和BerryThinker使用`supervisord`或systemd守护进程。
-- ASR实例沿用现有启动和部署方式。
 - TTS没有远程备用；预计无法在时限内开始时返回完整文字和`tts_unavailable`，不能无限排队。
 
 ### 7.2 验收标准
@@ -198,9 +259,10 @@ PromptDialogAPI模型加载约占5GB显存，但不能通过显存除法决定�
 - 第一段处于TTS时继续生成，网关只读取和丢弃，不再播报。
 - 第二段ASR可以并行，第二段LLM必须等待第一段LLM和短期历史写入完成。
 - 网关中不存在对话历史和Mem0数据。
-- 所有ASR请求只调用本地ASR实例。
+- BerryThinker只调用固定的本地ASR Nginx代理地址，不读取ASR实例列表。
+- 网关只调用固定的TTS Nginx代理地址，不读取PromptDialogAPI实例列表。
 - 跨服务打断只使用`user_id + session_id + turn_id`三个业务标识。
 - PromptDialogAPI业务路由使用普通`def`，内部同步实现保持不变。
-- PromptDialogAPI能够由`supervisord`启动多个实例，网关不会把两个并发任务分配给同一实例。
-- 新增ASR或TTS实例后，重新加载配置即可参与调度。
+- ASR和PromptDialogAPI能够由`supervisord`启动多个实例，Nginx能够把请求分配到可用实例。
+- 新增ASR或TTS实例后，只需更新对应Nginx upstream并平滑重新加载即可参与调度。
 - 长时间运行时没有无界线程、无界队列或持续内存增长。
