@@ -3,8 +3,15 @@ import base64
 import pytest
 
 from realtime_voice.protocol.client_messages import AudioChunkMessage
-from realtime_voice.protocol.decoder import decode_pcm16
+from realtime_voice.protocol.decoder import decode_client_message, decode_pcm16
 from realtime_voice.protocol.errors import ProtocolViolation
+
+
+def test_decode_client_message_rejects_binary_frame() -> None:
+    raw = b'{"type":"CLOSE_SESSION","session_id":"session-100"}'
+
+    with pytest.raises(ProtocolViolation, match="INVALID_MESSAGE"):
+        decode_client_message(raw)
 
 
 def test_audio_chunk_rejects_odd_pcm_byte_count() -> None:
@@ -57,3 +64,16 @@ def test_decode_pcm16_returns_payload_and_duration() -> None:
     assert decoded.timestamp_ms == 123
     assert decoded.pcm16 == payload
     assert decoded.duration_ms == 100.0
+
+
+@pytest.mark.parametrize("sample_rate", [8000, 0])
+def test_decode_pcm16_rejects_unsupported_sample_rate(sample_rate: int) -> None:
+    message = AudioChunkMessage(
+        type="AUDIO_CHUNK",
+        session_id="s",
+        sequence=0,
+        audio_b64=base64.b64encode(b"\x00\x00" * 160).decode(),
+    )
+
+    with pytest.raises(ProtocolViolation, match="INVALID_MESSAGE"):
+        decode_pcm16(message, sample_rate=sample_rate)

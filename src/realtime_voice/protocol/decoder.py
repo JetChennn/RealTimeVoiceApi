@@ -25,6 +25,9 @@ class DecodedAudioChunk:
 
 def decode_client_message(raw: str) -> ClientMessage:
     """Decode and validate a client JSON text frame."""
+    if not isinstance(raw, str):
+        raise ProtocolViolation("INVALID_MESSAGE", "message must be a JSON text frame")
+
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -41,6 +44,9 @@ def decode_client_message(raw: str) -> ClientMessage:
 
 def decode_pcm16(message: AudioChunkMessage, sample_rate: int) -> DecodedAudioChunk:
     """Decode and validate an audio chunk's Base64-encoded PCM16 payload."""
+    if sample_rate not in (16000, 24000, 48000):
+        raise ProtocolViolation("INVALID_MESSAGE", "sample_rate is not supported by protocol V1")
+
     try:
         payload = base64.b64decode(message.audio_b64, validate=True)
     except (binascii.Error, ValueError) as exc:

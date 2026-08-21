@@ -1,8 +1,10 @@
 """Pydantic models for V1 server-to-client messages."""
 
+import base64
+import binascii
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ServerMessageBase(BaseModel):
@@ -48,6 +50,17 @@ class AudioDelta(ServerMessageBase):
     sample_rate: Literal[16000, 24000, 48000]
     channels: Literal[1]
     audio_b64: str = Field(min_length=1)
+
+    @field_validator("audio_b64")
+    @classmethod
+    def validate_pcm16_base64(cls, value: str) -> str:
+        try:
+            payload = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("audio_b64 must be valid Base64") from exc
+        if not payload or len(payload) % 2:
+            raise ValueError("audio_b64 must contain complete PCM16 samples")
+        return value
 
 
 class TurnState(ServerMessageBase):

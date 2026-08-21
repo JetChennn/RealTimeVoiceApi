@@ -161,3 +161,20 @@ def test_server_messages_forbid_unknown_fields() -> None:
             delta="partial",
             unexpected=True,
         )
+
+
+@pytest.mark.parametrize("audio_b64", ["!", base64.b64encode(b"\x00").decode()])
+def test_audio_delta_rejects_non_pcm16_base64(audio_b64: str) -> None:
+    with pytest.raises(ValidationError):
+        AudioDelta(
+            type="AUDIO_DELTA",
+            user_id="device-01",
+            session_id="session-100",
+            turn_id=1,
+            interrupt=False,
+            sequence=0,
+            audio_format="PCM16",
+            sample_rate=24000,
+            channels=1,
+            audio_b64=audio_b64,
+        )
