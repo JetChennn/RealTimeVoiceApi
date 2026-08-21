@@ -143,31 +143,41 @@ async def test_admission_advances_after_cancelling_a_middle_waiter() -> None:
         await asyncio.gather(holder, head, middle, tail, return_exceptions=True)
 
 
-async def test_admission_handoffs_after_cancelling_an_active_granted_job() -> None:
-    gate = BoundedAdmission("tts", concurrency=1, max_waiters=1)
-    never_finish = asyncio.Event()
-    successor_release = asyncio.Event()
-    first_started = asyncio.Event()
+async def test_admission_handoffs_when_granted_waiter_is_cancelled_before_operation() -> None:
+    gate = BoundedAdmission("tts", concurrency=1, max_waiters=2)
+    holder_release = asyncio.Event()
+    old_started = asyncio.Event()
+    old_hold = asyncio.Event()
     successor_started = asyncio.Event()
 
-    async def first_operation() -> None:
-        first_started.set()
-        await never_finish.wait()
+    async def old_operation() -> None:
+        old_started.set()
+        await old_hold.wait()
 
-    async def successor_operation() -> None:
+    async def successor_operation() -> str:
         successor_started.set()
-        await successor_release.wait()
+        return "successor"
 
-    first = asyncio.create_task(gate.run(first_operation))
-    await first_started.wait()
-    successor = asyncio.create_task(gate.run(successor_operation))
+    holder = asyncio.create_task(gate.run(lambda: holder_release.wait()))
+    await gate.wait_until_active(1)
+    old = asyncio.create_task(gate.run(old_operation))
     await gate.wait_until_waiting(1)
+    successor = asyncio.create_task(gate.run(successor_operation))
+    await gate.wait_until_waiting(2)
+    loop = asyncio.get_running_loop()
+
     try:
-        first.cancel()
+        holder_release.set()
+        loop.call_soon(old.cancel)
         with pytest.raises(asyncio.CancelledError):
-            await first
-        await successor_started.wait()
+            await old
+        assert old_started.is_set() is False
+        assert await asyncio.wait_for(successor, timeout=0.1) == "successor"
+        snapshot = await gate.snapshot()
+        assert (snapshot.active, snapshot.waiting) == (0, 0)
     finally:
-        never_finish.set()
-        successor_release.set()
-        await asyncio.gather(first, successor, return_exceptions=True)
+        holder_release.set()
+        old_hold.set()
+        old.cancel()
+        successor.cancel()
+        await asyncio.gather(holder, old, successor, return_exceptions=True)
