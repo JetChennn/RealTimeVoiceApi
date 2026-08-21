@@ -5,6 +5,54 @@ import pytest
 from realtime_voice.clients.limits import AdmissionOverloaded, BoundedAdmission
 
 
+async def test_admission_slot_releases_capacity_after_normal_context_exit() -> None:
+    """Leaving a slot context normally must make capacity immediately reusable."""
+    gate = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+
+    async with gate.slot():
+        assert (await gate.snapshot()).active == 1
+
+    async with gate.slot():
+        assert (await gate.snapshot()).active == 1
+
+
+async def test_admission_slot_releases_capacity_after_context_exception() -> None:
+    """An exception in a slot context must not strand its permit."""
+    gate = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+
+    with pytest.raises(RuntimeError, match="stream failed"):
+        async with gate.slot():
+            raise RuntimeError("stream failed")
+
+    async with gate.slot():
+        assert (await gate.snapshot()).active == 1
+
+
+async def test_admission_slot_releases_waiting_capacity_when_cancelled() -> None:
+    """Cancelling a waiting slot acquisition must free the bounded waiter position."""
+    gate = BoundedAdmission("berry", concurrency=1, max_waiters=1)
+    release = asyncio.Event()
+    slot = gate.slot
+
+    async def hold_slot() -> None:
+        async with slot():
+            await release.wait()
+
+    holder = asyncio.create_task(hold_slot())
+    await gate.wait_until_active(1)
+    waiting = asyncio.create_task(hold_slot())
+    await gate.wait_until_waiting(1)
+
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+
+    replacement = asyncio.create_task(hold_slot())
+    await gate.wait_until_waiting(1)
+    release.set()
+    await asyncio.gather(holder, replacement)
+
+
 async def test_admission_rejects_job_beyond_waiter_limit() -> None:
     gate = BoundedAdmission("asr", concurrency=1, max_waiters=1)
     release = asyncio.Event()

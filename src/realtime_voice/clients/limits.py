@@ -2,7 +2,8 @@
 
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TypeVar
 
@@ -51,13 +52,25 @@ class BoundedAdmission:
 
     async def run(self, operation: Callable[[], Awaitable[Result]]) -> Result:
         """Run an operation after obtaining capacity, or reject it when the queue is full."""
+        async with self.slot():
+            return await operation()
+
+    @asynccontextmanager
+    async def slot(self) -> AsyncIterator[None]:
+        """Reserve one capacity slot until the enclosing async context exits."""
+        await self._acquire()
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._handoff_or_release_locked()
+
+    async def _acquire(self) -> None:
         waiter: _Waiter | None = None
-        acquired = False
 
         async with self._condition:
             if self._active < self._concurrency and not self._waiters:
                 self._active += 1
-                acquired = True
                 self._condition.notify_all()
             else:
                 if self._waiting >= self._max_waiters:
@@ -68,27 +81,21 @@ class BoundedAdmission:
                 self._waiting += 1
                 self._condition.notify_all()
 
-        if waiter is not None:
-            try:
-                await asyncio.shield(waiter.future)
-                acquired = True
-            except BaseException:
-                async with self._condition:
-                    if waiter.granted:
-                        self._handoff_or_release_locked()
-                    else:
-                        self._waiters.remove(waiter)
-                        self._waiting -= 1
-                        waiter.future.cancel()
-                        self._condition.notify_all()
-                raise
+        if waiter is None:
+            return
 
         try:
-            return await operation()
-        finally:
-            if acquired:
-                async with self._condition:
+            await asyncio.shield(waiter.future)
+        except BaseException:
+            async with self._condition:
+                if waiter.granted:
                     self._handoff_or_release_locked()
+                else:
+                    self._waiters.remove(waiter)
+                    self._waiting -= 1
+                    waiter.future.cancel()
+                    self._condition.notify_all()
+            raise
 
     def _handoff_or_release_locked(self) -> None:
         if self._waiters:
