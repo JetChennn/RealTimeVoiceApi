@@ -112,7 +112,10 @@ class BerryClient:
 
     async def delete_session(self, user_id: str, session_id: str) -> DeleteResult:
         """Delete remote session state; an already absent session is a successful cleanup."""
-        path = f"/api/v1/sessions/{quote(user_id, safe='')}/{quote(session_id, safe='')}"
+        path = (
+            f"/api/v1/sessions/{_quote_path_identifier(user_id)}/"
+            f"{_quote_path_identifier(session_id)}"
+        )
         try:
             response = await self.http.delete(path, timeout=180.0)
         except httpx.HTTPError as error:
@@ -123,6 +126,13 @@ class BerryClient:
         if response.status_code == 404:
             return DeleteResult.NOT_FOUND
         raise BerryCleanupError("Berry session cleanup failed")
+
+
+def _quote_path_identifier(value: str) -> str:
+    """Return a single safe URL path segment for a Berry identifier."""
+    if value in {"", ".", ".."}:
+        raise BerryCleanupError("Berry session cleanup failed")
+    return quote(value, safe="")
 
 
 def _berry_event(payload: dict[str, object]) -> BerryEvent:

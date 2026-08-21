@@ -182,6 +182,63 @@ async def test_berry_delete_session_accepts_deleted_or_absent_session(
     assert captured["request"].url.raw_path == b"/api/v1/sessions/user%2Fone/session%2Ftwo"
 
 
+@pytest.mark.parametrize("user_id", ["", ".", ".."])
+async def test_berry_delete_rejects_unsafe_user_path_segments_before_request(
+    user_id: str,
+) -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200)
+
+    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://berry"
+    ) as http:
+        with pytest.raises(BerryCleanupError):
+            await BerryClient(http, admission).delete_session(user_id, "session-100")
+
+    assert captured == []
+
+
+@pytest.mark.parametrize("session_id", ["", ".", ".."])
+async def test_berry_delete_rejects_unsafe_session_path_segments_before_request(
+    session_id: str,
+) -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200)
+
+    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://berry"
+    ) as http:
+        with pytest.raises(BerryCleanupError):
+            await BerryClient(http, admission).delete_session("device-01", session_id)
+
+    assert captured == []
+
+
+async def test_berry_delete_keeps_ordinary_identifiers_in_the_fixed_route() -> None:
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request"] = request
+        return httpx.Response(200)
+
+    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://berry"
+    ) as http:
+        result = await BerryClient(http, admission).delete_session("device-01", "session-100")
+
+    assert result is DeleteResult.DELETED
+    assert captured["request"].url.raw_path == b"/api/v1/sessions/device-01/session-100"
+
+
 async def test_berry_control_errors_are_stable_and_interrupt_skips_reply_limiter() -> None:
     reply_stream = BlockingStream()
     requests: list[httpx.Request] = []
