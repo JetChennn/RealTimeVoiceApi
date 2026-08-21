@@ -15,6 +15,7 @@ import numpy as np
 
 from realtime_voice.audio.pcm import pcm16_bytes_to_float32
 from realtime_voice.audio.resampler import StreamingResampler
+from realtime_voice.session.events import SpeechSegmentReady
 
 
 @dataclass(frozen=True)
@@ -29,14 +30,6 @@ class VadConfig:
 class SpeechSegment:
     segment_id: int
     pcm16_16k: bytes
-
-
-@dataclass(frozen=True)
-class SpeechSegmentReady:
-    """Temporary Actor-facing event contract until the session-events module exists."""
-
-    session_id: str
-    segment: SpeechSegment
 
 
 class SpeechDetector(Protocol):

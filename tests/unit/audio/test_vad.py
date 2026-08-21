@@ -9,15 +9,22 @@ import pytest
 from realtime_voice.audio.vad import (
     BoundedDetectorOffload,
     SileroDetector,
-    SpeechSegmentReady,
     StreamingVadSegmenter,
     VadConfig,
     VadWorker,
 )
+from realtime_voice.audio.vad import (
+    SpeechSegmentReady as VadSpeechSegmentReady,
+)
+from realtime_voice.session.events import SpeechSegmentReady
 
 
 def pcm_chunk(sample_rate: int, duration_ms: int, value: int = 0) -> bytes:
     return value.to_bytes(2, byteorder="little", signed=True) * (sample_rate * duration_ms // 1000)
+
+
+def test_vad_reexports_the_formal_session_event() -> None:
+    assert VadSpeechSegmentReady is SpeechSegmentReady
 
 
 def test_segment_ends_after_configured_silence() -> None:
