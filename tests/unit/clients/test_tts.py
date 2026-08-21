@@ -50,6 +50,7 @@ async def test_tts_maps_dialogue_and_decodes_audio() -> None:
 
     assert chunks == [TtsChunk(0, b"\x00\x00\x01\x00", True)]
     sent = captured["request"]
+    assert sent.extensions["timeout"]["read"] is None
     assert sent.method == "POST"
     assert sent.url.path == "/v1/dialogue-tts/stream"
     assert json.loads(sent.content) == {
@@ -228,3 +229,106 @@ async def test_tts_propagates_admission_overload() -> None:
         with pytest.raises(AdmissionOverloaded):
             await anext(client.stream(TtsRequest("u", "m", "t")))
         await iterator.aclose()
+
+
+class DelayedStream(httpx.AsyncByteStream):
+    def __init__(self, parts: list[tuple[float, bytes]]) -> None:
+        self.parts = parts
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for delay, chunk in self.parts:
+            if delay:
+                await asyncio.sleep(delay)
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class SlowHeaderTransport(httpx.AsyncBaseTransport):
+    def __init__(self, delay: float, stream: DelayedStream) -> None:
+        self.delay = delay
+        self.stream = stream
+        self.cancelled = False
+        self.closed = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            await asyncio.sleep(self.delay)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return httpx.Response(200, request=request, stream=self.stream)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_tts_first_audio_deadline_covers_response_headers_and_releases_slot() -> None:
+    stream = DelayedStream([(0.0, json.dumps(_audio_event()).encode() + b"\n")])
+    transport = SlowHeaderTransport(0.03, stream)
+    admission = BoundedAdmission("tts", concurrency=1, max_waiters=0)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://tts") as http:
+        client = TtsClient(http, admission, first_audio_timeout=0.01, idle_timeout=0.1)
+        with pytest.raises(TtsStreamError, match="TTS_FIRST_AUDIO_TIMEOUT") as error:
+            _ = [chunk async for chunk in client.stream(TtsRequest("u", "m", "t"))]
+
+    snapshot = await admission.snapshot()
+    assert isinstance(error.value.__cause__, TimeoutError)
+    assert transport.cancelled is True
+    assert transport.closed is True
+    assert snapshot.active == 0
+    assert snapshot.waiting == 0
+
+
+async def test_tts_prompt_does_not_reset_absolute_first_audio_deadline() -> None:
+    stream = DelayedStream(
+        [(0.0, b'{"event":"prompt"}\n'), (0.03, json.dumps(_audio_event()).encode() + b"\n")]
+    )
+    admission = BoundedAdmission("tts", concurrency=1, max_waiters=0)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=stream)),
+        base_url="http://tts",
+    ) as http:
+        with pytest.raises(TtsStreamError, match="TTS_FIRST_AUDIO_TIMEOUT") as error:
+            _ = [
+                chunk
+                async for chunk in TtsClient(http, admission, first_audio_timeout=0.01).stream(
+                    TtsRequest("u", "m", "t")
+                )
+            ]
+
+    snapshot = await admission.snapshot()
+    assert isinstance(error.value.__cause__, TimeoutError)
+    assert stream.closed is True
+    assert snapshot.active == 0
+    assert snapshot.waiting == 0
+
+
+async def test_tts_idle_timeout_closes_response_and_releases_slot() -> None:
+    """A post-audio idle period must use the idle deadline and close the stream."""
+    stream = DelayedStream(
+        [(0.0, json.dumps(_audio_event()).encode() + b"\n"), (0.03, b"")]
+    )
+    admission = BoundedAdmission("tts", concurrency=1, max_waiters=0)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=stream)),
+        base_url="http://tts",
+    ) as http:
+        with pytest.raises(TtsStreamError, match="TTS_STREAM_IDLE_TIMEOUT") as error:
+            _ = [
+                chunk
+                async for chunk in TtsClient(http, admission, idle_timeout=0.01).stream(
+                    TtsRequest("u", "m", "t")
+                )
+            ]
+
+    snapshot = await admission.snapshot()
+    assert isinstance(error.value.__cause__, TimeoutError)
+    assert stream.closed is True
+    assert snapshot.active == 0
+    assert snapshot.waiting == 0

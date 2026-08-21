@@ -4,6 +4,7 @@ import asyncio
 import base64
 import binascii
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 import httpx
@@ -65,41 +66,62 @@ class TtsClient:
 
         async with self.admission.slot():
             try:
-                async with self.http.stream(
-                    "POST", "/v1/dialogue-tts/stream", json=payload
-                ) as response:
-                    response.raise_for_status()
-                    events = iter_ndjson(response.aiter_bytes())
-                    first_audio = True
-                    while chunk := await _next_audio_chunk(
-                        events,
-                        self.first_audio_timeout if first_audio else self.idle_timeout,
-                    ):
-                        first_audio = False
+                timeout_code = "TTS_FIRST_AUDIO_TIMEOUT"
+                first_deadline = asyncio.get_running_loop().time() + self.first_audio_timeout
+                request_timeout = httpx.Timeout(
+                    connect=max(self.first_audio_timeout + 1.0, 1.0),
+                    read=None,
+                    write=max(self.first_audio_timeout + 1.0, 1.0),
+                    pool=max(self.first_audio_timeout + 1.0, 1.0),
+                )
+                async with AsyncExitStack() as response_stack:
+                    async with asyncio.timeout_at(first_deadline):
+                        response = await response_stack.enter_async_context(
+                            self.http.stream(
+                                "POST",
+                                "/v1/dialogue-tts/stream",
+                                json=payload,
+                                timeout=request_timeout,
+                            )
+                        )
+                        response.raise_for_status()
+                        events = iter_ndjson(response.aiter_bytes())
+                        first_chunk = await _next_audio_chunk(events)
+
+                    if first_chunk is None:
+                        return
+                    yield first_chunk
+
+                    timeout_code = "TTS_STREAM_IDLE_TIMEOUT"
+                    while chunk := await _next_audio_chunk(events, timeout=self.idle_timeout):
                         yield chunk
             except AdmissionOverloaded:
                 raise
             except TtsStreamError:
                 raise
             except TimeoutError as error:
-                raise TtsStreamError("TTS stream timed out") from error
+                raise TtsStreamError(timeout_code) from error
             except (binascii.Error, httpx.HTTPError, KeyError, TypeError, ValueError) as error:
                 raise TtsStreamError("TTS stream failed") from error
 
 
 async def _next_audio_chunk(
-    events: AsyncIterator[dict[str, object]], timeout: float
+    events: AsyncIterator[dict[str, object]], timeout: float | None = None
 ) -> TtsChunk | None:
     """Read through prompt metadata until one audio chunk or stream end arrives."""
-    try:
-        async with asyncio.timeout(timeout):
-            while True:
+    while True:
+        try:
+            if timeout is None:
                 event = await anext(events)
-                chunk = _decode_audio_event(event)
-                if chunk is not None:
-                    return chunk
-    except StopAsyncIteration:
-        return None
+            else:
+                async with asyncio.timeout(timeout):
+                    event = await anext(events)
+        except StopAsyncIteration:
+            return None
+
+        chunk = _decode_audio_event(event)
+        if chunk is not None:
+            return chunk
 
 
 def _decode_audio_event(event: dict[str, object]) -> TtsChunk | None:

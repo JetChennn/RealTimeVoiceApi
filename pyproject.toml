@@ -29,7 +29,7 @@ dev = [
 
 [tool.pytest.ini_options]
 filterwarnings = [
-  'ignore:Using `httpx` with `starlette\.testclient` is deprecated; install `httpx2` instead\.:starlette.exceptions.StarletteDeprecationWarning',
+  'ignore:Using `httpx` with `starlette\.testclient` is deprecated; install `httpx2` instead\.\Z:starlette.exceptions.StarletteDeprecationWarning',
 ]
 pythonpath = ["src"]
 asyncio_mode = "auto"
