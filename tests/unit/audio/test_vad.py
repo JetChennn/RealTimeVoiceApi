@@ -250,12 +250,40 @@ def test_workers_keep_resampler_state_isolated() -> None:
     assert all(detector.frames for detector in detectors)
 
 
-def test_worker_drops_incomplete_detector_tail_at_end_of_stream() -> None:
+def test_worker_evaluates_eos_remainder_without_padding_emitted_pcm() -> None:
+    class RecordingDetector:
+        def __init__(self) -> None:
+            self.frames: list[np.ndarray] = []
+            self.thread_ids: list[int] = []
+
+        def has_speech(self, samples: np.ndarray) -> bool:
+            assert samples.shape == (512,)
+            self.frames.append(samples.copy())
+            self.thread_ids.append(threading.get_ident())
+            return bool(np.any(samples))
+
+    speech = pcm_chunk(16000, 32, value=1000)
+    silence = pcm_chunk(16000, 500)
+    detector = RecordingDetector()
+    event_loop_thread = threading.get_ident()
+
+    events = asyncio.run(run_vad_worker(16000, speech + silence, detector, "eos-remainder"))
+
+    assert len(events) == 1
+    assert events[0].segment.pcm16_16k == speech + silence
+    assert len(events[0].segment.pcm16_16k) == (512 + 8000) * 2
+    assert len(detector.frames) == 17
+    assert detector.frames[-1].shape == (512,)
+    assert all(thread_id != event_loop_thread for thread_id in detector.thread_ids)
+
+
+
+def test_worker_evaluates_eos_remainder_without_forcing_incomplete_segment() -> None:
+    speech = pcm_chunk(16000, 32, value=1000)
+    silence = pcm_chunk(16000, 490)
     detector = StrictFrameDetector()
 
-    events = asyncio.run(
-        run_vad_worker(16000, pcm_chunk(16000, 31, value=1000), detector, "partial-tail")
-    )
+    events = asyncio.run(run_vad_worker(16000, speech + silence, detector, "eos-incomplete"))
 
     assert events == []
-    assert detector.frames == []
+    assert len(detector.frames) == 17

@@ -213,10 +213,20 @@ class VadWorker:
             await self._process_resampled(self._resampler.process_pcm16(input_pcm16))
 
         await self._process_resampled(self._resampler.process_pcm16(b"", final=True))
-        # There is no detector decision for a partial frame, so do not synthesize
-        # PCM or a speech decision from it at end of stream.
-        self._detector_remainder.clear()
+        await self._process_eos_remainder()
         await self._publish_ready_segments()
+
+    async def _process_eos_remainder(self) -> None:
+        if not self._detector_remainder:
+            return
+        remainder = bytes(self._detector_remainder)
+        self._detector_remainder.clear()
+        detector_frame = remainder.ljust(self._DETECTOR_FRAME_BYTES, b"\x00")
+        samples = pcm16_bytes_to_float32(detector_frame)
+        has_speech = await self._detector_offload.run(partial(self._detector.has_speech, samples))
+        segment = self._segmenter.push(remainder, has_speech)
+        if segment is not None:
+            await self._event_queue.put(SpeechSegmentReady(self._session_id, segment))
 
     async def _process_resampled(self, pcm16_16k: bytes) -> None:
         self._detector_remainder.extend(pcm16_16k)
