@@ -17,6 +17,7 @@ class SpeechSegmentReady:
 
 @dataclass(frozen=True, slots=True)
 class AsrSucceeded:
+    session_id: str
     segment_id: int
     text: str
     audio_wav: bytes
@@ -24,6 +25,7 @@ class AsrSucceeded:
 
 @dataclass(frozen=True, slots=True)
 class AsrFailed:
+    session_id: str
     segment_id: int
     code: str
     message: str
@@ -31,6 +33,7 @@ class AsrFailed:
 
 @dataclass(frozen=True, slots=True)
 class BerryDeltaReceived:
+    session_id: str
     turn_id: int
     generation: int
     delta: str
@@ -38,6 +41,7 @@ class BerryDeltaReceived:
 
 @dataclass(frozen=True, slots=True)
 class BerryCompleted:
+    session_id: str
     turn_id: int
     generation: int
     reply_text: str
@@ -45,6 +49,7 @@ class BerryCompleted:
 
 @dataclass(frozen=True, slots=True)
 class BerryFailed:
+    session_id: str
     turn_id: int
     generation: int
     code: str
@@ -53,6 +58,7 @@ class BerryFailed:
 
 @dataclass(frozen=True, slots=True)
 class TtsChunkReceived:
+    session_id: str
     turn_id: int
     generation: int
     sequence: int
@@ -62,12 +68,14 @@ class TtsChunkReceived:
 
 @dataclass(frozen=True, slots=True)
 class TtsCompleted:
+    session_id: str
     turn_id: int
     generation: int
 
 
 @dataclass(frozen=True, slots=True)
 class TtsFailed:
+    session_id: str
     turn_id: int
     generation: int
     code: str
@@ -76,7 +84,7 @@ class TtsFailed:
 
 @dataclass(frozen=True, slots=True)
 class SessionDisconnected:
-    session_id: str | None = None
+    session_id: str
 
 
 SessionEvent: TypeAlias = (

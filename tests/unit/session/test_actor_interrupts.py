@@ -6,28 +6,29 @@ from realtime_voice.session.actor import (
     StartTts,
 )
 from realtime_voice.session.events import (
-    AsrSucceeded,
     BerryCompleted,
     BerryDeltaReceived,
     TtsChunkReceived,
 )
 from realtime_voice.session.state import TurnStage
-from tests.helpers import valid_wav
 from tests.unit.session.conftest import (
     actor_for_test,
     actor_with_streaming_turn,
     actor_with_tts_turn,
     outbound_messages,
     outbound_of_type,
+    recognize,
 )
 
 
 def test_new_turn_interrupts_llm_once_but_keeps_old_text_flow() -> None:
     actor = actor_with_streaming_turn()
 
-    effects = actor.handle(AsrSucceeded(2, "等一下", valid_wav()))
-    repeated = actor.handle(AsrSucceeded(3, "再问", valid_wav()))
-    delta = actor.handle(BerryDeltaReceived(1, generation=1, delta="旧文本"))
+    effects = recognize(actor, 2, "等一下")
+    repeated = recognize(actor, 3, "再问")
+    delta = actor.handle(
+        BerryDeltaReceived(session_id="s", turn_id=1, generation=1, delta="旧文本")
+    )
 
     assert actor.state.turns[1].interrupted is True
     assert outbound_of_type(effects, "TURN_STATE").turn_id == 1
@@ -37,13 +38,19 @@ def test_new_turn_interrupts_llm_once_but_keeps_old_text_flow() -> None:
 
 def test_quick_turns_run_berry_fifo_and_interrupted_turns_skip_tts() -> None:
     actor = actor_for_test()
-    first = actor.handle(AsrSucceeded(101, "one", valid_wav()))
-    second = actor.handle(AsrSucceeded(102, "two", valid_wav()))
-    third = actor.handle(AsrSucceeded(103, "three", valid_wav()))
+    first = recognize(actor, 101, "one")
+    second = recognize(actor, 102, "two")
+    third = recognize(actor, 103, "three")
 
-    first_done = actor.handle(BerryCompleted(1, 1, "reply-one"))
-    second_done = actor.handle(BerryCompleted(2, 1, "reply-two"))
-    third_done = actor.handle(BerryCompleted(3, 1, "reply-three"))
+    first_done = actor.handle(
+        BerryCompleted(session_id="s", turn_id=1, generation=1, reply_text="reply-one")
+    )
+    second_done = actor.handle(
+        BerryCompleted(session_id="s", turn_id=2, generation=1, reply_text="reply-two")
+    )
+    third_done = actor.handle(
+        BerryCompleted(session_id="s", turn_id=3, generation=1, reply_text="reply-three")
+    )
 
     starts = [effect for effects in (first, second, third) for effect in effects if isinstance(effect, StartBerry)]
     next_starts = [
@@ -63,7 +70,16 @@ def test_quick_turns_run_berry_fifo_and_interrupted_turns_skip_tts() -> None:
 def test_interrupted_tts_chunk_is_counted_and_not_sent() -> None:
     actor = actor_with_tts_turn(interrupted=True)
 
-    effects = actor.handle(TtsChunkReceived(1, 1, 0, b"\x00\x00", False))
+    effects = actor.handle(
+        TtsChunkReceived(
+            session_id="s",
+            turn_id=1,
+            generation=1,
+            sequence=0,
+            pcm16=bytes(2),
+            finalize=False,
+        )
+    )
 
     assert not any(isinstance(effect, SendOutbound) for effect in effects)
     discarded = next(effect for effect in effects if isinstance(effect, RecordDiscardedAudio))
@@ -73,9 +89,35 @@ def test_interrupted_tts_chunk_is_counted_and_not_sent() -> None:
 def test_new_llm_starts_without_waiting_for_interrupted_tts_to_drain() -> None:
     actor = actor_with_tts_turn()
 
-    effects = actor.handle(AsrSucceeded(2, "new", valid_wav()))
+    effects = recognize(actor, 2, "new")
 
     assert actor.state.turns[1].interrupted is True
     start = next(effect for effect in effects if isinstance(effect, StartBerry))
     assert start.turn_id == 2
     assert actor.state.turns[1].stage is TurnStage.STREAMING_TTS
+
+
+def test_empty_interrupted_berry_completion_fails_and_starts_next_fifo_turn() -> None:
+    actor = actor_for_test()
+    recognize(actor, 1, "one")
+    recognize(actor, 2, "two")
+
+    effects = actor.handle(
+        BerryCompleted(
+            session_id="s",
+            turn_id=1,
+            generation=1,
+            reply_text="   ",
+        )
+    )
+
+    error = outbound_of_type(effects, "ERROR")
+    ended = outbound_of_type(effects, "RESPONSE_END")
+    next_start = next(effect for effect in effects if isinstance(effect, StartNextBerry))
+    assert (error.code, error.interrupt) == ("BERRY_EMPTY_REPLY", True)
+    assert (ended.status, ended.interrupt) == ("FAILED", True)
+    assert (next_start.turn_id, next_start.interrupt_first) == (2, True)
+    assert actor.state.turns[1].stage is TurnStage.FAILED
+    assert actor.state.turns[1].reply_text == ""
+    assert actor.state.active_llm_turn_id == 2
+    assert not any(isinstance(effect, StartTts) for effect in effects)

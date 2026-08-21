@@ -2,6 +2,7 @@
 
 from realtime_voice.session.actor import (
     CloseRuntime,
+    QueueAsr,
     RecordDiscardedAudio,
     RecordStaleEvent,
     SendOutbound,
@@ -33,6 +34,7 @@ __all__ = [
     "BerryDeltaReceived",
     "BerryFailed",
     "CloseRuntime",
+    "QueueAsr",
     "RecordDiscardedAudio",
     "RecordStaleEvent",
     "SendOutbound",

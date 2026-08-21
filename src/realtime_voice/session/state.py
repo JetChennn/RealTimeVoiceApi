@@ -41,6 +41,6 @@ class SessionState:
     active_llm_turn_id: int | None = None
     llm_queue: deque[int] = field(default_factory=deque)
     turns: OrderedDict[int, TurnContext] = field(default_factory=OrderedDict)
-    known_asr_segment_ids: set[int] = field(default_factory=set)
-    seen_asr_segment_ids: set[int] = field(default_factory=set)
+    registered_asr_segment_ids: set[int] = field(default_factory=set)
+    pending_asr_segment_ids: set[int] = field(default_factory=set)
     closing: bool = False

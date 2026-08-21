@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
+
+if TYPE_CHECKING:
+    from realtime_voice.audio.vad import SpeechSegment
 
 from realtime_voice.protocol.server_messages import (
     AsrResult,
@@ -35,6 +38,12 @@ from realtime_voice.session.state import (
     TurnContext,
     TurnStage,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class QueueAsr:
+    session_id: str
+    segment: SpeechSegment
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +103,7 @@ SessionEffect: TypeAlias = (
     | CloseRuntime
     | RecordStaleEvent
     | RecordDiscardedAudio
+    | QueueAsr
 )
 
 
@@ -104,15 +114,19 @@ class SessionActor:
         self.state = state
 
     def handle(self, event: SessionEvent) -> list[SessionEffect]:
+        if event.session_id != self.state.session_id:
+            return [self._stale(event, "session")]
         if isinstance(event, SessionDisconnected):
             return self._disconnect(event)
         if self.state.closing:
             return [self._stale(event, "closing")]
         if isinstance(event, SpeechSegmentReady):
-            if event.session_id != self.state.session_id:
-                return [self._stale(event, "session")]
-            self.state.known_asr_segment_ids.add(event.segment.segment_id)
-            return []
+            segment_id = event.segment.segment_id
+            if segment_id in self.state.registered_asr_segment_ids:
+                return [self._stale(event, "asr_segment")]
+            self.state.registered_asr_segment_ids.add(segment_id)
+            self.state.pending_asr_segment_ids.add(segment_id)
+            return [QueueAsr(self.state.session_id, event.segment)]
         if isinstance(event, AsrSucceeded):
             return self._asr_succeeded(event)
         if isinstance(event, AsrFailed):
@@ -132,8 +146,6 @@ class SessionActor:
         raise TypeError(f"unsupported session event: {type(event).__name__}")
 
     def _disconnect(self, event: SessionDisconnected) -> list[SessionEffect]:
-        if event.session_id is not None and event.session_id != self.state.session_id:
-            return [self._stale(event, "session")]
         if self.state.closing:
             return []
         self.state.closing = True
@@ -143,7 +155,7 @@ class SessionActor:
         stale_reason = self._asr_stale_reason(event.segment_id)
         if stale_reason is not None:
             return [self._stale(event, stale_reason)]
-        self.state.seen_asr_segment_ids.add(event.segment_id)
+        self.state.pending_asr_segment_ids.remove(event.segment_id)
         if not event.text:
             return []
 
@@ -173,14 +185,15 @@ class SessionActor:
         stale_reason = self._asr_stale_reason(event.segment_id)
         if stale_reason is not None:
             return [self._stale(event, stale_reason)]
-        self.state.seen_asr_segment_ids.add(event.segment_id)
+        self.state.pending_asr_segment_ids.remove(event.segment_id)
         return [self._error(0, False, "ASR", event.code, event.message)]
 
     def _asr_stale_reason(self, segment_id: int) -> str | None:
-        if segment_id in self.state.seen_asr_segment_ids:
+        if segment_id in self.state.pending_asr_segment_ids:
+            return None
+        if segment_id in self.state.registered_asr_segment_ids:
             return "asr_segment"
-        known = self.state.known_asr_segment_ids
-        return "unknown_segment" if known and segment_id not in known else None
+        return "unknown_segment"
 
     def _interrupt_unfinished_turns(self) -> list[SessionEffect]:
         effects: list[SessionEffect] = []
@@ -230,6 +243,8 @@ class SessionActor:
         turn = self._berry_turn(event, event.turn_id, event.generation)
         if not isinstance(turn, TurnContext):
             return [turn]
+        if not event.delta:
+            return []
         return [
             SendOutbound(
                 TextDelta(
@@ -247,6 +262,12 @@ class SessionActor:
         turn = self._berry_turn(event, event.turn_id, event.generation)
         if not isinstance(turn, TurnContext):
             return [turn]
+        if not event.reply_text.strip():
+            return self._finish_berry_failure(
+                turn,
+                code="BERRY_EMPTY_REPLY",
+                message="Berry reply text is empty",
+            )
         turn.reply_text = event.reply_text
         self.state.active_llm_turn_id = None
         effects: list[SessionEffect] = [
@@ -288,6 +309,19 @@ class SessionActor:
         turn.stage = TurnStage.FAILED
         effects: list[SessionEffect] = [
             self._error(turn.turn_id, turn.interrupted, "LLM", event.code, event.message),
+            self._response_end(turn, "FAILED"),
+        ]
+        if self.state.llm_queue:
+            effects.append(self._start_berry(interrupt_first=turn.interrupted))
+        return effects
+
+    def _finish_berry_failure(
+        self, turn: TurnContext, code: str, message: str
+    ) -> list[SessionEffect]:
+        self.state.active_llm_turn_id = None
+        turn.stage = TurnStage.FAILED
+        effects: list[SessionEffect] = [
+            self._error(turn.turn_id, turn.interrupted, "LLM", code, message),
             self._response_end(turn, "FAILED"),
         ]
         if self.state.llm_queue:
