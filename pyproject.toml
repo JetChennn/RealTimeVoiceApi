@@ -34,3 +34,5 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+[tool.hatch.build.targets.wheel]
+packages = ["src/realtime_voice"]
