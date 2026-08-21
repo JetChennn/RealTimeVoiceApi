@@ -26,3 +26,8 @@ def test_wav_header_describes_mono_16khz_pcm16() -> None:
 
     with wave.open(io.BytesIO(wav_data), "rb") as wav:
         assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 16000)
+
+
+def test_wav_rejects_incomplete_pcm16_sample() -> None:
+    with pytest.raises(ValueError, match="PCM16.*complete samples"):
+        _pcm_module().pcm16_wav_bytes(b"\x00", 16000)

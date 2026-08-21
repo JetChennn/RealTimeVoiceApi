@@ -13,8 +13,8 @@ class StreamingResampler:
         )
 
     def process_pcm16(self, data: bytes, final: bool = False) -> bytes:
+        samples = pcm16_bytes_to_float32(data)
         if self._bypass:
             return data
-        samples = pcm16_bytes_to_float32(data)
         output = self._stream.resample_chunk(samples, last=final)
         return float32_to_pcm16_bytes(output)

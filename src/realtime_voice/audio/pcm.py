@@ -16,6 +16,8 @@ def float32_to_pcm16_bytes(samples: np.ndarray) -> bytes:
 
 
 def pcm16_wav_bytes(data: bytes, sample_rate: int) -> bytes:
+    if len(data) % 2:
+        raise ValueError("PCM16 data must contain complete samples")
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav:
         wav.setnchannels(1)
