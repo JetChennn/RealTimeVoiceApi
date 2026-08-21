@@ -1,6 +1,7 @@
 """Bounded admission control for downstream services."""
 
 import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TypeVar
@@ -24,6 +25,12 @@ class AdmissionSnapshot:
     waiting: int
 
 
+@dataclass(slots=True)
+class _Waiter:
+    future: asyncio.Future[None]
+    granted: bool = False
+
+
 class BoundedAdmission:
     """Limit concurrent downstream work and bound the jobs allowed to wait."""
 
@@ -40,35 +47,60 @@ class BoundedAdmission:
         self._waiting = 0
         self._condition = asyncio.Condition()
 
+        self._waiters: deque[_Waiter] = deque()
+
     async def run(self, operation: Callable[[], Awaitable[Result]]) -> Result:
         """Run an operation after obtaining capacity, or reject it when the queue is full."""
+        waiter: _Waiter | None = None
+        acquired = False
+
         async with self._condition:
-            if self._active < self._concurrency and self._waiting == 0:
+            if self._active < self._concurrency and not self._waiters:
                 self._active += 1
+                acquired = True
                 self._condition.notify_all()
             else:
                 if self._waiting >= self._max_waiters:
                     raise AdmissionOverloaded(self.name)
 
+                waiter = _Waiter(asyncio.get_running_loop().create_future())
+                self._waiters.append(waiter)
                 self._waiting += 1
                 self._condition.notify_all()
-                try:
-                    await self._condition.wait_for(lambda: self._active < self._concurrency)
-                except BaseException:
-                    self._waiting -= 1
-                    self._condition.notify_all()
-                    raise
-                else:
-                    self._waiting -= 1
-                    self._active += 1
-                    self._condition.notify_all()
+
+        if waiter is not None:
+            try:
+                await asyncio.shield(waiter.future)
+                acquired = True
+            except BaseException:
+                async with self._condition:
+                    if waiter.granted:
+                        self._handoff_or_release_locked()
+                    else:
+                        self._waiters.remove(waiter)
+                        self._waiting -= 1
+                        waiter.future.cancel()
+                        self._condition.notify_all()
+                raise
 
         try:
             return await operation()
         finally:
-            async with self._condition:
-                self._active -= 1
-                self._condition.notify_all()
+            if acquired:
+                async with self._condition:
+                    self._handoff_or_release_locked()
+
+    def _handoff_or_release_locked(self) -> None:
+        if self._waiters:
+            waiter = self._waiters.popleft()
+            waiter.granted = True
+            self._waiting -= 1
+            waiter.future.set_result(None)
+            self._condition.notify_all()
+            return
+
+        self._active -= 1
+        self._condition.notify_all()
 
     async def snapshot(self) -> AdmissionSnapshot:
         """Return current usage without changing admission state."""
