@@ -90,12 +90,20 @@ def test_silero_detector_uses_an_injected_local_model_and_threshold() -> None:
 
     detector = SileroDetector(model=model, config=VadConfig(threshold=0.8))
 
-    result = detector.has_speech(np.array([0.25, -0.25], dtype=np.float32))
+    samples = np.full(512, 0.25, dtype=np.float32)
+    result = detector.has_speech(samples)
 
     assert result is False
     assert len(calls) == 1
-    np.testing.assert_array_equal(calls[0][0], np.array([0.25, -0.25], dtype=np.float32))
+    np.testing.assert_array_equal(calls[0][0], samples)
     assert calls[0][1] == 16000
+
+
+def test_silero_detector_rejects_non_512_sample_frame() -> None:
+    detector = SileroDetector(model=lambda samples, sample_rate: 0.75)
+
+    with pytest.raises(ValueError, match="512"):
+        detector.has_speech(np.zeros(511, dtype=np.float32))
 
 
 def test_worker_offloads_detection_and_emits_only_completed_segments() -> None:
@@ -112,7 +120,7 @@ def test_worker_offloads_detection_and_emits_only_completed_segments() -> None:
         event_queue: asyncio.Queue[SpeechSegmentReady] = asyncio.Queue()
         speech = pcm_chunk(16000, 100, value=1000)
         silence = pcm_chunk(16000, 100)
-        for chunk in [speech, silence, silence, silence, silence, silence, None]:
+        for chunk in [speech, silence, silence, silence, silence, silence, silence, silence, None]:
             audio_queue.put_nowait(chunk)
 
         detector = RecordingDetector()
@@ -135,7 +143,7 @@ def test_worker_offloads_detection_and_emits_only_completed_segments() -> None:
     event, queue_is_empty, detector_thread_ids, event_loop_thread = asyncio.run(run_worker())
     assert event.session_id == "session-1"
     assert event.segment.segment_id == 1
-    assert event.segment.pcm16_16k == pcm_chunk(16000, 100, 1000) + pcm_chunk(16000, 100) * 5
+    assert len(event.segment.pcm16_16k) == 10240 * 2
     assert queue_is_empty
     assert detector_thread_ids
     assert all(thread_id != event_loop_thread for thread_id in detector_thread_ids)
@@ -148,3 +156,106 @@ def test_audio_fixtures_are_mono_16khz_pcm16(name: str) -> None:
     with wave.open(str(fixture), "rb") as wav:
         assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 16000)
         assert wav.getnframes() == 1600
+
+
+def test_max_speech_duration_splits_at_exact_sample_limit_and_retains_overflow() -> None:
+    segmenter = StreamingVadSegmenter(VadConfig(max_speech_seconds=1))
+    speech = pcm_chunk(16000, 100, value=1000)
+
+    assert segmenter.push(speech * 8, has_speech=True) is None
+    first = segmenter.push(speech * 4, has_speech=True)
+    second = segmenter.push(speech * 8, has_speech=True)
+
+    assert first is not None
+    assert first.segment_id == 1
+    assert len(first.pcm16_16k) == 16000 * 2
+    assert second is not None
+    assert second.segment_id == 2
+    assert len(second.pcm16_16k) == 16000 * 2
+
+
+class StrictFrameDetector:
+    def __init__(self) -> None:
+        self.frames: list[np.ndarray] = []
+
+    def has_speech(self, samples: np.ndarray) -> bool:
+        if samples.shape != (512,):
+            raise ValueError(f"expected 512 samples, got {samples.shape}")
+        self.frames.append(samples.copy())
+        return bool(np.any(samples))
+
+
+async def run_vad_worker(
+    input_sample_rate: int, source: bytes, detector: StrictFrameDetector, session_id: str
+) -> list[SpeechSegmentReady]:
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    event_queue: asyncio.Queue[SpeechSegmentReady] = asyncio.Queue()
+    chunk_size = (input_sample_rate // 37) * 2
+    for offset in range(0, len(source), chunk_size):
+        audio_queue.put_nowait(source[offset : offset + chunk_size])
+    audio_queue.put_nowait(None)
+
+    offload = BoundedDetectorOffload()
+    worker = VadWorker(
+        session_id=session_id,
+        input_sample_rate=input_sample_rate,
+        audio_queue=audio_queue,
+        event_queue=event_queue,
+        segmenter=StreamingVadSegmenter(VadConfig()),
+        detector=detector,
+        detector_offload=offload,
+    )
+    try:
+        await worker.run()
+    finally:
+        await offload.aclose()
+    events: list[SpeechSegmentReady] = []
+    while not event_queue.empty():
+        events.append(event_queue.get_nowait())
+    return events
+
+
+@pytest.mark.parametrize("input_sample_rate", [16000, 24000, 48000])
+def test_worker_resamples_each_input_rate_into_512_sample_detector_frames(
+    input_sample_rate: int,
+) -> None:
+    source = pcm_chunk(input_sample_rate, 200, value=1000) + pcm_chunk(input_sample_rate, 700)
+    detector = StrictFrameDetector()
+
+    events = asyncio.run(run_vad_worker(input_sample_rate, source, detector, "rate-test"))
+
+    assert len(events) == 1
+    assert events[0].segment.segment_id == 1
+    assert 10000 <= len(events[0].segment.pcm16_16k) // 2 <= 12000
+    assert detector.frames
+    assert all(frame.shape == (512,) for frame in detector.frames)
+
+
+def test_workers_keep_resampler_state_isolated() -> None:
+    async def run_workers() -> tuple[list[SpeechSegmentReady], list[StrictFrameDetector]]:
+        first_detector = StrictFrameDetector()
+        second_detector = StrictFrameDetector()
+        first_source = pcm_chunk(24000, 200, value=1000) + pcm_chunk(24000, 700)
+        second_source = pcm_chunk(48000, 200, value=1000) + pcm_chunk(48000, 700)
+        first_events, second_events = await asyncio.gather(
+            run_vad_worker(24000, first_source, first_detector, "first"),
+            run_vad_worker(48000, second_source, second_detector, "second"),
+        )
+        return first_events + second_events, [first_detector, second_detector]
+
+    events, detectors = asyncio.run(run_workers())
+
+    assert [event.segment.segment_id for event in events] == [1, 1]
+    assert all(10000 <= len(event.segment.pcm16_16k) // 2 <= 12000 for event in events)
+    assert all(detector.frames for detector in detectors)
+
+
+def test_worker_drops_incomplete_detector_tail_at_end_of_stream() -> None:
+    detector = StrictFrameDetector()
+
+    events = asyncio.run(
+        run_vad_worker(16000, pcm_chunk(16000, 31, value=1000), detector, "partial-tail")
+    )
+
+    assert events == []
+    assert detector.frames == []
