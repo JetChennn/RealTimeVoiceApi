@@ -9,6 +9,7 @@ from prometheus_client import CollectorRegistry
 
 from realtime_voice.audio.vad import (
     BoundedDetectorOffload,
+    DetectorSnapshot,
     SileroDetector,
     StreamingVadSegmenter,
     VadConfig,
@@ -152,12 +153,44 @@ def test_worker_offloads_detection_and_emits_only_completed_segments() -> None:
 
     event, queue_is_empty, detector_thread_ids, event_loop_thread = asyncio.run(run_worker())
     assert event.session_id == "session-1"
-    assert event.speech_end_at == 42.0
+    assert event.speech_end_at == pytest.approx(41.488)
     assert event.segment.segment_id == 1
     assert len(event.segment.pcm16_16k) == 10240 * 2
     assert queue_is_empty
     assert detector_thread_ids
     assert all(thread_id != event_loop_thread for thread_id in detector_thread_ids)
+
+
+async def test_worker_stamps_acoustic_speech_end_before_confirmation_silence() -> None:
+    class FrameDetector:
+        def has_speech(self, samples: np.ndarray) -> bool:
+            return bool(np.any(samples))
+
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    event_queue: asyncio.Queue[SpeechSegmentReady] = asyncio.Queue()
+    speech_frame = pcm_chunk(16000, 32, value=1000)
+    silence_frame = pcm_chunk(16000, 32)
+    audio_queue.put_nowait(speech_frame + silence_frame * 2)
+    audio_queue.put_nowait(None)
+    offload = BoundedDetectorOffload(max_workers=1)
+    worker = VadWorker(
+        session_id="acoustic-end",
+        audio_queue=audio_queue,
+        event_queue=event_queue,
+        segmenter=StreamingVadSegmenter(VadConfig(min_silence_ms=64)),
+        detector=FrameDetector(),
+        detector_offload=offload,
+        clock=lambda: 100.0,
+    )
+
+    try:
+        await worker.run()
+    finally:
+        await offload.aclose()
+
+    event = event_queue.get_nowait()
+    assert event.speech_end_at == pytest.approx(99.936)
+    assert event_queue.empty()
 
 
 async def test_detector_offload_writes_actual_active_and_pending_metrics() -> None:
@@ -192,6 +225,45 @@ async def test_detector_offload_writes_actual_active_and_pending_metrics() -> No
     finally:
         release.set()
         await asyncio.gather(first, *(()) if second is None else (second,), return_exceptions=True)
+        await offload.aclose()
+
+
+async def test_detector_offload_cancellation_clears_queued_accounting() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    offload = BoundedDetectorOffload(max_workers=1, metrics=metrics)
+    first_started = threading.Event()
+    release = threading.Event()
+
+    def blocking_call() -> bool:
+        first_started.set()
+        release.wait(timeout=1)
+        return True
+
+    first = asyncio.create_task(offload.run(blocking_call))
+    queued: asyncio.Task[bool] | None = None
+    try:
+        while not first_started.is_set():
+            await asyncio.sleep(0)
+        queued = asyncio.create_task(offload.run(lambda: False))
+        while offload.snapshot().pending != 1:
+            await asyncio.sleep(0)
+
+        assert offload.snapshot().active == 1
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        release.set()
+        assert await first is True
+
+        assert offload.snapshot() == DetectorSnapshot(active=0, pending=0, workers=1)
+        rendered = metrics.render().decode()
+        assert "realtime_voice_executor_active 0.0" in rendered
+        assert "realtime_voice_executor_pending 0.0" in rendered
+    finally:
+        release.set()
+        await asyncio.gather(
+            first, *(()) if queued is None else (queued,), return_exceptions=True
+        )
         await offload.aclose()
 
 

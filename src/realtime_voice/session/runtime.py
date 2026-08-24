@@ -51,7 +51,7 @@ from realtime_voice.session.events import (
     TtsFailed,
 )
 from realtime_voice.session.registry import SessionRegistry
-from realtime_voice.session.state import SessionState
+from realtime_voice.session.state import TERMINAL_TURN_STAGES, SessionState
 
 BERRY_CLEANUP_SKIPPED = "BERRY_CLEANUP_SKIPPED"
 DEFAULT_AUDIO_QUEUE_MAX_SECONDS = 3.0
@@ -476,15 +476,22 @@ class SessionRuntime:
                     event.speech_end_at if event.speech_end_at is not None else self._clock(),
                 )
                 self._observe("vad_segment_ready", segment_id=event.segment.segment_id)
+            next_turn_id = self.actor.state.next_turn_id
             effects = self.actor.handle(event)
             if isinstance(event, AsrSucceeded):
                 speech_end = self._speech_ends.pop(event.segment_id, None)
                 if speech_end is not None and self._metrics is not None:
                     self._metrics.observe_speech_end_to_asr(self._clock() - speech_end)
-                if speech_end is not None:
-                    for effect in effects:
-                        if isinstance(effect, (StartBerry, StartNextBerry)):
-                            self._turn_speech_ends[effect.turn_id] = speech_end
+                if (
+                    speech_end is not None
+                    and self.actor.state.next_turn_id == next_turn_id + 1
+                ):
+                    self._turn_speech_ends[next_turn_id] = speech_end
+            if isinstance(event, (BerryCompleted, BerryFailed, TtsCompleted, TtsFailed)):
+                turn = self.actor.state.turns.get(event.turn_id)
+                if turn is not None and turn.stage in TERMINAL_TURN_STAGES:
+                    self._turn_speech_ends.pop(event.turn_id, None)
+                    self._llm_milestones.discard(event.turn_id)
             for effect in effects:
                 await self.execute_effect(effect)
 
@@ -795,6 +802,9 @@ class SessionRuntime:
             finally:
                 if self._registry is not None:
                     await self._registry.remove(self.session_id)
+                self._speech_ends.clear()
+                self._turn_speech_ends.clear()
+                self._llm_milestones.clear()
                 self._cleaned = True
                 self._observe("session_cleanup")
 

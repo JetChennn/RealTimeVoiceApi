@@ -156,6 +156,85 @@ def test_health_aggregates_actual_runtime_queues_executor_and_process_state() ->
     assert "realtime_voice_process_memory_bytes " in metrics
 
 
+def test_health_tracks_and_recovers_from_real_queued_executor_cancellation() -> None:
+    app = create_app(
+        Settings(_env_file=None, cpu_workers=1, cpu_pending_jobs=1)
+    )
+    mark_downstream_ok(app)
+    first_started = threading.Event()
+    queued_ready = threading.Event()
+    cancel_queued = threading.Event()
+    queued_cancelled = threading.Event()
+    release_first = threading.Event()
+    errors: list[BaseException] = []
+
+    def blocking_call() -> bool:
+        first_started.set()
+        release_first.wait(timeout=2)
+        return True
+
+    async def exercise_offload() -> None:
+        first = asyncio.create_task(app.state.services.detector_offload.run(blocking_call))
+        queued: asyncio.Task[bool] | None = None
+        try:
+            while not first_started.is_set():
+                await asyncio.sleep(0)
+            queued = asyncio.create_task(
+                app.state.services.detector_offload.run(lambda: False)
+            )
+            while app.state.services.detector_offload.snapshot().pending != 1:
+                await asyncio.sleep(0)
+            queued_ready.set()
+            while not cancel_queued.is_set():
+                await asyncio.sleep(0.001)
+            queued.cancel()
+            try:
+                await queued
+            except asyncio.CancelledError:
+                pass
+            queued_cancelled.set()
+            assert await first is True
+        finally:
+            release_first.set()
+            await asyncio.gather(
+                first, *(()) if queued is None else (queued,), return_exceptions=True
+            )
+
+    def offload_thread() -> None:
+        try:
+            asyncio.run(exercise_offload())
+        except Exception as error:  # noqa: BLE001 - surface thread failures to the test
+            errors.append(error)
+
+    worker = threading.Thread(target=offload_thread)
+    with TestClient(app) as client:
+        worker.start()
+        assert queued_ready.wait(timeout=1)
+        overloaded = client.get("/health").json()
+        overloaded_metrics = client.get("/metrics").text
+        cancel_queued.set()
+        assert queued_cancelled.wait(timeout=1)
+        recovered = client.get("/health").json()
+        release_first.set()
+        worker.join(timeout=2)
+        final = client.get("/health").json()
+        final_metrics = client.get("/metrics").text
+
+    assert errors == []
+    assert not worker.is_alive()
+    assert overloaded["executor"]["active"] == 1
+    assert overloaded["executor"]["pending"] == 1
+    assert overloaded["ready"] is False
+    assert "realtime_voice_executor_active 1.0" in overloaded_metrics
+    assert "realtime_voice_executor_pending 1.0" in overloaded_metrics
+    assert recovered["executor"]["pending"] == 0
+    assert recovered["ready"] is True
+    assert final["executor"]["active"] == 0
+    assert final["executor"]["pending"] == 0
+    assert "realtime_voice_executor_active 0.0" in final_metrics
+    assert "realtime_voice_executor_pending 0.0" in final_metrics
+
+
 def test_health_snapshot_failures_are_unavailable_and_not_fake_zeroes() -> None:
     app = create_app(Settings(_env_file=None))
     mark_downstream_ok(app)

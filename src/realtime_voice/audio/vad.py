@@ -8,7 +8,7 @@ import os
 import threading
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -40,10 +40,17 @@ class DetectorSnapshot:
     workers: int
 
 
+@dataclass
+class _DetectorJob:
+    pending: bool = True
+    active: bool = False
+
+
 @dataclass(frozen=True)
 class SpeechSegment:
     segment_id: int
     pcm16_16k: bytes
+    trailing_silence_samples: int = 0
 
 
 class SpeechDetector(Protocol):
@@ -61,6 +68,7 @@ class StreamingVadSegmenter:
         self.config = config
         self.active = False
         self.silence_ms = 0.0
+        self._trailing_silence_samples = 0
         self._chunks: list[bytes] = []
         self._next_segment_id = 1
         self._ready: deque[SpeechSegment] = deque()
@@ -87,8 +95,10 @@ class StreamingVadSegmenter:
             self._chunks.append(chunk)
             if has_speech:
                 self.silence_ms = 0.0
+                self._trailing_silence_samples = 0
             else:
                 self.silence_ms += self._duration_ms(chunk)
+                self._trailing_silence_samples += len(chunk) // 2
 
             reached_silence = self.silence_ms >= self.config.min_silence_ms
             reached_limit = self._sample_count() >= self._max_samples
@@ -111,10 +121,15 @@ class StreamingVadSegmenter:
         return self._ready.popleft() if self._ready else None
 
     def _finish(self) -> SpeechSegment:
-        segment = SpeechSegment(self._next_segment_id, b"".join(self._chunks))
+        segment = SpeechSegment(
+            self._next_segment_id,
+            b"".join(self._chunks),
+            trailing_silence_samples=self._trailing_silence_samples,
+        )
         self._next_segment_id += 1
         self.active = False
         self.silence_ms = 0.0
+        self._trailing_silence_samples = 0
         self._chunks.clear()
         return segment
 
@@ -197,21 +212,46 @@ class BoundedDetectorOffload:
         with self._snapshot_lock:
             self._pending += 1
             self._write_metrics_locked()
+        job = _DetectorJob()
 
         def wrapped() -> bool:
             with self._snapshot_lock:
-                self._pending -= 1
+                if job.pending:
+                    self._pending -= 1
+                    job.pending = False
                 self._active += 1
+                job.active = True
                 self._write_metrics_locked()
             try:
                 return call()
             finally:
                 with self._snapshot_lock:
-                    self._active -= 1
+                    if job.active:
+                        self._active -= 1
+                        job.active = False
+                    self._write_metrics_locked()
+
+        def account_cancelled(future: Future[bool]) -> None:
+            if not future.cancelled():
+                return
+            with self._snapshot_lock:
+                if job.pending:
+                    self._pending -= 1
+                    job.pending = False
                     self._write_metrics_locked()
 
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, wrapped)
+        try:
+            future = self._executor.submit(wrapped)
+        except BaseException:
+            with self._snapshot_lock:
+                if job.pending:
+                    self._pending -= 1
+                    job.pending = False
+                    self._write_metrics_locked()
+            raise
+        future.add_done_callback(account_cancelled)
+        return await asyncio.wrap_future(future, loop=loop)
 
     def snapshot(self) -> DetectorSnapshot:
         with self._snapshot_lock:
@@ -254,6 +294,12 @@ class VadWorker:
         self._metrics = metrics
         self._clock = clock
 
+    def _speech_end_at(self, segment: SpeechSegment) -> float:
+        trailing_seconds = (
+            segment.trailing_silence_samples / self._segmenter.config.sample_rate
+        )
+        return self._clock() - trailing_seconds
+
     async def run(self) -> None:
         while (input_pcm16 := await self._audio_queue.get()) is not None:
             started = self._clock()
@@ -281,7 +327,7 @@ class VadWorker:
                 SpeechSegmentReady(
                     session_id=self._session_id,
                     segment=segment,
-                    speech_end_at=self._clock(),
+                    speech_end_at=self._speech_end_at(segment),
                 )
             )
 
@@ -300,7 +346,7 @@ class VadWorker:
                     SpeechSegmentReady(
                         session_id=self._session_id,
                         segment=segment,
-                        speech_end_at=self._clock(),
+                        speech_end_at=self._speech_end_at(segment),
                     )
                 )
             await self._publish_ready_segments()
@@ -311,6 +357,6 @@ class VadWorker:
                 SpeechSegmentReady(
                     session_id=self._session_id,
                     segment=segment,
-                    speech_end_at=self._clock(),
+                    speech_end_at=self._speech_end_at(segment),
                 )
             )

@@ -19,6 +19,7 @@ from realtime_voice.session.actor import (
 )
 from realtime_voice.session.events import (
     AsrFailed,
+    AsrSucceeded,
     BerryCompleted,
     BerryDeltaReceived,
     BerryFailed,
@@ -404,6 +405,68 @@ async def test_runtime_records_each_real_speech_end_milestone_exactly_once() -> 
     assert "realtime_voice_speech_end_to_first_llm_seconds_sum 3.0" in rendered
     assert "realtime_voice_speech_end_to_first_tts_seconds_count 1.0" in rendered
     assert "realtime_voice_speech_end_to_first_tts_seconds_sum 4.0" in rendered
+
+
+async def test_runtime_retains_speech_end_for_a_turn_queued_behind_active_llm() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    berry = OrderedBerry()
+    tts = ChunkedTts(sine_pcm16(sample_rate=24000, seconds=0.02, frequency=440))
+    runtime, _ = make_runtime(berry=berry, tts=tts, metrics=metrics, clock=lambda: 20.0)
+    actor_task = asyncio.create_task(runtime._actor_loop())
+
+    try:
+        await runtime.events.put(
+            SpeechSegmentReady(
+                session_id="s",
+                segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x01\x00"),
+                speech_end_at=10.0,
+            )
+        )
+        await runtime.events.put(
+            SpeechSegmentReady(
+                session_id="s",
+                segment=SpeechSegment(segment_id=2, pcm16_16k=b"\x02\x00"),
+                speech_end_at=11.0,
+            )
+        )
+        async with asyncio.timeout(1):
+            while runtime.actor.state.pending_asr_segment_ids != {1, 2}:
+                await asyncio.sleep(0)
+
+        await runtime.events.put(
+            AsrSucceeded(
+                session_id="s", segment_id=1, text="first", audio_wav=valid_wav()
+            )
+        )
+        await asyncio.wait_for(berry.first_started.wait(), timeout=1)
+        await runtime.events.put(
+            AsrSucceeded(
+                session_id="s", segment_id=2, text="second", audio_wav=valid_wav()
+            )
+        )
+        async with asyncio.timeout(1):
+            while runtime.actor.state.next_turn_id != 3:
+                await asyncio.sleep(0)
+
+        berry.release_first.set()
+        async with asyncio.timeout(1):
+            while "realtime_voice_speech_end_to_first_tts_seconds_count 1.0" not in (
+                metrics.render().decode()
+            ):
+                await asyncio.sleep(0)
+        async with asyncio.timeout(1):
+            while runtime.background_task_count:
+                await asyncio.sleep(0)
+    finally:
+        berry.release_first.set()
+        actor_task.cancel()
+        await asyncio.gather(actor_task, return_exceptions=True)
+
+    rendered = metrics.render().decode()
+    assert "realtime_voice_speech_end_to_asr_seconds_count 2.0" in rendered
+    assert "realtime_voice_speech_end_to_first_llm_seconds_count 2.0" in rendered
+    assert "realtime_voice_speech_end_to_first_tts_seconds_count 1.0" in rendered
+    assert 2 not in runtime._turn_speech_ends
 
 
 async def test_real_asr_berry_and_tts_failure_boundaries_record_one_error_each() -> None:
