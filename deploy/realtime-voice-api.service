@@ -1,0 +1,18 @@
+[Unit]
+Description=RealTimeVoiceAPI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=realtime-voice
+Group=realtime-voice
+WorkingDirectory=/path/to/RealTimeVoiceApi
+EnvironmentFile=/path/to/RealTimeVoiceApi/.env
+ExecStart=/path/to/venv/bin/uvicorn realtime_voice.main:app --host 0.0.0.0 --port 8003
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=130
+
+[Install]
+WantedBy=multi-user.target

@@ -167,8 +167,7 @@ async def test_disconnect_cleanup_follows_the_required_order() -> None:
             StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply")
         )
         await asyncio.wait_for(tts.started.wait(), timeout=1)
-        await asyncio.sleep(0)
-        assert not asr.started.is_set()
+        await asyncio.wait_for(asr.started.wait(), timeout=1)
 
         runtime.request_close()
         async with asyncio.timeout(1):
@@ -184,6 +183,7 @@ async def test_disconnect_cleanup_follows_the_required_order() -> None:
 
     assert calls == [
         "stop_audio",
+        "cancel_asr",
         "wait_berry",
         "drain_tts",
         "delete_berry_session",
