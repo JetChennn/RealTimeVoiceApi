@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 class SpeechSegmentReady:
     session_id: str
     segment: SpeechSegment
+    speech_end_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

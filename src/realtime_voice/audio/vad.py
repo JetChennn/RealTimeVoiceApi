@@ -1,5 +1,7 @@
 """Per-session streaming voice activity detection and segmentation."""
 
+from __future__ import annotations
+
 import asyncio
 import importlib
 import os
@@ -10,9 +12,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Protocol
+from time import monotonic
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from realtime_voice.observability.metrics import Metrics
 
 from realtime_voice.audio.pcm import pcm16_bytes_to_float32
 from realtime_voice.audio.resampler import StreamingResampler
@@ -175,7 +181,7 @@ class SileroDetector:
 class BoundedDetectorOffload:
     """Runs blocking detector calls in a bounded thread pool."""
 
-    def __init__(self, max_workers: int = 1):
+    def __init__(self, max_workers: int = 1, *, metrics: Metrics | None = None):
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
         self._executor = ThreadPoolExecutor(
@@ -185,20 +191,24 @@ class BoundedDetectorOffload:
         self._snapshot_lock = threading.Lock()
         self._active = 0
         self._pending = 0
+        self._metrics = metrics
 
     async def run(self, call: Callable[[], bool]) -> bool:
         with self._snapshot_lock:
             self._pending += 1
+            self._write_metrics_locked()
 
         def wrapped() -> bool:
             with self._snapshot_lock:
                 self._pending -= 1
                 self._active += 1
+                self._write_metrics_locked()
             try:
                 return call()
             finally:
                 with self._snapshot_lock:
                     self._active -= 1
+                    self._write_metrics_locked()
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, wrapped)
@@ -206,6 +216,10 @@ class BoundedDetectorOffload:
     def snapshot(self) -> DetectorSnapshot:
         with self._snapshot_lock:
             return DetectorSnapshot(self._active, self._pending, self._workers)
+
+    def _write_metrics_locked(self) -> None:
+        if self._metrics is not None:
+            self._metrics.set_executor_state(active=self._active, pending=self._pending)
 
     async def aclose(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=True)
@@ -226,6 +240,8 @@ class VadWorker:
         detector: SpeechDetector,
         detector_offload: DetectorOffload,
         input_sample_rate: int = 16000,
+        metrics: Metrics | None = None,
+        clock: Callable[[], float] = monotonic,
     ):
         self._session_id = session_id
         self._audio_queue = audio_queue
@@ -235,10 +251,17 @@ class VadWorker:
         self._detector_offload = detector_offload
         self._resampler = StreamingResampler(input_sample_rate, 16000)
         self._detector_remainder = bytearray()
+        self._metrics = metrics
+        self._clock = clock
 
     async def run(self) -> None:
         while (input_pcm16 := await self._audio_queue.get()) is not None:
-            await self._process_resampled(self._resampler.process_pcm16(input_pcm16))
+            started = self._clock()
+            try:
+                await self._process_resampled(self._resampler.process_pcm16(input_pcm16))
+            finally:
+                if self._metrics is not None:
+                    self._metrics.observe_stage_latency("vad", self._clock() - started)
 
         await self._process_resampled(self._resampler.process_pcm16(b"", final=True))
         await self._process_eos_remainder()
@@ -258,6 +281,7 @@ class VadWorker:
                 SpeechSegmentReady(
                     session_id=self._session_id,
                     segment=segment,
+                    speech_end_at=self._clock(),
                 )
             )
 
@@ -276,6 +300,7 @@ class VadWorker:
                     SpeechSegmentReady(
                         session_id=self._session_id,
                         segment=segment,
+                        speech_end_at=self._clock(),
                     )
                 )
             await self._publish_ready_segments()
@@ -286,5 +311,6 @@ class VadWorker:
                 SpeechSegmentReady(
                     session_id=self._session_id,
                     segment=segment,
+                    speech_end_at=self._clock(),
                 )
             )

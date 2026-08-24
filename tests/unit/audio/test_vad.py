@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from prometheus_client import CollectorRegistry
 
 from realtime_voice.audio.vad import (
     BoundedDetectorOffload,
@@ -16,6 +17,7 @@ from realtime_voice.audio.vad import (
 from realtime_voice.audio.vad import (
     SpeechSegmentReady as VadSpeechSegmentReady,
 )
+from realtime_voice.observability.metrics import Metrics
 from realtime_voice.session.events import SpeechSegmentReady
 
 
@@ -139,6 +141,7 @@ def test_worker_offloads_detection_and_emits_only_completed_segments() -> None:
             segmenter=StreamingVadSegmenter(VadConfig(min_silence_ms=500)),
             detector=detector,
             detector_offload=offload,
+            clock=lambda: 42.0,
         )
         event_loop_thread = threading.get_ident()
         try:
@@ -149,11 +152,73 @@ def test_worker_offloads_detection_and_emits_only_completed_segments() -> None:
 
     event, queue_is_empty, detector_thread_ids, event_loop_thread = asyncio.run(run_worker())
     assert event.session_id == "session-1"
+    assert event.speech_end_at == 42.0
     assert event.segment.segment_id == 1
     assert len(event.segment.pcm16_16k) == 10240 * 2
     assert queue_is_empty
     assert detector_thread_ids
     assert all(thread_id != event_loop_thread for thread_id in detector_thread_ids)
+
+
+async def test_detector_offload_writes_actual_active_and_pending_metrics() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    offload = BoundedDetectorOffload(max_workers=1, metrics=metrics)
+    first_started = threading.Event()
+    release = threading.Event()
+
+    def blocking_call() -> bool:
+        first_started.set()
+        release.wait(timeout=1)
+        return True
+
+    first = asyncio.create_task(offload.run(blocking_call))
+    second: asyncio.Task[bool] | None = None
+    try:
+        while not first_started.is_set():
+            await asyncio.sleep(0)
+        second = asyncio.create_task(offload.run(lambda: False))
+        while offload.snapshot().pending != 1:
+            await asyncio.sleep(0)
+
+        rendered = metrics.render().decode()
+        assert "realtime_voice_executor_active 1.0" in rendered
+        assert "realtime_voice_executor_pending 1.0" in rendered
+
+        release.set()
+        assert await asyncio.gather(first, second) == [True, False]
+        rendered = metrics.render().decode()
+        assert "realtime_voice_executor_active 0.0" in rendered
+        assert "realtime_voice_executor_pending 0.0" in rendered
+    finally:
+        release.set()
+        await asyncio.gather(first, *(()) if second is None else (second,), return_exceptions=True)
+        await offload.aclose()
+
+
+async def test_vad_worker_records_real_processing_latency() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    event_queue: asyncio.Queue[SpeechSegmentReady] = asyncio.Queue()
+    audio_queue.put_nowait(pcm_chunk(16000, 32, value=1000))
+    audio_queue.put_nowait(None)
+    offload = BoundedDetectorOffload(max_workers=1, metrics=metrics)
+    worker = VadWorker(
+        session_id="metrics",
+        audio_queue=audio_queue,
+        event_queue=event_queue,
+        segmenter=StreamingVadSegmenter(VadConfig()),
+        detector=SileroDetector(model=lambda samples, sample_rate: 1.0),
+        detector_offload=offload,
+        metrics=metrics,
+    )
+
+    try:
+        await worker.run()
+    finally:
+        await offload.aclose()
+
+    rendered = metrics.render().decode()
+    assert 'realtime_voice_stage_latency_seconds_count{stage="vad"} 1.0' in rendered
 
 
 @pytest.mark.parametrize("name", ["speech_16k.wav", "silence_16k.wav"])

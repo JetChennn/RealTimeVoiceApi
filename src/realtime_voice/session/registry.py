@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -14,6 +15,12 @@ if TYPE_CHECKING:
 
 
 RuntimeFactory = Callable[["CreateSession", "WebSocket"], "SessionRuntime"]
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryActivitySnapshot:
+    active_sessions: int
+    queues: dict[str, dict[str, int]]
 
 
 class DuplicateSession(RuntimeError):
@@ -53,6 +60,22 @@ class SessionRegistry:
     def active_count(self) -> int:
         """Return the current number of admitted runtimes."""
         return len(self._runtimes)
+
+    def activity_snapshot(self) -> RegistryActivitySnapshot:
+        """Aggregate current per-runtime queue usage without awaiting session work."""
+        queues: dict[str, dict[str, int]] = {}
+        for runtime in self._runtimes.values():
+            for name, snapshot in runtime.queue_snapshot().items():
+                aggregate = queues.setdefault(name, {"items": 0})
+                aggregate["items"] += snapshot.items
+                if snapshot.bytes is not None:
+                    aggregate["bytes"] = aggregate.get("bytes", 0) + snapshot.bytes
+        for name in ("event", "audio", "asr", "outbound"):
+            if name not in queues:
+                queues[name] = {"items": 0}
+                if name in {"audio", "outbound"}:
+                    queues[name]["bytes"] = 0
+        return RegistryActivitySnapshot(active_sessions=len(self._runtimes), queues=queues)
 
     async def add(self, key: str, runtime: SessionRuntime) -> None:
         """Admit one runtime, preferring the stable duplicate error at capacity."""

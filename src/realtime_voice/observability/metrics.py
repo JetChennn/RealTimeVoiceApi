@@ -12,6 +12,9 @@ class Metrics:
         )
         self.queue_items = Gauge("realtime_voice_queue_items", "Queue items", ["queue"], registry=r)
         self.queue_bytes = Gauge("realtime_voice_queue_bytes", "Queue bytes", ["queue"], registry=r)
+        self.queue_overload = Counter(
+            "realtime_voice_queue_overload", "Queue overloads", ["queue", "limit"], registry=r
+        )
         self.limiter_active = Gauge(
             "realtime_voice_limiter_active", "Active limiter slots", ["service"], registry=r
         )
@@ -76,9 +79,13 @@ class Metrics:
     def set_active_sessions(self, count: int) -> None:
         self._safe(self.active_sessions.set, count)
 
-    def set_queue_state(self, queue: str, *, items: int, byte_count: int = 0) -> None:
+    def set_queue_state(self, queue: str, *, items: int, byte_count: int | None = None) -> None:
         self._safe(self.queue_items.labels(queue).set, items)
-        self._safe(self.queue_bytes.labels(queue).set, byte_count)
+        if byte_count is not None:
+            self._safe(self.queue_bytes.labels(queue).set, byte_count)
+
+    def record_queue_overload(self, queue: str, limit: str) -> None:
+        self._safe(self.queue_overload.labels(queue, limit).inc)
 
     def set_limiter_state(self, service: str, *, active: int, waiting: int) -> None:
         self._safe(self.limiter_active.labels(service).set, active)

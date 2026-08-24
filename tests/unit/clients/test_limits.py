@@ -37,6 +37,10 @@ async def test_admission_records_wait_and_overload_metrics():
     release.set()
     await asyncio.gather(first, second)
 
+    rendered = metrics.render().decode()
+    assert 'realtime_voice_admission_wait_seconds_count{service="asr"} 2.0' in rendered
+    assert 'realtime_voice_admission_overload_total{service="asr"} 1.0' in rendered
+
 
 async def test_admission_slot_releases_capacity_after_context_exception() -> None:
     """An exception in a slot context must not strand its permit."""

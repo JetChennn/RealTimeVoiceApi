@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
@@ -59,6 +60,12 @@ DEFAULT_OUTBOUND_QUEUE_MAX_BYTES = 8 * 1024 * 1024
 QueueItem = TypeVar("QueueItem")
 
 
+@dataclass(frozen=True, slots=True)
+class QueueSnapshot:
+    items: int
+    bytes: int | None = None
+
+
 class SessionQueueOverloaded(RuntimeError):
     """Raised when an item would exceed a session queue's byte budget."""
 
@@ -94,6 +101,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
         maxsize: int,
         max_bytes: int,
         item_size: Callable[[QueueItem], int],
+        metrics: Metrics | None = None,
     ) -> None:
         if maxsize < 1:
             raise ValueError("queue size must be at least 1")
@@ -104,6 +112,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
         self.max_bytes = max_bytes
         self._item_size = item_size
         self._queued_bytes = 0
+        self._metrics = metrics
 
     @classmethod
     def audio(
@@ -111,6 +120,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
         *,
         maxsize: int,
         max_bytes: int,
+        metrics: Metrics | None = None,
     ) -> BoundedByteQueue[bytes | None]:
         """Create an audio queue with the runtime's required PCM byte sizing."""
         return cls(
@@ -118,6 +128,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
             maxsize=maxsize,
             max_bytes=max_bytes,
             item_size=_audio_item_size,
+            metrics=metrics,
         )
 
     @classmethod
@@ -126,6 +137,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
         *,
         maxsize: int,
         max_bytes: int,
+        metrics: Metrics | None = None,
     ) -> BoundedByteQueue[ServerMessage]:
         """Create an outbound queue with the runtime's JSON byte sizing."""
         return cls(
@@ -133,6 +145,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
             maxsize=maxsize,
             max_bytes=max_bytes,
             item_size=_outbound_item_size,
+            metrics=metrics,
         )
 
     @property
@@ -142,7 +155,12 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
 
     def put_nowait(self, item: QueueItem) -> None:
         self._reject_byte_overflow(item)
-        super().put_nowait(item)
+        try:
+            super().put_nowait(item)
+        except asyncio.QueueFull:
+            if self._metrics is not None:
+                self._metrics.record_queue_overload(self.name, "items")
+            raise
 
     async def put(self, item: QueueItem) -> None:
         self._reject_byte_overflow(item)
@@ -162,6 +180,8 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
         if item_bytes < 0:
             raise ValueError("queue item size must not be negative")
         if self._queued_bytes + item_bytes > self.max_bytes:
+            if self._metrics is not None:
+                self._metrics.record_queue_overload(self.name, "bytes")
             raise SessionQueueOverloaded(
                 self.name,
                 item_bytes=item_bytes,
@@ -215,6 +235,7 @@ class SessionRuntime:
         metrics: Metrics | None = None,
         tts_drain_timeout: float = 120.0,
         logger: logging.Logger | None = None,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         if min(event_queue_size, audio_queue_size, asr_queue_size, outbound_queue_size) < 1:
             raise ValueError("session queue sizes must be at least 1")
@@ -253,10 +274,12 @@ class SessionRuntime:
         self.audio_queue = audio_queue or BoundedByteQueue.audio(
             maxsize=audio_queue_size,
             max_bytes=audio_max_bytes,
+            metrics=metrics,
         )
         self.outbound = outbound_queue or BoundedByteQueue.outbound(
             maxsize=outbound_queue_size,
             max_bytes=outbound_queue_max_bytes,
+            metrics=metrics,
         )
         self._asr_queue: asyncio.Queue[SpeechSegment] = asyncio.Queue(maxsize=asr_queue_size)
 
@@ -271,6 +294,7 @@ class SessionRuntime:
         self._tts_drain_timeout = tts_drain_timeout
         self._logger = logger or logging.getLogger(__name__)
         self._metrics = metrics
+        self._clock = clock
 
         self._close_requested = asyncio.Event()
         self._long_tasks: dict[str, asyncio.Task[None]] = {}
@@ -278,6 +302,7 @@ class SessionRuntime:
         self._berry_tasks: set[asyncio.Task[None]] = set()
         self._speech_ends: dict[int, float] = {}
         self._turn_speech_ends: dict[int, float] = {}
+        self._llm_milestones: set[int] = set()
         self._tts_tasks: set[asyncio.Task[None]] = set()
         self._tts_interrupt_signals: dict[tuple[int, int], asyncio.Event] = {}
         self._asr_berry_lock = asyncio.Lock()
@@ -307,6 +332,15 @@ class SessionRuntime:
     @property
     def background_task_count(self) -> int:
         return sum(not task.done() for task in self._background_tasks)
+
+    def queue_snapshot(self) -> dict[str, QueueSnapshot]:
+        """Return local queue usage without waiting or mutating runtime state."""
+        return {
+            "event": QueueSnapshot(self.events.qsize()),
+            "audio": QueueSnapshot(self.audio_queue.qsize(), self.audio_queue.queued_bytes),
+            "asr": QueueSnapshot(self._asr_queue.qsize()),
+            "outbound": QueueSnapshot(self.outbound.qsize(), self.outbound.queued_bytes),
+        }
 
     def bind_registry(self, registry: SessionRegistry) -> None:
         """Bind the creating registry so cleanup always releases its admission."""
@@ -364,13 +398,13 @@ class SessionRuntime:
                 self._observe("turn_interrupted", turn_id=effect.message.turn_id, interrupt=True)
                 if self._metrics is not None:
                     self._metrics.record_interruption()
-                    if self._metrics is not None:
-                        self._metrics.record_slow_client_close()
             if not self._closing:
                 try:
                     self.outbound.put_nowait(effect.message)
                 except (asyncio.QueueFull, SessionQueueOverloaded) as error:
                     self.request_close()
+                    if self._metrics is not None:
+                        self._metrics.record_slow_client_close()
                     raise SlowClient(str(error)) from error
             return
         if isinstance(effect, QueueAsr):
@@ -437,18 +471,16 @@ class SessionRuntime:
         while True:
             event = await self.events.get()
             if isinstance(event, SpeechSegmentReady):
-                self._speech_ends[event.segment.segment_id] = monotonic()
+                self._speech_ends.setdefault(
+                    event.segment.segment_id,
+                    event.speech_end_at if event.speech_end_at is not None else self._clock(),
+                )
                 self._observe("vad_segment_ready", segment_id=event.segment.segment_id)
-            if self._metrics is not None:
-                if isinstance(event, AsrFailed):
-                    self._metrics.record_error("asr", event.code)
-                elif isinstance(event, BerryFailed):
-                    self._metrics.record_error("berry", event.code)
             effects = self.actor.handle(event)
             if isinstance(event, AsrSucceeded):
                 speech_end = self._speech_ends.pop(event.segment_id, None)
                 if speech_end is not None and self._metrics is not None:
-                    self._metrics.observe_speech_end_to_asr(monotonic() - speech_end)
+                    self._metrics.observe_speech_end_to_asr(self._clock() - speech_end)
                 if speech_end is not None:
                     for effect in effects:
                         if isinstance(effect, (StartBerry, StartNextBerry)):
@@ -459,7 +491,7 @@ class SessionRuntime:
     async def _asr_loop(self) -> None:
         while True:
             segment = await self._asr_queue.get()
-            started = monotonic()
+            started = self._clock()
             try:
                 async with self._asr_berry_lock:
                     text = await self._asr_client.transcribe(segment.pcm16_16k)
@@ -483,9 +515,11 @@ class SessionRuntime:
                     code="ASR_FAILED",
                     message=_error_message(error, "ASR transcription failed"),
                 )
-            elapsed = monotonic() - started
+            elapsed = self._clock() - started
             if self._metrics is not None:
                 self._metrics.observe_stage_latency("asr", elapsed)
+                if isinstance(event, AsrFailed):
+                    self._metrics.record_error("asr", event.code)
             if isinstance(event, AsrSucceeded):
                 self._observe(
                     "asr_completed", segment_id=segment.segment_id, duration_ms=elapsed * 1000
@@ -528,12 +562,12 @@ class SessionRuntime:
                 )
                 reply_text: str | None = None
                 first_delta = True
-                started = monotonic()
+                started = self._clock()
                 async for item in self._berry_client.stream_reply(request):
                     if isinstance(item, BerryTextDelta):
                         if first_delta:
                             first_delta = False
-                            elapsed = monotonic() - started
+                            elapsed = self._clock() - started
                             self._observe(
                                 "berry_first_delta",
                                 turn_id=effect.turn_id,
@@ -542,9 +576,10 @@ class SessionRuntime:
                             if self._metrics is not None:
                                 self._metrics.observe_stage_latency("berry", elapsed)
                                 speech_end = self._turn_speech_ends.get(effect.turn_id)
-                                if speech_end is not None:
+                                if speech_end is not None and effect.turn_id not in self._llm_milestones:
+                                    self._llm_milestones.add(effect.turn_id)
                                     self._metrics.observe_speech_end_to_first_llm(
-                                        monotonic() - speech_end
+                                        self._clock() - speech_end
                                     )
                         await self._publish_event(
                             BerryDeltaReceived(
@@ -567,6 +602,8 @@ class SessionRuntime:
                     )
                 )
         except AdmissionOverloaded as error:
+            if self._metrics is not None:
+                self._metrics.record_error("berry", "SERVICE_OVERLOADED")
             await self._publish_event(
                 BerryFailed(
                     session_id=self.session_id,
@@ -577,6 +614,8 @@ class SessionRuntime:
                 )
             )
         except Exception as error:  # noqa: BLE001 - background failures become Actor events
+            if self._metrics is not None:
+                self._metrics.record_error("berry", "BERRY_STREAM_FAILED")
             await self._publish_event(
                 BerryFailed(
                     session_id=self.session_id,
@@ -594,7 +633,7 @@ class SessionRuntime:
     ) -> None:
         key = (effect.turn_id, effect.generation)
         first_audio = True
-        started = monotonic()
+        started = self._clock()
         resampler = StreamingResampler(TTS_SAMPLE_RATE, self.sample_rate)
         request = TtsRequest(
             user_input=effect.user_input,
@@ -622,7 +661,7 @@ class SessionRuntime:
                             if output:
                                 if first_audio:
                                     first_audio = False
-                                    elapsed = monotonic() - started
+                                    elapsed = self._clock() - started
                                     self._observe(
                                         "tts_first_audio",
                                         turn_id=effect.turn_id,
@@ -635,7 +674,7 @@ class SessionRuntime:
                                         )
                                         if speech_end is not None:
                                             self._metrics.observe_speech_end_to_first_tts(
-                                                monotonic() - speech_end
+                                                self._clock() - speech_end
                                             )
                                 await self._publish_event(
                                     TtsChunkReceived(
@@ -660,6 +699,8 @@ class SessionRuntime:
                 )
             )
         except AdmissionOverloaded as error:
+            if self._metrics is not None:
+                self._metrics.record_error("tts", "SERVICE_OVERLOADED")
             await self._publish_event(
                 TtsFailed(
                     session_id=self.session_id,
@@ -670,6 +711,8 @@ class SessionRuntime:
                 )
             )
         except Exception as error:  # noqa: BLE001 - background failures become Actor events
+            if self._metrics is not None:
+                self._metrics.record_error("tts", "TTS_STREAM_FAILED")
             await self._publish_event(
                 TtsFailed(
                     session_id=self.session_id,

@@ -2,11 +2,13 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
+from prometheus_client import CollectorRegistry
 
 from realtime_voice.audio.vad import SpeechSegment
 from realtime_voice.clients.berry import BerryDone, BerryReplyRequest, BerryTextDelta, DeleteResult
 from realtime_voice.clients.limits import BoundedAdmission
 from realtime_voice.clients.tts import TtsChunk, TtsRequest
+from realtime_voice.observability.metrics import Metrics
 from realtime_voice.protocol.server_messages import TextDelta, TurnState
 from realtime_voice.session.actor import (
     QueueAsr,
@@ -16,13 +18,21 @@ from realtime_voice.session.actor import (
     StartTts,
 )
 from realtime_voice.session.events import (
+    AsrFailed,
     BerryCompleted,
     BerryDeltaReceived,
+    BerryFailed,
     SpeechSegmentReady,
     TtsChunkReceived,
     TtsCompleted,
+    TtsFailed,
 )
-from realtime_voice.session.runtime import BoundedByteQueue, SessionRuntime
+from realtime_voice.session.runtime import (
+    BoundedByteQueue,
+    SessionQueueOverloaded,
+    SessionRuntime,
+    SlowClient,
+)
 from realtime_voice.session.state import SessionState, TurnContext, TurnStage
 from tests.helpers import sine_pcm16, valid_wav
 
@@ -64,6 +74,51 @@ class ReturningReceiver(BlockingWorker):
 class EmptyAsr:
     async def transcribe(self, pcm16_16k: bytes) -> str:
         return ""
+
+
+class ControlledAsr:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def transcribe(self, pcm16_16k: bytes) -> str:
+        self.started.set()
+        await self.release.wait()
+        return "hello"
+
+
+class ControlledBerry:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stream_reply(
+        self, request: BerryReplyRequest
+    ) -> AsyncIterator[BerryTextDelta | BerryDone]:
+        self.started.set()
+        await self.release.wait()
+        yield BerryTextDelta(delta="first")
+        yield BerryTextDelta(delta="second")
+        yield BerryDone(reply_text="reply")
+
+    async def interrupt(self, user_id: str, session_id: str) -> None:
+        return None
+
+    async def delete_session(self, user_id: str, session_id: str) -> DeleteResult:
+        return DeleteResult.DELETED
+
+
+class ControlledTts:
+    def __init__(self, pcm16_24k: bytes) -> None:
+        self.pcm16_24k = pcm16_24k
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stream(self, request: TtsRequest) -> AsyncIterator[TtsChunk]:
+        self.started.set()
+        await self.release.wait()
+        yield TtsChunk(chunk_index=0, pcm16_24k=self.pcm16_24k, finalize=False)
+        yield TtsChunk(chunk_index=1, pcm16_24k=self.pcm16_24k, finalize=True)
 
 
 class SerialAsr:
@@ -294,6 +349,157 @@ async def test_actor_queue_asr_effect_is_consumed_serially_per_session() -> None
     assert asr.max_active == 1
 
 
+async def test_runtime_records_each_real_speech_end_milestone_exactly_once() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    now = [10.0]
+    asr = ControlledAsr()
+    berry = ControlledBerry()
+    tts = ControlledTts(sine_pcm16(sample_rate=24000, seconds=0.02, frequency=440))
+    runtime, workers = make_runtime(
+        asr=asr,
+        berry=berry,
+        tts=tts,
+        metrics=metrics,
+        clock=lambda: now[0],
+    )
+    run_task = asyncio.create_task(runtime.run())
+    await asyncio.gather(*(worker.started.wait() for worker in workers))
+
+    try:
+        await runtime.events.put(
+            SpeechSegmentReady(
+                session_id="s",
+                segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x01\x00"),
+                speech_end_at=10.0,
+            )
+        )
+        await asyncio.wait_for(asr.started.wait(), timeout=1)
+        now[0] = 12.0
+        asr.release.set()
+
+        await asyncio.wait_for(berry.started.wait(), timeout=1)
+        now[0] = 13.0
+        berry.release.set()
+
+        await asyncio.wait_for(tts.started.wait(), timeout=1)
+        now[0] = 14.0
+        tts.release.set()
+
+        async with asyncio.timeout(1):
+            while "realtime_voice_speech_end_to_first_tts_seconds_count 1.0" not in (
+                metrics.render().decode()
+            ):
+                await asyncio.sleep(0)
+    finally:
+        asr.release.set()
+        berry.release.set()
+        tts.release.set()
+        runtime.request_close()
+        await asyncio.wait_for(run_task, timeout=1)
+
+    rendered = metrics.render().decode()
+    assert "realtime_voice_speech_end_to_asr_seconds_count 1.0" in rendered
+    assert "realtime_voice_speech_end_to_asr_seconds_sum 2.0" in rendered
+    assert "realtime_voice_speech_end_to_first_llm_seconds_count 1.0" in rendered
+    assert "realtime_voice_speech_end_to_first_llm_seconds_sum 3.0" in rendered
+    assert "realtime_voice_speech_end_to_first_tts_seconds_count 1.0" in rendered
+    assert "realtime_voice_speech_end_to_first_tts_seconds_sum 4.0" in rendered
+
+
+async def test_real_asr_berry_and_tts_failure_boundaries_record_one_error_each() -> None:
+    class FailingAsr:
+        async def transcribe(self, pcm16_16k: bytes) -> str:
+            raise RuntimeError("asr failed")
+
+    class FailingBerry(ControlledBerry):
+        async def stream_reply(
+            self, request: BerryReplyRequest
+        ) -> AsyncIterator[BerryTextDelta | BerryDone]:
+            raise RuntimeError("berry failed")
+            yield BerryDone(reply_text="unreachable")
+
+    class FailingTts:
+        async def stream(self, request: TtsRequest) -> AsyncIterator[TtsChunk]:
+            raise RuntimeError("tts failed")
+            yield TtsChunk(chunk_index=0, pcm16_24k=b"\x00\x00", finalize=True)
+
+    metrics = Metrics(registry=CollectorRegistry())
+    runtime, _ = make_runtime(
+        asr=FailingAsr(),
+        berry=FailingBerry(),
+        tts=FailingTts(),
+        metrics=metrics,
+    )
+
+    asr_task = asyncio.create_task(runtime._asr_loop())
+    try:
+        await runtime.execute_effect(
+            QueueAsr(
+                session_id="s",
+                segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x00\x00"),
+            )
+        )
+        assert isinstance(await next_event(runtime, AsrFailed), AsrFailed)
+    finally:
+        asr_task.cancel()
+        await asyncio.gather(asr_task, return_exceptions=True)
+
+    await runtime.execute_effect(
+        StartBerry(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+    )
+    assert isinstance(await next_event(runtime, BerryFailed), BerryFailed)
+
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_TTS,
+        tts_generation=1,
+    )
+    await runtime.execute_effect(
+        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply")
+    )
+    assert isinstance(await next_event(runtime, TtsFailed), TtsFailed)
+
+    rendered = metrics.render().decode()
+    assert 'realtime_voice_errors_total{code="ASR_FAILED",stage="asr"} 1.0' in rendered
+    assert (
+        'realtime_voice_errors_total{code="BERRY_STREAM_FAILED",stage="berry"} 1.0'
+        in rendered
+    )
+    assert (
+        'realtime_voice_errors_total{code="TTS_STREAM_FAILED",stage="tts"} 1.0'
+        in rendered
+    )
+
+
+async def test_asr_failure_without_metrics_still_publishes_failure_event() -> None:
+    class FailingAsr:
+        async def transcribe(self, pcm16_16k: bytes) -> str:
+            raise RuntimeError("asr failed")
+
+    runtime, _ = make_runtime(asr=FailingAsr())
+    asr_task = asyncio.create_task(runtime._asr_loop())
+    try:
+        await runtime.execute_effect(
+            QueueAsr(
+                session_id="s",
+                segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x00\x00"),
+            )
+        )
+        failure = await next_event(runtime, AsrFailed)
+    finally:
+        asr_task.cancel()
+        await asyncio.gather(asr_task, return_exceptions=True)
+
+    assert failure == AsrFailed(
+        session_id="s",
+        segment_id=1,
+        code="ASR_FAILED",
+        message="asr failed",
+    )
+
+
 async def test_start_berry_runs_in_background_and_returns_session_events() -> None:
     berry = OrderedBerry()
     berry.release_first.set()
@@ -386,6 +592,56 @@ async def test_audio_queue_rejects_bytes_past_three_seconds() -> None:
     assert await runtime.audio_queue.get() == b"\x00" * maximum
     assert runtime.audio_queue.queued_bytes == 0
     await runtime.audio_queue.put(b"\x00\x00")
+
+
+async def test_audio_queue_records_byte_overload_at_real_runtime_boundary() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    runtime, _ = make_runtime(metrics=metrics)
+    maximum = 3 * runtime.sample_rate * 2
+
+    runtime.audio_queue.put_nowait(b"\x00" * maximum)
+    with pytest.raises(SessionQueueOverloaded):
+        runtime.audio_queue.put_nowait(b"\x00\x00")
+
+    rendered = metrics.render().decode()
+    assert (
+        'realtime_voice_queue_overload_total{limit="bytes",queue="audio"} 1.0'
+        in rendered
+    )
+
+
+async def test_slow_client_close_is_recorded_only_on_real_outbound_overload() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    runtime, _ = make_runtime(metrics=metrics, outbound_queue_size=1)
+    first = TextDelta(
+        type="TEXT_DELTA",
+        user_id="u",
+        session_id="s",
+        turn_id=1,
+        interrupt=False,
+        delta="first",
+    )
+    second = TextDelta(
+        type="TEXT_DELTA",
+        user_id="u",
+        session_id="s",
+        turn_id=1,
+        interrupt=False,
+        delta="second",
+    )
+
+    await runtime.execute_effect(SendOutbound(first))
+    assert "realtime_voice_slow_client_close_total 0.0" in metrics.render().decode()
+
+    with pytest.raises(SlowClient):
+        await runtime.execute_effect(SendOutbound(second))
+
+    rendered = metrics.render().decode()
+    assert "realtime_voice_slow_client_close_total 1.0" in rendered
+    assert (
+        'realtime_voice_queue_overload_total{limit="items",queue="outbound"} 1.0'
+        in rendered
+    )
 
 
 @pytest.mark.parametrize(

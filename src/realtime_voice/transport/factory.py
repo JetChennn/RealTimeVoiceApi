@@ -34,17 +34,19 @@ def configure_services(services: AppServices) -> None:
     settings = services.settings
     services.asr_client = AsrClient(
         httpx.AsyncClient(base_url=str(settings.asr_base_url), trust_env=False),
-        BoundedAdmission("asr", 8, 64),
+        BoundedAdmission("asr", 8, 64, metrics=services.metrics),
     )
     services.berry_client = BerryClient(
         httpx.AsyncClient(base_url=str(settings.berry_base_url), trust_env=False),
-        BoundedAdmission("berry", 8, 64),
+        BoundedAdmission("berry", 8, 64, metrics=services.metrics),
     )
     services.tts_client = TtsClient(
         httpx.AsyncClient(base_url=str(settings.tts_base_url), trust_env=False),
-        BoundedAdmission("tts", 8, 64),
+        BoundedAdmission("tts", 8, 64, metrics=services.metrics),
     )
-    services.detector_offload = BoundedDetectorOffload(settings.cpu_workers)
+    services.detector_offload = BoundedDetectorOffload(
+        settings.cpu_workers, metrics=services.metrics
+    )
     runtime_factory = services.runtime_factory
     if runtime_factory is None:
         runtime_factory = lambda create, websocket: build_runtime(create, websocket, services)
@@ -66,10 +68,12 @@ def build_runtime(
     audio = BoundedByteQueue.audio(
         maxsize=settings.session_audio_queue_size,
         max_bytes=int(create.sample_rate * 2 * settings.session_audio_queue_max_seconds),
+        metrics=services.metrics,
     )
     outbound = BoundedByteQueue.outbound(
         maxsize=settings.session_outbound_queue_size,
         max_bytes=settings.session_outbound_queue_max_bytes,
+        metrics=services.metrics,
     )
     runtime: SessionRuntime
     receiver = WebSocketReceiver(
@@ -84,6 +88,7 @@ def build_runtime(
         detector=SileroDetector(),
         detector_offload=services.detector_offload,
         input_sample_rate=create.sample_rate,
+        metrics=services.metrics,
     )
     runtime = SessionRuntime(
         state=state,
