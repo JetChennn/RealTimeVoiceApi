@@ -95,6 +95,36 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
         self._item_size = item_size
         self._queued_bytes = 0
 
+    @classmethod
+    def audio(
+        cls,
+        *,
+        maxsize: int,
+        max_bytes: int,
+    ) -> BoundedByteQueue[bytes | None]:
+        """Create an audio queue with the runtime's required PCM byte sizing."""
+        return cls(
+            name="audio",
+            maxsize=maxsize,
+            max_bytes=max_bytes,
+            item_size=_audio_item_size,
+        )
+
+    @classmethod
+    def outbound(
+        cls,
+        *,
+        maxsize: int,
+        max_bytes: int,
+    ) -> BoundedByteQueue[ServerMessage]:
+        """Create an outbound queue with the runtime's JSON byte sizing."""
+        return cls(
+            name="outbound",
+            maxsize=maxsize,
+            max_bytes=max_bytes,
+            item_size=_outbound_item_size,
+        )
+
     @property
     def queued_bytes(self) -> int:
         """Return the number of payload bytes currently admitted."""
@@ -193,17 +223,29 @@ class SessionRuntime:
         self.actor = SessionActor(state)
         self.events = event_queue or asyncio.Queue(maxsize=event_queue_size)
         audio_max_bytes = int(state.sample_rate * 2 * audio_queue_max_seconds)
-        self.audio_queue = audio_queue or BoundedByteQueue(
-            name="audio",
+        if audio_queue is not None:
+            _validate_injected_queue(
+                audio_queue,
+                queue_name="audio",
+                maxsize=audio_queue_size,
+                max_bytes=audio_max_bytes,
+                item_size=_audio_item_size,
+            )
+        if outbound_queue is not None:
+            _validate_injected_queue(
+                outbound_queue,
+                queue_name="outbound",
+                maxsize=outbound_queue_size,
+                max_bytes=outbound_queue_max_bytes,
+                item_size=_outbound_item_size,
+            )
+        self.audio_queue = audio_queue or BoundedByteQueue.audio(
             maxsize=audio_queue_size,
             max_bytes=audio_max_bytes,
-            item_size=_audio_item_size,
         )
-        self.outbound = outbound_queue or BoundedByteQueue(
-            name="outbound",
+        self.outbound = outbound_queue or BoundedByteQueue.outbound(
             maxsize=outbound_queue_size,
             max_bytes=outbound_queue_max_bytes,
-            item_size=_outbound_item_size,
         )
         self._asr_queue: asyncio.Queue[SpeechSegment] = asyncio.Queue(maxsize=asr_queue_size)
 
@@ -706,3 +748,17 @@ def _audio_item_size(item: bytes | None) -> int:
 
 def _outbound_item_size(message: ServerMessage) -> int:
     return len(message.model_dump_json(exclude_none=True).encode())
+
+
+def _validate_injected_queue(
+    queue: BoundedByteQueue[object],
+    *,
+    queue_name: str,
+    maxsize: int,
+    max_bytes: int,
+    item_size: Callable[[object], int],
+) -> None:
+    if queue.maxsize > maxsize or queue.max_bytes > max_bytes:
+        raise ValueError(f"injected {queue_name} queue weakens required limits")
+    if queue._item_size is not item_size:
+        raise ValueError(f"injected {queue_name} queue must use required queue sizing")

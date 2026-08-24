@@ -22,7 +22,7 @@ from realtime_voice.session.events import (
     TtsChunkReceived,
     TtsCompleted,
 )
-from realtime_voice.session.runtime import SessionRuntime
+from realtime_voice.session.runtime import BoundedByteQueue, SessionRuntime
 from realtime_voice.session.state import SessionState, TurnContext, TurnStage
 from tests.helpers import sine_pcm16, valid_wav
 
@@ -205,6 +205,7 @@ def make_runtime(
     registry: RecordingRegistry | None = None,
     berry_cleanup_timeout: float = 0.2,
     tts_drain_timeout: float = 0.2,
+    **runtime_options: object,
 ) -> tuple[SessionRuntime, tuple[BlockingWorker, BlockingWorker, BlockingWorker]]:
     resolved_receiver = receiver or BlockingWorker()
     vad = vad_worker or BlockingWorker()
@@ -220,6 +221,7 @@ def make_runtime(
         registry=registry,
         berry_cleanup_timeout=berry_cleanup_timeout,
         tts_drain_timeout=tts_drain_timeout,
+        **runtime_options,
     )
     return runtime, (resolved_receiver, vad, resolved_sender)
 
@@ -384,6 +386,73 @@ async def test_audio_queue_rejects_bytes_past_three_seconds() -> None:
     assert await runtime.audio_queue.get() == b"\x00" * maximum
     assert runtime.audio_queue.queued_bytes == 0
     await runtime.audio_queue.put(b"\x00\x00")
+
+
+@pytest.mark.parametrize(
+    ("argument", "queue", "message"),
+    [
+        (
+            "audio_queue",
+            BoundedByteQueue(
+                name="audio",
+                maxsize=65,
+                max_bytes=16000 * 2 * 3 + 1,
+                item_size=lambda _: 0,
+            ),
+            "weakens required limits",
+        ),
+        (
+            "outbound_queue",
+            BoundedByteQueue(
+                name="outbound",
+                maxsize=257,
+                max_bytes=8 * 1024 * 1024 + 1,
+                item_size=lambda _: 0,
+            ),
+            "weakens required limits",
+        ),
+        (
+            "audio_queue",
+            BoundedByteQueue(
+                name="audio",
+                maxsize=64,
+                max_bytes=16000 * 2 * 3,
+                item_size=lambda _: 0,
+            ),
+            "required queue sizing",
+        ),
+        (
+            "outbound_queue",
+            BoundedByteQueue(
+                name="outbound",
+                maxsize=256,
+                max_bytes=8 * 1024 * 1024,
+                item_size=lambda _: 0,
+            ),
+            "required queue sizing",
+        ),
+    ],
+)
+async def test_runtime_rejects_injected_queue_that_weakens_required_limits(
+    argument: str,
+    queue: BoundedByteQueue[object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        make_runtime(**{argument: queue})
+
+
+async def test_runtime_accepts_stricter_injected_queues_created_by_its_factories() -> None:
+    audio_queue = BoundedByteQueue.audio(maxsize=1, max_bytes=2)
+    outbound_queue = BoundedByteQueue.outbound(maxsize=1, max_bytes=1024)
+
+    runtime, _ = make_runtime(
+        audio_queue=audio_queue,
+        outbound_queue=outbound_queue,
+    )
+
+    assert runtime.audio_queue is audio_queue
+    assert runtime.outbound is outbound_queue
 
 
 async def test_outbound_queue_accepts_the_byte_boundary_and_rejects_overflow() -> None:
