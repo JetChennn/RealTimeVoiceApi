@@ -612,7 +612,7 @@ async def test_berry_effects_remain_fifo_and_interrupt_before_next_request() -> 
     assert [event.turn_id for event in completed] == [1, 2]
 
 
-async def test_asr_waits_for_an_active_berry_stream_in_the_same_session() -> None:
+async def test_asr_can_detect_a_new_turn_while_berry_streams_the_previous_turn() -> None:
     asr = SignallingAsr()
     berry = BlockingBerry()
     runtime, workers = make_runtime(asr=asr, berry=berry)
@@ -631,11 +631,8 @@ async def test_asr_waits_for_an_active_berry_stream_in_the_same_session() -> Non
             )
         )
 
-        await asyncio.sleep(0)
-        assert not asr.started.is_set()
-
-        berry.release.set()
         await asyncio.wait_for(asr.started.wait(), timeout=1)
+        assert not berry.release.is_set()
     finally:
         berry.release.set()
         runtime.request_close()

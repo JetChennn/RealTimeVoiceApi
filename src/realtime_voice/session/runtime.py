@@ -305,7 +305,7 @@ class SessionRuntime:
         self._llm_milestones: set[int] = set()
         self._tts_tasks: set[asyncio.Task[None]] = set()
         self._tts_interrupt_signals: dict[tuple[int, int], asyncio.Event] = {}
-        self._asr_berry_lock = asyncio.Lock()
+        self._berry_lock = asyncio.Lock()
         self._berry_cleanup_safe = True
         self._closing = False
         self._is_running = False
@@ -500,8 +500,7 @@ class SessionRuntime:
             segment = await self._asr_queue.get()
             started = self._clock()
             try:
-                async with self._asr_berry_lock:
-                    text = await self._asr_client.transcribe(segment.pcm16_16k)
+                text = await self._asr_client.transcribe(segment.pcm16_16k)
                 event: SessionEvent = AsrSucceeded(
                     session_id=self.session_id,
                     segment_id=segment.segment_id,
@@ -556,7 +555,7 @@ class SessionRuntime:
 
     async def _run_berry(self, effect: StartBerry | StartNextBerry) -> None:
         try:
-            async with self._asr_berry_lock:
+            async with self._berry_lock:
                 if self._closing:
                     return
                 if isinstance(effect, StartNextBerry) and effect.interrupt_first:
