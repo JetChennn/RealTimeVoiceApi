@@ -11,6 +11,7 @@ from realtime_voice.protocol.client_messages import CreateSession
 from realtime_voice.protocol.decoder import decode_client_message
 from realtime_voice.protocol.errors import ProtocolViolation
 from realtime_voice.protocol.server_messages import ErrorMessage
+from realtime_voice.session.runtime import SlowClient
 
 if TYPE_CHECKING:
     from realtime_voice.main import AppServices
@@ -32,6 +33,12 @@ async def serve_realtime(websocket: WebSocket, services: AppServices) -> None:
         except* ProtocolViolation as errors:
             error = errors.exceptions[0]
             await send_protocol_error(websocket, error)
+            await websocket.close(code=1008)
+        except* SlowClient:
+            await send_protocol_error(
+                websocket,
+                ProtocolViolation("SLOW_CLIENT", "outbound client backlog is full"),
+            )
             await websocket.close(code=1008)
     except ProtocolViolation as error:
         await send_protocol_error(websocket, error)
@@ -66,4 +73,7 @@ async def send_protocol_error(websocket: WebSocket, error: ProtocolViolation) ->
         message=error.message,
         recoverable=False,
     )
-    await websocket.send_text(message.model_dump_json())
+    try:
+        await websocket.send_text(message.model_dump_json())
+    except WebSocketDisconnect:
+        return

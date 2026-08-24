@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -48,7 +49,7 @@ class WebSocketReceiver:
                 chunk = decode_pcm16(message, self._sample_rate)
                 try:
                     self._audio_queue.put_nowait(chunk.pcm16)
-                except SessionQueueOverloaded as error:
+                except (asyncio.QueueFull, SessionQueueOverloaded) as error:
                     raise ProtocolViolation(
                         "CLIENT_AUDIO_BACKPRESSURE", "client audio backlog exceeds three seconds"
                     ) from error
@@ -69,5 +70,8 @@ class WebSocketSender:
         self._outbound = outbound
 
     async def run(self) -> None:
-        while True:
-            await self._websocket.send_text(encode_server_message(await self._outbound.get()))
+        try:
+            while True:
+                await self._websocket.send_text(encode_server_message(await self._outbound.get()))
+        except WebSocketDisconnect:
+            return

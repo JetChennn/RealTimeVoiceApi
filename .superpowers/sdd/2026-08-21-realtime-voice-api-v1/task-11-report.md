@@ -31,3 +31,11 @@
 - Reviewed the full diff: inbound audio uses `BoundedByteQueue` admission, sequence/session mismatches use stable protocol errors, and `CLOSE_SESSION` requests orderly runtime shutdown.
 - The configured Silero package emits six upstream deprecation warnings during real TestClient session tests. Also, this host has `max_user_namespaces=0`, so the required `apply_patch` helper could not update existing files; a narrowly-scoped `patch` fallback was used after capturing the error.
 - Committed as `defca19 feat: expose realtime websocket endpoint`.
+
+## Fix round 1
+
+- RED: count-overflow receiver test failed with `asyncio.QueueFull`; GREEN: passed after stable `CLIENT_AUDIO_BACKPRESSURE` mapping.
+- Outbound byte/count saturation is now deterministic `SLOW_CLIENT`; sender disconnects are absorbed.
+- Verification: focused checks passed; full suite `196 passed`; Ruff and diff check clean.
+- Commit: `27c1ea6 fix: harden websocket backpressure handling`.
+- Remaining concern: non-text normalization and exhaustive 64/256 TestClient saturation are not yet covered.

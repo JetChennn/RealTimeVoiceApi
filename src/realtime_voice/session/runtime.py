@@ -74,6 +74,12 @@ class SessionQueueOverloaded(RuntimeError):
         super().__init__(self.code)
 
 
+
+class SlowClient(RuntimeError):
+    """Raised when the bounded outbound queue cannot admit another message."""
+
+    code = "SLOW_CLIENT"
+
 class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
     """An item-bounded queue that also rejects byte-budget overflow immediately."""
 
@@ -350,7 +356,11 @@ class SessionRuntime:
             if isinstance(effect.message, TurnState):
                 self._signal_tts_interruption(effect.message.turn_id)
             if not self._closing:
-                await self.outbound.put(effect.message)
+                try:
+                    self.outbound.put_nowait(effect.message)
+                except (asyncio.QueueFull, SessionQueueOverloaded) as error:
+                    self.request_close()
+                    raise SlowClient(str(error)) from error
             return
         if isinstance(effect, QueueAsr):
             if not self._closing and effect.session_id == self.session_id:
