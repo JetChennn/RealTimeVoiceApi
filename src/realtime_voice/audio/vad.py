@@ -219,7 +219,12 @@ class VadWorker:
         has_speech = await self._detector_offload.run(partial(self._detector.has_speech, samples))
         segment = self._segmenter.push(remainder, has_speech)
         if segment is not None:
-            await self._event_queue.put(SpeechSegmentReady(self._session_id, segment))
+            await self._event_queue.put(
+                SpeechSegmentReady(
+                    session_id=self._session_id,
+                    segment=segment,
+                )
+            )
 
     async def _process_resampled(self, pcm16_16k: bytes) -> None:
         self._detector_remainder.extend(pcm16_16k)
@@ -230,9 +235,19 @@ class VadWorker:
             has_speech = await self._detector_offload.run(partial(self._detector.has_speech, samples))
             segment = self._segmenter.push(frame, has_speech)
             if segment is not None:
-                await self._event_queue.put(SpeechSegmentReady(self._session_id, segment))
+                await self._event_queue.put(
+                    SpeechSegmentReady(
+                        session_id=self._session_id,
+                        segment=segment,
+                    )
+                )
             await self._publish_ready_segments()
 
     async def _publish_ready_segments(self) -> None:
         while (segment := self._segmenter.pop_ready()) is not None:
-            await self._event_queue.put(SpeechSegmentReady(self._session_id, segment))
+            await self._event_queue.put(
+                SpeechSegmentReady(
+                    session_id=self._session_id,
+                    segment=segment,
+                )
+            )

@@ -25,23 +25,34 @@ from realtime_voice.session.events import (
     TtsCompleted,
     TtsFailed,
 )
+from realtime_voice.session.registry import (
+    DuplicateSession,
+    SessionCapacityExceeded,
+    SessionRegistry,
+)
+from realtime_voice.session.runtime import BERRY_CLEANUP_SKIPPED, SessionRuntime
 from realtime_voice.session.state import SessionState, TurnContext, TurnStage
 
 __all__ = [
+    "BERRY_CLEANUP_SKIPPED",
     "AsrFailed",
     "AsrSucceeded",
     "BerryCompleted",
     "BerryDeltaReceived",
     "BerryFailed",
     "CloseRuntime",
+    "DuplicateSession",
     "QueueAsr",
     "RecordDiscardedAudio",
     "RecordStaleEvent",
     "SendOutbound",
     "SessionActor",
+    "SessionCapacityExceeded",
     "SessionDisconnected",
     "SessionEffect",
     "SessionEvent",
+    "SessionRegistry",
+    "SessionRuntime",
     "SessionState",
     "SpeechSegmentReady",
     "StartBerry",
