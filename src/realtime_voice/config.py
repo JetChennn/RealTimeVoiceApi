@@ -21,5 +21,7 @@ class Settings(BaseSettings):
     session_audio_queue_size: int = Field(default=64, ge=1)
     session_asr_queue_size: int = Field(default=64, ge=1)
     session_outbound_queue_size: int = Field(default=256, ge=1)
+    session_audio_queue_max_seconds: float = Field(default=3.0, gt=0)
+    session_outbound_queue_max_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
     berry_cleanup_timeout_seconds: float = Field(default=120.0, gt=0)
     tts_drain_timeout_seconds: float = Field(default=120.0, gt=0)

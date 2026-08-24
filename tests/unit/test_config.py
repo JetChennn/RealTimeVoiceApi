@@ -24,6 +24,8 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
     assert settings.session_audio_queue_size == 64
     assert settings.session_asr_queue_size == 64
     assert settings.session_outbound_queue_size == 256
+    assert settings.session_audio_queue_max_seconds == 3.0
+    assert settings.session_outbound_queue_max_bytes == 8 * 1024 * 1024
     assert settings.berry_cleanup_timeout_seconds == 120.0
     assert settings.tts_drain_timeout_seconds == 120.0
 
@@ -36,6 +38,8 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
         "session_audio_queue_size",
         "session_asr_queue_size",
         "session_outbound_queue_size",
+        "session_audio_queue_max_seconds",
+        "session_outbound_queue_max_bytes",
         "berry_cleanup_timeout_seconds",
         "tts_drain_timeout_seconds",
     ],

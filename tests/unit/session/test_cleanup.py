@@ -63,20 +63,25 @@ class OrderedBerry(ImmediateBerry):
     def __init__(
         self,
         calls: list[str],
-        cancelled_asr: asyncio.Event,
+        cancelled_asr: asyncio.Event | None,
         berry_finished: asyncio.Event,
         delete_result: DeleteResult = DeleteResult.DELETED,
+        release: asyncio.Event | None = None,
     ) -> None:
         super().__init__()
         self.calls = calls
         self.cancelled_asr = cancelled_asr
         self.berry_finished = berry_finished
         self.delete_result = delete_result
+        self.release = release
         self.started = asyncio.Event()
 
     async def stream_reply(self, request: BerryReplyRequest) -> AsyncIterator[BerryDone]:
         self.started.set()
-        await self.cancelled_asr.wait()
+        if self.cancelled_asr is not None:
+            await self.cancelled_asr.wait()
+        if self.release is not None:
+            await self.release.wait()
         self.calls.append("wait_berry")
         self.berry_finished.set()
         yield BerryDone(reply_text="reply")
@@ -130,9 +135,10 @@ async def test_disconnect_cleanup_follows_the_required_order() -> None:
     stopped_audio = asyncio.Event()
     cancelled_asr = asyncio.Event()
     berry_finished = asyncio.Event()
+    berry_release = asyncio.Event()
     receiver = OrderedReceiver(calls, stopped_audio)
     asr = OrderedAsr(calls, stopped_audio, cancelled_asr)
-    berry = OrderedBerry(calls, cancelled_asr, berry_finished)
+    berry = OrderedBerry(calls, None, berry_finished, release=berry_release)
     tts = OrderedTts(calls, berry_finished)
     registry = OrderedRegistry(calls)
     runtime, workers = make_runtime(
@@ -146,30 +152,38 @@ async def test_disconnect_cleanup_follows_the_required_order() -> None:
     run_task = asyncio.create_task(runtime.run())
     await asyncio.gather(*(worker.started.wait() for worker in workers))
 
-    await runtime.execute_effect(
-        QueueAsr(
-            session_id="s",
-            segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x00\x00"),
+    try:
+        await runtime.execute_effect(
+            StartBerry(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
         )
-    )
-    await runtime.execute_effect(
-        StartBerry(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
-    )
-    await runtime.execute_effect(
-        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply")
-    )
-    await asyncio.gather(
-        asr.started.wait(),
-        berry.started.wait(),
-        tts.started.wait(),
-    )
+        await asyncio.wait_for(berry.started.wait(), timeout=1)
+        await runtime.execute_effect(
+            QueueAsr(
+                session_id="s",
+                segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x00\x00"),
+            )
+        )
+        await runtime.execute_effect(
+            StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply")
+        )
+        await asyncio.wait_for(tts.started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not asr.started.is_set()
 
-    runtime.request_close()
-    await asyncio.wait_for(run_task, timeout=1)
+        runtime.request_close()
+        async with asyncio.timeout(1):
+            while not runtime._long_tasks["asr"].done():
+                await asyncio.sleep(0)
+        berry_release.set()
+        await asyncio.wait_for(run_task, timeout=1)
+    finally:
+        berry_release.set()
+        if not run_task.done():
+            runtime.request_close()
+            await asyncio.wait_for(run_task, timeout=1)
 
     assert calls == [
         "stop_audio",
-        "cancel_asr",
         "wait_berry",
         "drain_tts",
         "delete_berry_session",

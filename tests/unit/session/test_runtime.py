@@ -7,8 +7,14 @@ from realtime_voice.audio.vad import SpeechSegment
 from realtime_voice.clients.berry import BerryDone, BerryReplyRequest, BerryTextDelta, DeleteResult
 from realtime_voice.clients.limits import BoundedAdmission
 from realtime_voice.clients.tts import TtsChunk, TtsRequest
-from realtime_voice.protocol.server_messages import TurnState
-from realtime_voice.session.actor import SendOutbound, StartBerry, StartNextBerry, StartTts
+from realtime_voice.protocol.server_messages import TextDelta, TurnState
+from realtime_voice.session.actor import (
+    QueueAsr,
+    SendOutbound,
+    StartBerry,
+    StartNextBerry,
+    StartTts,
+)
 from realtime_voice.session.events import (
     BerryCompleted,
     BerryDeltaReceived,
@@ -118,6 +124,27 @@ class OrderedBerry(ImmediateBerry):
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         self.calls.append("interrupt")
+
+
+class BlockingBerry(ImmediateBerry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stream_reply(self, request: BerryReplyRequest) -> AsyncIterator[BerryDone]:
+        self.started.set()
+        await self.release.wait()
+        yield BerryDone(reply_text="reply")
+
+
+class SignallingAsr:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def transcribe(self, pcm16_16k: bytes) -> str:
+        self.started.set()
+        return ""
 
 
 class EmptyTts:
@@ -314,6 +341,84 @@ async def test_berry_effects_remain_fifo_and_interrupt_before_next_request() -> 
     assert [event.turn_id for event in completed] == [1, 2]
 
 
+async def test_asr_waits_for_an_active_berry_stream_in_the_same_session() -> None:
+    asr = SignallingAsr()
+    berry = BlockingBerry()
+    runtime, workers = make_runtime(asr=asr, berry=berry)
+    run_task = asyncio.create_task(runtime.run())
+    await asyncio.gather(*(worker.started.wait() for worker in workers))
+
+    try:
+        await runtime.execute_effect(
+            StartBerry(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+        )
+        await asyncio.wait_for(berry.started.wait(), timeout=1)
+        await runtime.execute_effect(
+            QueueAsr(
+                session_id="s",
+                segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x00\x00"),
+            )
+        )
+
+        await asyncio.sleep(0)
+        assert not asr.started.is_set()
+
+        berry.release.set()
+        await asyncio.wait_for(asr.started.wait(), timeout=1)
+    finally:
+        berry.release.set()
+        runtime.request_close()
+        await asyncio.wait_for(run_task, timeout=1)
+
+
+async def test_audio_queue_rejects_bytes_past_three_seconds() -> None:
+    runtime, _ = make_runtime(sample_rate=16000)
+    maximum = 3 * runtime.sample_rate * 2
+
+    await runtime.audio_queue.put(b"\x00" * maximum)
+    assert runtime.audio_queue.queued_bytes == maximum
+
+    with pytest.raises(RuntimeError, match="AUDIO_QUEUE_BYTES_EXCEEDED"):
+        await runtime.audio_queue.put(b"\x00\x00")
+
+    assert await runtime.audio_queue.get() == b"\x00" * maximum
+    assert runtime.audio_queue.queued_bytes == 0
+    await runtime.audio_queue.put(b"\x00\x00")
+
+
+async def test_outbound_queue_accepts_the_byte_boundary_and_rejects_overflow() -> None:
+    runtime, _ = make_runtime()
+    maximum = 8 * 1024 * 1024
+    one_byte = TextDelta(
+        type="TEXT_DELTA",
+        user_id="u",
+        session_id="s",
+        turn_id=1,
+        interrupt=False,
+        delta="x",
+    )
+    overhead = len(one_byte.model_dump_json().encode()) - 1
+    boundary = TextDelta(
+        type="TEXT_DELTA",
+        user_id="u",
+        session_id="s",
+        turn_id=1,
+        interrupt=False,
+        delta="x" * (maximum - overhead),
+    )
+    assert len(boundary.model_dump_json().encode()) == maximum
+
+    await runtime.execute_effect(SendOutbound(boundary))
+    assert runtime.outbound.queued_bytes == maximum
+
+    with pytest.raises(RuntimeError, match="OUTBOUND_QUEUE_BYTES_EXCEEDED"):
+        await runtime.execute_effect(SendOutbound(one_byte))
+
+    assert await runtime.outbound.get() == boundary
+    assert runtime.outbound.queued_bytes == 0
+    await runtime.execute_effect(SendOutbound(one_byte))
+
+
 async def test_tts_uses_one_flushed_resampler_for_the_turn() -> None:
     source = sine_pcm16(sample_rate=24000, seconds=0.2, frequency=440)
     runtime, _ = make_runtime(tts=ChunkedTts(source), sample_rate=16000)
@@ -430,19 +535,18 @@ async def test_returning_long_lived_worker_requests_orderly_runtime_close(
 
 async def test_injected_queues_connect_receiver_vad_actor_and_sender() -> None:
     events: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
-    audio: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=8)
-    outbound: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
     sent = asyncio.Event()
     received: list[object] = []
+    runtime: SessionRuntime
 
     class Receiver:
         async def run(self) -> None:
-            await audio.put(b"\x01\x00")
+            await runtime.audio_queue.put(b"\x01\x00")
             await asyncio.Event().wait()
 
     class Vad:
         async def run(self) -> None:
-            pcm16 = await audio.get()
+            pcm16 = await runtime.audio_queue.get()
             assert isinstance(pcm16, bytes)
             await events.put(
                 SpeechSegmentReady(
@@ -458,7 +562,7 @@ async def test_injected_queues_connect_receiver_vad_actor_and_sender() -> None:
 
     class Sender:
         async def run(self) -> None:
-            received.append(await outbound.get())
+            received.append(await runtime.outbound.get())
             sent.set()
             await asyncio.Event().wait()
 
@@ -471,8 +575,6 @@ async def test_injected_queues_connect_receiver_vad_actor_and_sender() -> None:
         vad_worker=Vad(),
         sender=Sender(),
         event_queue=events,
-        audio_queue=audio,
-        outbound_queue=outbound,
     )
 
     run_task = asyncio.create_task(runtime.run())

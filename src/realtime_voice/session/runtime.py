@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Coroutine
-from typing import TYPE_CHECKING, Protocol
+from collections.abc import Callable, Coroutine
+from math import isfinite
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from realtime_voice.audio.pcm import pcm16_wav_bytes
 from realtime_voice.audio.resampler import StreamingResampler
@@ -48,6 +49,85 @@ from realtime_voice.session.registry import SessionRegistry
 from realtime_voice.session.state import SessionState
 
 BERRY_CLEANUP_SKIPPED = "BERRY_CLEANUP_SKIPPED"
+DEFAULT_AUDIO_QUEUE_MAX_SECONDS = 3.0
+DEFAULT_OUTBOUND_QUEUE_MAX_BYTES = 8 * 1024 * 1024
+
+QueueItem = TypeVar("QueueItem")
+
+
+class SessionQueueOverloaded(RuntimeError):
+    """Raised when an item would exceed a session queue's byte budget."""
+
+    def __init__(
+        self,
+        queue_name: str,
+        *,
+        item_bytes: int,
+        queued_bytes: int,
+        max_bytes: int,
+    ) -> None:
+        self.code = f"{queue_name.upper()}_QUEUE_BYTES_EXCEEDED"
+        self.queue_name = queue_name
+        self.item_bytes = item_bytes
+        self.queued_bytes = queued_bytes
+        self.max_bytes = max_bytes
+        super().__init__(self.code)
+
+
+class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
+    """An item-bounded queue that also rejects byte-budget overflow immediately."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        maxsize: int,
+        max_bytes: int,
+        item_size: Callable[[QueueItem], int],
+    ) -> None:
+        if maxsize < 1:
+            raise ValueError("queue size must be at least 1")
+        if max_bytes < 1:
+            raise ValueError("queue byte limit must be at least 1")
+        super().__init__(maxsize=maxsize)
+        self.name = name
+        self.max_bytes = max_bytes
+        self._item_size = item_size
+        self._queued_bytes = 0
+
+    @property
+    def queued_bytes(self) -> int:
+        """Return the number of payload bytes currently admitted."""
+        return self._queued_bytes
+
+    def put_nowait(self, item: QueueItem) -> None:
+        self._reject_byte_overflow(item)
+        super().put_nowait(item)
+
+    async def put(self, item: QueueItem) -> None:
+        self._reject_byte_overflow(item)
+        await super().put(item)
+
+    def _put(self, item: QueueItem) -> None:
+        self._queued_bytes += self._item_size(item)
+        super()._put(item)
+
+    def _get(self) -> QueueItem:
+        item = super()._get()
+        self._queued_bytes -= self._item_size(item)
+        return item
+
+    def _reject_byte_overflow(self, item: QueueItem) -> None:
+        item_bytes = self._item_size(item)
+        if item_bytes < 0:
+            raise ValueError("queue item size must not be negative")
+        if self._queued_bytes + item_bytes > self.max_bytes:
+            raise SessionQueueOverloaded(
+                self.name,
+                item_bytes=item_bytes,
+                queued_bytes=self._queued_bytes,
+                max_bytes=self.max_bytes,
+            )
 
 
 class AsyncWorker(Protocol):
@@ -86,25 +166,45 @@ class SessionRuntime:
         audio_queue_size: int = 64,
         asr_queue_size: int = 64,
         outbound_queue_size: int = 256,
+        audio_queue_max_seconds: float = DEFAULT_AUDIO_QUEUE_MAX_SECONDS,
+        outbound_queue_max_bytes: int = DEFAULT_OUTBOUND_QUEUE_MAX_BYTES,
         event_queue: asyncio.Queue[SessionEvent] | None = None,
-        audio_queue: asyncio.Queue[bytes | None] | None = None,
-        outbound_queue: asyncio.Queue[ServerMessage] | None = None,
+        audio_queue: BoundedByteQueue[bytes | None] | None = None,
+        outbound_queue: BoundedByteQueue[ServerMessage] | None = None,
         berry_cleanup_timeout: float = 120.0,
         tts_drain_timeout: float = 120.0,
         logger: logging.Logger | None = None,
     ) -> None:
         if min(event_queue_size, audio_queue_size, asr_queue_size, outbound_queue_size) < 1:
             raise ValueError("session queue sizes must be at least 1")
-        injected_queues = (event_queue, audio_queue, outbound_queue)
-        if any(queue is not None and queue.maxsize < 1 for queue in injected_queues):
-            raise ValueError("injected session queues must be bounded")
+        if event_queue is not None and event_queue.maxsize < 1:
+            raise ValueError("injected event queue must be bounded")
+        if audio_queue is not None and not isinstance(audio_queue, BoundedByteQueue):
+            raise TypeError("injected audio queue must enforce a byte budget")
+        if outbound_queue is not None and not isinstance(outbound_queue, BoundedByteQueue):
+            raise TypeError("injected outbound queue must enforce a byte budget")
+        if not isfinite(audio_queue_max_seconds) or audio_queue_max_seconds <= 0:
+            raise ValueError("audio queue duration must be positive and finite")
+        if outbound_queue_max_bytes < 1:
+            raise ValueError("outbound queue byte limit must be at least 1")
         if berry_cleanup_timeout <= 0 or tts_drain_timeout <= 0:
             raise ValueError("session cleanup timeouts must be positive")
 
         self.actor = SessionActor(state)
         self.events = event_queue or asyncio.Queue(maxsize=event_queue_size)
-        self.audio_queue = audio_queue or asyncio.Queue(maxsize=audio_queue_size)
-        self.outbound = outbound_queue or asyncio.Queue(maxsize=outbound_queue_size)
+        audio_max_bytes = int(state.sample_rate * 2 * audio_queue_max_seconds)
+        self.audio_queue = audio_queue or BoundedByteQueue(
+            name="audio",
+            maxsize=audio_queue_size,
+            max_bytes=audio_max_bytes,
+            item_size=_audio_item_size,
+        )
+        self.outbound = outbound_queue or BoundedByteQueue(
+            name="outbound",
+            maxsize=outbound_queue_size,
+            max_bytes=outbound_queue_max_bytes,
+            item_size=_outbound_item_size,
+        )
         self._asr_queue: asyncio.Queue[SpeechSegment] = asyncio.Queue(maxsize=asr_queue_size)
 
         self._asr_client = asr_client
@@ -124,7 +224,7 @@ class SessionRuntime:
         self._berry_tasks: set[asyncio.Task[None]] = set()
         self._tts_tasks: set[asyncio.Task[None]] = set()
         self._tts_interrupt_signals: dict[tuple[int, int], asyncio.Event] = {}
-        self._berry_lock = asyncio.Lock()
+        self._asr_berry_lock = asyncio.Lock()
         self._berry_cleanup_safe = True
         self._closing = False
         self._is_running = False
@@ -281,7 +381,8 @@ class SessionRuntime:
         while True:
             segment = await self._asr_queue.get()
             try:
-                text = await self._asr_client.transcribe(segment.pcm16_16k)
+                async with self._asr_berry_lock:
+                    text = await self._asr_client.transcribe(segment.pcm16_16k)
                 event: SessionEvent = AsrSucceeded(
                     session_id=self.session_id,
                     segment_id=segment.segment_id,
@@ -327,7 +428,7 @@ class SessionRuntime:
 
     async def _run_berry(self, effect: StartBerry | StartNextBerry) -> None:
         try:
-            async with self._berry_lock:
+            async with self._asr_berry_lock:
                 if self._closing:
                     return
                 if isinstance(effect, StartNextBerry) and effect.interrupt_first:
@@ -597,3 +698,11 @@ async def _cancel_tasks(tasks: set[asyncio.Task[None]]) -> None:
 def _error_message(error: Exception, fallback: str) -> str:
     message = str(error).strip()
     return message or fallback
+
+
+def _audio_item_size(item: bytes | None) -> int:
+    return 0 if item is None else len(item)
+
+
+def _outbound_item_size(message: ServerMessage) -> int:
+    return len(message.model_dump_json(exclude_none=True).encode())
