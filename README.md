@@ -4,7 +4,7 @@ RealTimeVoiceAPI 是一个异步 WebSocket 语音网关，在单个会话中编�
 
 ## 安装与启动
 
-需要 Python 3.11 或更高版本。默认下游地址为 ASR `http://127.0.0.1:8000`、BerryThinker `http://127.0.0.1:8082`、TTS `http://127.0.0.1:8002`。
+需要 Python 3.11 或更高版本。默认下游地址为 ASR `http://127.0.0.1:8000`、BerryThinker `http://127.0.0.1:8082`、TTS `http://127.0.0.1:8001`。
 
 ```bash
 python3.11 -m venv .venv

@@ -15,7 +15,7 @@
 - 默认监听 `0.0.0.0:8003`，WebSocket 路径为 `/v1/realtime`。
 - ASR 默认地址为 `http://127.0.0.1:8000/v1/chat/completions`。
 - BerryThinker 默认地址为 `http://127.0.0.1:8082`。
-- TTS 默认地址为 `http://127.0.0.1:8002/v1/dialogue-tts/stream`。
+- TTS 默认地址为 `http://127.0.0.1:8001/v1/dialogue-tts/stream`。
 - V1 只支持 `PCM16 + BASE64_JSON + mono`，采样率为 16000、24000、48000 Hz。
 - 同一 Session 的 ASR 和 BerryThinker 严格串行；不同 Session 可以并发。
 - VAD 开始说话和 ASR 空文本不得触发打断。
@@ -56,7 +56,7 @@ def test_settings_defaults():
     assert settings.port == 8003
     assert str(settings.asr_base_url).rstrip("/") == "http://127.0.0.1:8000"
     assert str(settings.berry_base_url).rstrip("/") == "http://127.0.0.1:8082"
-    assert str(settings.tts_base_url).rstrip("/") == "http://127.0.0.1:8002"
+    assert str(settings.tts_base_url).rstrip("/") == "http://127.0.0.1:8001"
     assert settings.allowed_sample_rates == (16000, 24000, 48000)
     assert settings.max_sessions == 64
     assert settings.cpu_workers == 4
@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     port: int = Field(default=8003, ge=1, le=65535)
     asr_base_url: AnyHttpUrl = "http://127.0.0.1:8000"
     berry_base_url: AnyHttpUrl = "http://127.0.0.1:8082"
-    tts_base_url: AnyHttpUrl = "http://127.0.0.1:8002"
+    tts_base_url: AnyHttpUrl = "http://127.0.0.1:8001"
     allowed_sample_rates: tuple[int, ...] = (16000, 24000, 48000)
     max_sessions: int = Field(default=64, ge=1)
     cpu_workers: int = Field(default=4, ge=1)
@@ -1354,4 +1354,3 @@ git commit -m "docs: add realtime voice operations tooling"
 - [ ] 检查 `git status --short`，确认只包含预期变更。
 - [ ] 对照规格第 2、6、9、10、11、12、14 节逐项映射到测试。
 - [ ] 如果本地 8000/8082/8002 可用，运行真实冒烟和 30 路压测并保存报告。
-

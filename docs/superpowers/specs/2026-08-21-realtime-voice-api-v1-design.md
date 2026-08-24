@@ -59,7 +59,7 @@ V1 不支持：
 | BerryThinker 回复路径 | `/api/v1/multimodal/reply` |
 | BerryThinker 打断路径 | `/api/v1/interrupt` |
 | BerryThinker Session 清理路径 | `/api/v1/sessions/{user_id}/{session_id}` |
-| TTS 基础地址 | `http://127.0.0.1:8002` |
+| TTS 基础地址 | `http://127.0.0.1:8001` |
 | TTS 路径 | `/v1/dialogue-tts/stream` |
 
 ## 4. 运行架构
