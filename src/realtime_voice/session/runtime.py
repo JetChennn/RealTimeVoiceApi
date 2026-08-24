@@ -74,11 +74,11 @@ class SessionQueueOverloaded(RuntimeError):
         super().__init__(self.code)
 
 
-
 class SlowClient(RuntimeError):
     """Raised when the bounded outbound queue cannot admit another message."""
 
     code = "SLOW_CLIENT"
+
 
 class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
     """An item-bounded queue that also rejects byte-budget overflow immediately."""
