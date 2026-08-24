@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING
 
 import httpx
 from fastapi import WebSocket
@@ -25,27 +25,38 @@ from realtime_voice.session.runtime import BoundedByteQueue, SessionRuntime
 from realtime_voice.session.state import SessionState
 from realtime_voice.transport.workers import WebSocketReceiver, WebSocketSender
 
+if TYPE_CHECKING:
+    from realtime_voice.main import AppServices
 
-def configure_services(services: Any) -> None:
+
+def configure_services(services: AppServices) -> None:
     """Attach shared downstream clients and a registry to application services once."""
     settings = services.settings
     services.asr_client = AsrClient(
-        httpx.AsyncClient(base_url=str(settings.asr_base_url), trust_env=False), BoundedAdmission("asr", 8, 64)
+        httpx.AsyncClient(base_url=str(settings.asr_base_url), trust_env=False),
+        BoundedAdmission("asr", 8, 64),
     )
     services.berry_client = BerryClient(
-        httpx.AsyncClient(base_url=str(settings.berry_base_url), trust_env=False), BoundedAdmission("berry", 8, 64)
+        httpx.AsyncClient(base_url=str(settings.berry_base_url), trust_env=False),
+        BoundedAdmission("berry", 8, 64),
     )
     services.tts_client = TtsClient(
-        httpx.AsyncClient(base_url=str(settings.tts_base_url), trust_env=False), BoundedAdmission("tts", 8, 64)
+        httpx.AsyncClient(base_url=str(settings.tts_base_url), trust_env=False),
+        BoundedAdmission("tts", 8, 64),
     )
     services.detector_offload = BoundedDetectorOffload(settings.cpu_workers)
+    runtime_factory = services.runtime_factory
+    if runtime_factory is None:
+        runtime_factory = lambda create, websocket: build_runtime(create, websocket, services)
     services.registry = SessionRegistry(
         settings.max_sessions,
-        runtime_factory=lambda create, websocket: build_runtime(create, websocket, services),
+        runtime_factory=runtime_factory,
     )
 
 
-def build_runtime(create: CreateSession, websocket: WebSocket, services: Any) -> SessionRuntime:
+def build_runtime(
+    create: CreateSession, websocket: WebSocket, services: AppServices
+) -> SessionRuntime:
     """Create the five runtime-owned workers and their bounded queues for one session."""
     settings = services.settings
     state = SessionState(

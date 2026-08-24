@@ -42,10 +42,14 @@ class WebSocketReceiver:
                     self._request_close()
                     return
                 if not isinstance(message, AudioChunkMessage):
-                    raise ProtocolViolation("INVALID_MESSAGE", "message is not valid after CREATE_SESSION")
+                    raise ProtocolViolation(
+                        "INVALID_MESSAGE", "message is not valid after CREATE_SESSION"
+                    )
                 self._require_session(message.session_id)
                 if message.sequence != self._next_sequence:
-                    raise ProtocolViolation("AUDIO_SEQUENCE_GAP", "audio sequence must strictly increment")
+                    raise ProtocolViolation(
+                        "AUDIO_SEQUENCE_GAP", "audio sequence must strictly increment"
+                    )
                 chunk = decode_pcm16(message, self._sample_rate)
                 try:
                     self._audio_queue.put_nowait(chunk.pcm16)
@@ -55,8 +59,9 @@ class WebSocketReceiver:
                     ) from error
                 self._next_sequence += 1
         except KeyError as error:
-            raise ProtocolViolation("INVALID_MESSAGE", "message must be a JSON text frame") from error
-            self._request_close()
+            raise ProtocolViolation(
+                "INVALID_MESSAGE", "message must be a JSON text frame"
+            ) from error
         except WebSocketDisconnect:
             self._request_close()
 
@@ -73,8 +78,9 @@ class WebSocketSender:
         self._outbound = outbound
 
     async def run(self) -> None:
-        try:
-            while True:
-                await self._websocket.send_text(encode_server_message(await self._outbound.get()))
-        except WebSocketDisconnect:
-            return
+        while True:
+            payload = encode_server_message(await self._outbound.get())
+            try:
+                await self._websocket.send_text(payload)
+            except (WebSocketDisconnect, RuntimeError):
+                return

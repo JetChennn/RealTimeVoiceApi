@@ -26,32 +26,31 @@ async def serve_realtime(websocket: WebSocket, services: AppServices) -> None:
                 websocket.receive_text(), timeout=services.settings.handshake_timeout_seconds
             )
         except KeyError as error:
-            raise ProtocolViolation("INVALID_MESSAGE", "message must be a JSON text frame") from error
+            raise ProtocolViolation(
+                "INVALID_MESSAGE", "message must be a JSON text frame"
+            ) from error
         create = require_create_session(decode_client_message(raw))
         runtime = await services.registry.create(create, websocket)
         from realtime_voice.transport.messages import session_created
+
         await runtime.outbound.put(session_created(create))
         try:
             await runtime.run()
         except* ProtocolViolation as errors:
             error = errors.exceptions[0]
-            await send_protocol_error(websocket, error)
-            await websocket.close(code=1008)
+            await _close_with_protocol_error(websocket, error)
         except* SlowClient:
-            await send_protocol_error(
+            await _close_with_protocol_error(
                 websocket,
                 ProtocolViolation("SLOW_CLIENT", "outbound client backlog is full"),
             )
-            await websocket.close(code=1008)
     except ProtocolViolation as error:
-        await send_protocol_error(websocket, error)
-        await websocket.close(code=1008)
+        await _close_with_protocol_error(websocket, error)
     except TimeoutError:
-        await send_protocol_error(
+        await _close_with_protocol_error(
             websocket,
             ProtocolViolation("HANDSHAKE_TIMEOUT", "CREATE_SESSION was not received in time"),
         )
-        await websocket.close(code=1008)
     except WebSocketDisconnect:
         return
 
@@ -61,6 +60,15 @@ def require_create_session(message: object) -> CreateSession:
     if not isinstance(message, CreateSession):
         raise ProtocolViolation("CREATE_SESSION_REQUIRED", "first message must be CREATE_SESSION")
     return message
+
+
+async def _close_with_protocol_error(websocket: WebSocket, error: ProtocolViolation) -> None:
+    """Best-effort ERROR and policy close for a socket that may already be gone."""
+    await send_protocol_error(websocket, error)
+    try:
+        await websocket.close(code=1008)
+    except (WebSocketDisconnect, RuntimeError):
+        return
 
 
 async def send_protocol_error(websocket: WebSocket, error: ProtocolViolation) -> None:
@@ -76,7 +84,8 @@ async def send_protocol_error(websocket: WebSocket, error: ProtocolViolation) ->
         message=error.message,
         recoverable=False,
     )
+    payload = message.model_dump_json()
     try:
-        await websocket.send_text(message.model_dump_json())
-    except WebSocketDisconnect:
+        await websocket.send_text(payload)
+    except (WebSocketDisconnect, RuntimeError):
         return
