@@ -276,6 +276,8 @@ class SessionRuntime:
         self._long_tasks: dict[str, asyncio.Task[None]] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._berry_tasks: set[asyncio.Task[None]] = set()
+        self._speech_ends: dict[int, float] = {}
+        self._turn_speech_ends: dict[int, float] = {}
         self._tts_tasks: set[asyncio.Task[None]] = set()
         self._tts_interrupt_signals: dict[tuple[int, int], asyncio.Event] = {}
         self._asr_berry_lock = asyncio.Lock()
@@ -362,6 +364,8 @@ class SessionRuntime:
                 self._observe("turn_interrupted", turn_id=effect.message.turn_id, interrupt=True)
                 if self._metrics is not None:
                     self._metrics.record_interruption()
+                    if self._metrics is not None:
+                        self._metrics.record_slow_client_close()
             if not self._closing:
                 try:
                     self.outbound.put_nowait(effect.message)
@@ -433,8 +437,23 @@ class SessionRuntime:
         while True:
             event = await self.events.get()
             if isinstance(event, SpeechSegmentReady):
+                self._speech_ends[event.segment.segment_id] = monotonic()
                 self._observe("vad_segment_ready", segment_id=event.segment.segment_id)
-            for effect in self.actor.handle(event):
+            if self._metrics is not None:
+                if isinstance(event, AsrFailed):
+                    self._metrics.record_error("asr", event.code)
+                elif isinstance(event, BerryFailed):
+                    self._metrics.record_error("berry", event.code)
+            effects = self.actor.handle(event)
+            if isinstance(event, AsrSucceeded):
+                speech_end = self._speech_ends.pop(event.segment_id, None)
+                if speech_end is not None and self._metrics is not None:
+                    self._metrics.observe_speech_end_to_asr(monotonic() - speech_end)
+                if speech_end is not None:
+                    for effect in effects:
+                        if isinstance(effect, (StartBerry, StartNextBerry)):
+                            self._turn_speech_ends[effect.turn_id] = speech_end
+            for effect in effects:
                 await self.execute_effect(effect)
 
     async def _asr_loop(self) -> None:
@@ -522,6 +541,11 @@ class SessionRuntime:
                             )
                             if self._metrics is not None:
                                 self._metrics.observe_stage_latency("berry", elapsed)
+                                speech_end = self._turn_speech_ends.get(effect.turn_id)
+                                if speech_end is not None:
+                                    self._metrics.observe_speech_end_to_first_llm(
+                                        monotonic() - speech_end
+                                    )
                         await self._publish_event(
                             BerryDeltaReceived(
                                 session_id=self.session_id,
@@ -606,6 +630,13 @@ class SessionRuntime:
                                     )
                                     if self._metrics is not None:
                                         self._metrics.observe_stage_latency("tts", elapsed)
+                                        speech_end = self._turn_speech_ends.pop(
+                                            effect.turn_id, None
+                                        )
+                                        if speech_end is not None:
+                                            self._metrics.observe_speech_end_to_first_tts(
+                                                monotonic() - speech_end
+                                            )
                                 await self._publish_event(
                                     TtsChunkReceived(
                                         session_id=self.session_id,

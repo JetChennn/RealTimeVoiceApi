@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import os
+import threading
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +25,13 @@ class VadConfig:
     threshold: float = 0.5
     min_silence_ms: int = 500
     max_speech_seconds: int = 30
+
+
+@dataclass(frozen=True)
+class DetectorSnapshot:
+    active: int
+    pending: int
+    workers: int
 
 
 @dataclass(frozen=True)
@@ -108,7 +116,11 @@ class StreamingVadSegmenter:
 class SileroDetector:
     """Silero adapter whose model can be injected for deterministic tests."""
 
-    def __init__(self, model: Callable[[np.ndarray, int], object] | None = None, config: VadConfig | None = None):
+    def __init__(
+        self,
+        model: Callable[[np.ndarray, int], object] | None = None,
+        config: VadConfig | None = None,
+    ):
         self.config = config or VadConfig()
         self._model = model or self._load_local_model()
 
@@ -166,11 +178,34 @@ class BoundedDetectorOffload:
     def __init__(self, max_workers: int = 1):
         if max_workers < 1:
             raise ValueError("max_workers must be at least 1")
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="vad-detector")
+        self._executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="vad-detector"
+        )
+        self._workers = max_workers
+        self._snapshot_lock = threading.Lock()
+        self._active = 0
+        self._pending = 0
 
     async def run(self, call: Callable[[], bool]) -> bool:
+        with self._snapshot_lock:
+            self._pending += 1
+
+        def wrapped() -> bool:
+            with self._snapshot_lock:
+                self._pending -= 1
+                self._active += 1
+            try:
+                return call()
+            finally:
+                with self._snapshot_lock:
+                    self._active -= 1
+
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, call)
+        return await loop.run_in_executor(self._executor, wrapped)
+
+    def snapshot(self) -> DetectorSnapshot:
+        with self._snapshot_lock:
+            return DetectorSnapshot(self._active, self._pending, self._workers)
 
     async def aclose(self) -> None:
         self._executor.shutdown(wait=True, cancel_futures=True)
@@ -232,7 +267,9 @@ class VadWorker:
             frame = bytes(self._detector_remainder[: self._DETECTOR_FRAME_BYTES])
             del self._detector_remainder[: self._DETECTOR_FRAME_BYTES]
             samples = pcm16_bytes_to_float32(frame)
-            has_speech = await self._detector_offload.run(partial(self._detector.has_speech, samples))
+            has_speech = await self._detector_offload.run(
+                partial(self._detector.has_speech, samples)
+            )
             segment = self._segmenter.push(frame, has_speech)
             if segment is not None:
                 await self._event_queue.put(

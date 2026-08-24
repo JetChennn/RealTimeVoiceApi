@@ -48,6 +48,30 @@ class Metrics:
         self.lifecycle_events = Counter(
             "realtime_voice_lifecycle_events", "Lifecycle events", ["event"], registry=r
         )
+        self.event_loop_lag = Histogram(
+            "realtime_voice_event_loop_lag_seconds", "Event-loop scheduling lag", registry=r
+        )
+        self.admission_wait = Histogram(
+            "realtime_voice_admission_wait_seconds", "Admission wait", ["service"], registry=r
+        )
+        self.admission_overload = Counter(
+            "realtime_voice_admission_overload", "Admission overloads", ["service"], registry=r
+        )
+        self.slow_client_closes = Counter(
+            "realtime_voice_slow_client_close", "Slow-client closes", registry=r
+        )
+        self.executor_active = Gauge(
+            "realtime_voice_executor_active", "Active CPU work", registry=r
+        )
+        self.executor_pending = Gauge(
+            "realtime_voice_executor_pending", "Pending CPU work", registry=r
+        )
+        self.process_threads = Gauge(
+            "realtime_voice_process_threads", "Process threads", registry=r
+        )
+        self.process_memory = Gauge(
+            "realtime_voice_process_memory_bytes", "Process memory", registry=r
+        )
 
     def set_active_sessions(self, count: int) -> None:
         self._safe(self.active_sessions.set, count)
@@ -87,6 +111,26 @@ class Metrics:
 
     def record_lifecycle_event(self, event: str) -> None:
         self._safe(self.lifecycle_events.labels(event).inc)
+
+    def record_event_loop_lag(self, seconds: float) -> None:
+        self._safe(self.event_loop_lag.observe, seconds)
+
+    def record_admission_wait(self, service: str, seconds: float) -> None:
+        self._safe(self.admission_wait.labels(service).observe, seconds)
+
+    def record_admission_overload(self, service: str) -> None:
+        self._safe(self.admission_overload.labels(service).inc)
+
+    def record_slow_client_close(self) -> None:
+        self._safe(self.slow_client_closes.inc)
+
+    def set_executor_state(self, *, active: int, pending: int) -> None:
+        self._safe(self.executor_active.set, active)
+        self._safe(self.executor_pending.set, pending)
+
+    def set_process_state(self, *, threads: int, memory_bytes: int) -> None:
+        self._safe(self.process_threads.set, threads)
+        self._safe(self.process_memory.set, memory_bytes)
 
     def render(self) -> bytes:
         return generate_latest(self.registry)
