@@ -5,9 +5,11 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from time import monotonic
 from typing import TypeVar
 
 Result = TypeVar("Result")
+from realtime_voice.observability.metrics import Metrics
 
 
 class AdmissionOverloaded(RuntimeError):
@@ -35,7 +37,10 @@ class _Waiter:
 class BoundedAdmission:
     """Limit concurrent downstream work and bound the jobs allowed to wait."""
 
-    def __init__(self, name: str, concurrency: int, max_waiters: int) -> None:
+    def __init__(
+        self, name: str, concurrency: int, max_waiters: int, *, metrics: Metrics | None = None
+    ) -> None:
+        self._metrics = metrics
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
         if max_waiters < 0:
@@ -76,16 +81,23 @@ class BoundedAdmission:
                 if self._waiting >= self._max_waiters:
                     raise AdmissionOverloaded(self.name)
 
+                    if self._metrics is not None:
+                        self._metrics.record_admission_overload(self.name)
                 waiter = _Waiter(asyncio.get_running_loop().create_future())
                 self._waiters.append(waiter)
                 self._waiting += 1
                 self._condition.notify_all()
 
+            wait_started = monotonic()
         if waiter is None:
             return
+            if self._metrics is not None:
+                self._metrics.record_admission_wait(self.name, monotonic() - wait_started)
 
         try:
             await asyncio.shield(waiter.future)
+            if self._metrics is not None:
+                self._metrics.record_admission_wait(self.name, monotonic() - wait_started)
         except BaseException:
             async with self._condition:
                 if waiter.granted:

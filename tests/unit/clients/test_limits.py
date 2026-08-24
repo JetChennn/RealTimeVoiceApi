@@ -1,8 +1,10 @@
 import asyncio
 
 import pytest
+from prometheus_client import CollectorRegistry
 
 from realtime_voice.clients.limits import AdmissionOverloaded, BoundedAdmission
+from realtime_voice.observability.metrics import Metrics
 
 
 async def test_admission_slot_releases_capacity_after_normal_context_exit() -> None:
@@ -14,6 +16,26 @@ async def test_admission_slot_releases_capacity_after_normal_context_exit() -> N
 
     async with gate.slot():
         assert (await gate.snapshot()).active == 1
+
+
+async def test_admission_records_wait_and_overload_metrics():
+    metrics = Metrics(registry=CollectorRegistry())
+    gate = BoundedAdmission("asr", concurrency=1, max_waiters=1, metrics=metrics)
+    release = asyncio.Event()
+
+    async def occupied() -> None:
+        async with gate.slot():
+            await release.wait()
+
+    first = asyncio.create_task(occupied())
+    await gate.wait_until_active(1)
+    second = asyncio.create_task(gate.run(lambda: asyncio.sleep(0)))
+    await gate.wait_until_waiting(1)
+    with pytest.raises(AdmissionOverloaded):
+        async with gate.slot():
+            pass
+    release.set()
+    await asyncio.gather(first, second)
 
 
 async def test_admission_slot_releases_capacity_after_context_exception() -> None:
