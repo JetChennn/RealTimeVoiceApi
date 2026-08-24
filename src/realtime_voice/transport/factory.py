@@ -93,6 +93,7 @@ def build_runtime(
         receiver=receiver,
         vad_worker=vad,
         sender=sender,
+        metrics=services.metrics,
         event_queue_size=settings.session_event_queue_size,
         audio_queue_size=settings.session_audio_queue_size,
         asr_queue_size=settings.session_asr_queue_size,

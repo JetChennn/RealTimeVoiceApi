@@ -6,10 +6,13 @@ import asyncio
 import logging
 from collections.abc import Callable, Coroutine
 from math import isfinite
+from time import monotonic
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from realtime_voice.audio.pcm import pcm16_wav_bytes
 from realtime_voice.audio.resampler import StreamingResampler
+from realtime_voice.observability.logging import log_event
+from realtime_voice.observability.metrics import Metrics
 
 if TYPE_CHECKING:
     from realtime_voice.audio.vad import SpeechSegment
@@ -41,6 +44,7 @@ from realtime_voice.session.events import (
     BerryDeltaReceived,
     BerryFailed,
     SessionEvent,
+    SpeechSegmentReady,
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
@@ -208,6 +212,7 @@ class SessionRuntime:
         audio_queue: BoundedByteQueue[bytes | None] | None = None,
         outbound_queue: BoundedByteQueue[ServerMessage] | None = None,
         berry_cleanup_timeout: float = 120.0,
+        metrics: Metrics | None = None,
         tts_drain_timeout: float = 120.0,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -265,6 +270,7 @@ class SessionRuntime:
         self._berry_cleanup_timeout = berry_cleanup_timeout
         self._tts_drain_timeout = tts_drain_timeout
         self._logger = logger or logging.getLogger(__name__)
+        self._metrics = metrics
 
         self._close_requested = asyncio.Event()
         self._long_tasks: dict[str, asyncio.Task[None]] = {}
@@ -328,9 +334,7 @@ class SessionRuntime:
                         "vad": group.create_task(
                             self._worker_loop(self._vad_worker), name=f"{self.session_id}:vad"
                         ),
-                        "asr": group.create_task(
-                            self._asr_loop(), name=f"{self.session_id}:asr"
-                        ),
+                        "asr": group.create_task(self._asr_loop(), name=f"{self.session_id}:asr"),
                         "actor": group.create_task(
                             self._actor_loop(), name=f"{self.session_id}:actor"
                         ),
@@ -355,6 +359,9 @@ class SessionRuntime:
         if isinstance(effect, SendOutbound):
             if isinstance(effect.message, TurnState):
                 self._signal_tts_interruption(effect.message.turn_id)
+                self._observe("turn_interrupted", turn_id=effect.message.turn_id, interrupt=True)
+                if self._metrics is not None:
+                    self._metrics.record_interruption()
             if not self._closing:
                 try:
                     self.outbound.put_nowait(effect.message)
@@ -404,15 +411,14 @@ class SessionRuntime:
             )
             return
         if isinstance(effect, RecordDiscardedAudio):
-            self._logger.info(
-                "TTS_AUDIO_DISCARDED",
-                extra={
-                    "session_id": self.session_id,
-                    "turn_id": effect.turn_id,
-                    "generation": effect.generation,
-                    "byte_count": effect.byte_count,
-                },
+            self._observe(
+                "tts_chunk_discarded",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                byte_count=effect.byte_count,
             )
+            if self._metrics is not None:
+                self._metrics.record_discarded_tts_chunk(byte_count=effect.byte_count)
             return
         raise TypeError(f"unsupported session effect: {type(effect).__name__}")
 
@@ -426,12 +432,15 @@ class SessionRuntime:
     async def _actor_loop(self) -> None:
         while True:
             event = await self.events.get()
+            if isinstance(event, SpeechSegmentReady):
+                self._observe("vad_segment_ready", segment_id=event.segment.segment_id)
             for effect in self.actor.handle(event):
                 await self.execute_effect(effect)
 
     async def _asr_loop(self) -> None:
         while True:
             segment = await self._asr_queue.get()
+            started = monotonic()
             try:
                 async with self._asr_berry_lock:
                     text = await self._asr_client.transcribe(segment.pcm16_16k)
@@ -454,6 +463,13 @@ class SessionRuntime:
                     segment_id=segment.segment_id,
                     code="ASR_FAILED",
                     message=_error_message(error, "ASR transcription failed"),
+                )
+            elapsed = monotonic() - started
+            if self._metrics is not None:
+                self._metrics.observe_stage_latency("asr", elapsed)
+            if isinstance(event, AsrSucceeded):
+                self._observe(
+                    "asr_completed", segment_id=segment.segment_id, duration_ms=elapsed * 1000
                 )
             if not self._closing:
                 await self.events.put(event)
@@ -492,8 +508,20 @@ class SessionRuntime:
                     audio_wav=effect.audio_wav,
                 )
                 reply_text: str | None = None
+                first_delta = True
+                started = monotonic()
                 async for item in self._berry_client.stream_reply(request):
                     if isinstance(item, BerryTextDelta):
+                        if first_delta:
+                            first_delta = False
+                            elapsed = monotonic() - started
+                            self._observe(
+                                "berry_first_delta",
+                                turn_id=effect.turn_id,
+                                duration_ms=elapsed * 1000,
+                            )
+                            if self._metrics is not None:
+                                self._metrics.observe_stage_latency("berry", elapsed)
                         await self._publish_event(
                             BerryDeltaReceived(
                                 session_id=self.session_id,
@@ -541,6 +569,8 @@ class SessionRuntime:
         interrupt_signal: asyncio.Event,
     ) -> None:
         key = (effect.turn_id, effect.generation)
+        first_audio = True
+        started = monotonic()
         resampler = StreamingResampler(TTS_SAMPLE_RATE, self.sample_rate)
         request = TtsRequest(
             user_input=effect.user_input,
@@ -566,6 +596,16 @@ class SessionRuntime:
                                 final=chunk.finalize,
                             )
                             if output:
+                                if first_audio:
+                                    first_audio = False
+                                    elapsed = monotonic() - started
+                                    self._observe(
+                                        "tts_first_audio",
+                                        turn_id=effect.turn_id,
+                                        duration_ms=elapsed * 1000,
+                                    )
+                                    if self._metrics is not None:
+                                        self._metrics.observe_stage_latency("tts", elapsed)
                                 await self._publish_event(
                                     TtsChunkReceived(
                                         session_id=self.session_id,
@@ -618,9 +658,7 @@ class SessionRuntime:
         drain_timeout: asyncio.Timeout,
     ) -> None:
         await interrupt_signal.wait()
-        drain_timeout.reschedule(
-            asyncio.get_running_loop().time() + self._tts_drain_timeout
-        )
+        drain_timeout.reschedule(asyncio.get_running_loop().time() + self._tts_drain_timeout)
 
     def _signal_tts_interruption(self, turn_id: int) -> None:
         for (active_turn_id, _), signal in self._tts_interrupt_signals.items():
@@ -631,11 +669,16 @@ class SessionRuntime:
         if self._closing:
             return True
         turn = self.actor.state.turns.get(effect.turn_id)
-        return (
-            turn is None
-            or turn.tts_generation != effect.generation
-            or turn.interrupted
-        )
+        return turn is None or turn.tts_generation != effect.generation or turn.interrupted
+
+    def _observe(self, event: str, **fields: object) -> None:
+        """Emit best-effort lifecycle diagnostics without changing session behavior."""
+        try:
+            log_event(event, user_id=self.user_id, session_id=self.session_id, **fields)
+            if self._metrics is not None:
+                self._metrics.record_lifecycle_event(event)
+        except Exception:  # noqa: BLE001 - observability is best effort
+            return
 
     async def _publish_event(self, event: SessionEvent) -> None:
         if not self._closing:
@@ -679,6 +722,7 @@ class SessionRuntime:
                 if self._registry is not None:
                     await self._registry.remove(self.session_id)
                 self._cleaned = True
+                self._observe("session_cleanup")
 
     async def _stop_audio(self) -> None:
         await self._cancel_named_tasks("receiver", "vad", "sender")
@@ -731,9 +775,7 @@ class SessionRuntime:
             )
 
 
-async def _wait_tasks(
-    tasks: set[asyncio.Task[None]], timeout: float
-) -> set[asyncio.Task[None]]:
+async def _wait_tasks(tasks: set[asyncio.Task[None]], timeout: float) -> set[asyncio.Task[None]]:
     active = {task for task in tasks if not task.done()}
     if not active:
         return set()
