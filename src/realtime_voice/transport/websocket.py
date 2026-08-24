@@ -21,9 +21,12 @@ async def serve_realtime(websocket: WebSocket, services: AppServices) -> None:
     """Accept a realtime socket and require CREATE_SESSION as its first frame."""
     await websocket.accept()
     try:
-        raw = await asyncio.wait_for(
-            websocket.receive_text(), timeout=services.settings.handshake_timeout_seconds
-        )
+        try:
+            raw = await asyncio.wait_for(
+                websocket.receive_text(), timeout=services.settings.handshake_timeout_seconds
+            )
+        except KeyError as error:
+            raise ProtocolViolation("INVALID_MESSAGE", "message must be a JSON text frame") from error
         create = require_create_session(decode_client_message(raw))
         runtime = await services.registry.create(create, websocket)
         from realtime_voice.transport.messages import session_created

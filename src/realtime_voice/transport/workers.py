@@ -54,6 +54,9 @@ class WebSocketReceiver:
                         "CLIENT_AUDIO_BACKPRESSURE", "client audio backlog exceeds three seconds"
                     ) from error
                 self._next_sequence += 1
+        except KeyError as error:
+            raise ProtocolViolation("INVALID_MESSAGE", "message must be a JSON text frame") from error
+            self._request_close()
         except WebSocketDisconnect:
             self._request_close()
 
