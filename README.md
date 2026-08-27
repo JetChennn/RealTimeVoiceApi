@@ -159,11 +159,80 @@ curl http://127.0.0.1:8003/metrics   # Prometheus 指标
 {"type":"ERROR","user_id":"device-01","session_id":"session-100","turn_id":1,"interrupt":false,"stage":"ASR","code":"ASR_TIMEOUT","message":"ASR timed out","recoverable":true}
 ```
 
-### 打断与排序
+### 打断机制
 
-- 一段新的有效语音（ASR 返回非空文本）会打断上一轮未完成的回复。
-- 收到旧 turn 的 `TURN_STATE/INTERRUPTED` 后，客户端应停止播放并丢弃该 turn 后续数据。
-- 每个 turn 的音频按 `sequence` 严格递增，客户端据此判序。
+一段新的有效语音（ASR 返回非空文本）会打断上一轮未完成的回复。服务端先下发旧 turn 的 `TURN_STATE/INTERRUPTED`，再下发新 turn 的 `ASR_RESULT`；客户端收到打断通知后应停止播放并丢弃该 turn 后续数据。每个 turn 的音频按 `sequence` 严格递增，客户端据此判序。
+
+旧 turn 被打断后，其后续消息（如尚未流式完的 `TEXT_DELTA`、`TEXT_END`、`RESPONSE_END`）统一携带 `interrupt=true`；已被打断的 turn 不再下发任何 `AUDIO_DELTA`。
+
+#### 场景一：在 Thinker(LLM) 流式阶段被打断
+
+第 1 段语音已进入 Thinker 流式输出，第 2 段语音到达并打断它。此时旧 LLM **不会被取消**，会继续流式输出剩余文本（`interrupt=true`），但**不进入 TTS**；旧 LLM 结束后服务端内部先调用 Thinker 的 interrupt 接口，再开始新一轮。
+
+```text
+# 建连
+→ {"type":"SESSION_CREATED",...,"turn_id":0,"interrupt":false,...}
+# 第 1 轮开始
+→ {"type":"ASR_RESULT","turn_id":1,"interrupt":false,"text":"今天天气怎么样"}
+# turn1 Thinker 流式输出中…
+→ {"type":"TEXT_DELTA","turn_id":1,"interrupt":false,"delta":"今"}
+→ {"type":"TEXT_DELTA","turn_id":1,"interrupt":false,"delta":"天天气很好，"}
+# ★ 第 2 段语音 ASR 返回非空文本，打断发生 ★
+→ {"type":"TURN_STATE","turn_id":1,"interrupt":true,"state":"INTERRUPTED"}
+→ {"type":"ASR_RESULT","turn_id":2,"interrupt":false,"text":"那明天呢"}
+# turn1 的 LLM 未被取消，继续流式剩余内容（interrupt=true）
+→ {"type":"TEXT_DELTA","turn_id":1,"interrupt":true,"delta":"适合出门。"}
+→ {"type":"TEXT_END","turn_id":1,"interrupt":true,"text":"今天天气很好，适合出门。"}
+→ {"type":"RESPONSE_END","turn_id":1,"interrupt":true,"status":"INTERRUPTED"}
+# turn1 结束后，内部先调 Thinker interrupt，再启动 turn2
+→ {"type":"TEXT_DELTA","turn_id":2,"interrupt":false,"delta":"明天也有好天气。"}
+→ {"type":"TEXT_END","turn_id":2,"interrupt":false,"text":"明天也有好天气。"}
+# turn2 进入 TTS
+→ {"type":"AUDIO_DELTA","turn_id":2,"interrupt":false,"sequence":0,"audio_b64":"…"}
+→ {"type":"AUDIO_DELTA","turn_id":2,"interrupt":false,"sequence":1,"audio_b64":"…"}
+→ {"type":"RESPONSE_END","turn_id":2,"interrupt":false,"status":"COMPLETED"}
+```
+
+要点：turn1 的 LLM 已占用活跃槽位，turn2 必须等 turn1 的 LLM 流结束后才能开始；LLM 阶段打断时服务端会调用 Thinker 的 interrupt 接口。
+
+#### 场景二：在 TTS 合成阶段被打断
+
+第 1 段语音已完成 ASR + Thinker + `TEXT_END`，正在 TTS 合成（`AUDIO_DELTA` 持续下发），第 2 段语音到达并打断它。此时旧 TTS 流**不立即关闭**，而是进入排空宽限：剩余音频在内部消费并丢弃，**不再下发任何 `AUDIO_DELTA`**；新轮因 LLM 槽已空闲而**立即启动**，无需等待旧 TTS。
+
+```text
+# 建连
+→ {"type":"SESSION_CREATED",...,"turn_id":0,"interrupt":false,...}
+# 第 1 轮：ASR + Thinker + 进入 TTS
+→ {"type":"ASR_RESULT","turn_id":1,"interrupt":false,"text":"今天天气怎么样"}
+→ {"type":"TEXT_DELTA","turn_id":1,"interrupt":false,"delta":"今天天气很好，适合出门。"}
+→ {"type":"TEXT_END","turn_id":1,"interrupt":false,"text":"今天天气很好，适合出门。"}
+→ {"type":"AUDIO_DELTA","turn_id":1,"interrupt":false,"sequence":0,"audio_b64":"…"}
+→ {"type":"AUDIO_DELTA","turn_id":1,"interrupt":false,"sequence":1,"audio_b64":"…"}
+# ★ 第 2 段语音 ASR 返回，打断 turn1（正处于 TTS 阶段）★
+→ {"type":"TURN_STATE","turn_id":1,"interrupt":true,"state":"INTERRUPTED"}
+→ {"type":"ASR_RESULT","turn_id":2,"interrupt":false,"text":"那明天呢"}
+# turn1 的 TTS 排空丢弃，不再下发；turn2 立即进入 Thinker
+→ {"type":"TEXT_DELTA","turn_id":2,"interrupt":false,"delta":"明天也有好天气。"}
+→ {"type":"TEXT_END","turn_id":2,"interrupt":false,"text":"明天也有好天气。"}
+# turn2 进入 TTS
+→ {"type":"AUDIO_DELTA","turn_id":2,"interrupt":false,"sequence":0,"audio_b64":"…"}
+→ {"type":"AUDIO_DELTA","turn_id":2,"interrupt":false,"sequence":1,"audio_b64":"…"}
+→ {"type":"RESPONSE_END","turn_id":2,"interrupt":false,"status":"COMPLETED"}
+# turn1 的 TTS 排空结束（到达位置不固定，可能与其他消息交错）
+→ {"type":"RESPONSE_END","turn_id":1,"interrupt":true,"status":"INTERRUPTED"}
+```
+
+要点：TTS 阶段打断时 LLM 早已完成，服务端**不会**调用 Thinker 的 interrupt 接口；旧 turn 的 `RESPONSE_END/INTERRUPTED` 由 TTS 排空结束时触发，实际到达时间取决于旧流何时排空完毕，可能与新轮消息交错。
+
+#### 两种打断场景对比
+
+| 维度 | LLM 阶段打断 | TTS 阶段打断 |
+|------|--------------|--------------|
+| 旧 turn 文本 | 继续流式完（`interrupt=true`） | 早已结束 |
+| 旧 turn 音频 | 不进入 TTS，无音频下发 | TTS 排空丢弃，不再下发 |
+| Thinker interrupt 接口 | 调用 | 不调用（LLM 已完成） |
+| 新 turn 启动 | 等旧 LLM 流结束后接续 | 立即启动 |
+| 旧 turn 结束 | `RESPONSE_END/INTERRUPTED`（紧随旧文本流） | `RESPONSE_END/INTERRUPTED`（位置不固定） |
 
 ## 7. 快速联调
 
