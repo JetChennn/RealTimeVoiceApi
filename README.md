@@ -2,10 +2,36 @@
 
 一个基于 **异步 WebSocket** 的实时语音网关。它把本地的 **VAD**、**ASR**、**Thinker(LLM)** 和 **TTS** 四个环节编排进单一会话，客户端只要连上一个 WebSocket，就能拿到「识别文本 → LLM 流式回复 → 可播放音频」的完整链路。客户端无需感知任何下游服务。
 
-```
-客户端 ──WebSocket──▶  RealTimeVoiceAPI   ──▶ ASR (识别说话内容)
-      ◀── 文本/状态 ├──────────┬─────────┴──▶ Thinker (LLM 回复)
-      ◀── PCM16音频 ┘          └────────────▶ TTS (合成语音)
+```mermaid
+%%{init: {"flowchart": {"curve": "linear", "nodeSpacing": 40, "rankSpacing": 50}, "themeVariables": {"fontSize": "14px"}}}%%
+flowchart LR
+    C["客户端<br/>WebSocket"]
+
+    subgraph G["RealTimeVoiceAPI · 单进程异步网关"]
+        direction LR
+        V["VAD<br/>语音切段"] --> A["ASR<br/>语音转文本"]
+        A --> T["Thinker<br/>LLM 流式回复"]
+        T --> S["TTS<br/>合成音频"]
+    end
+
+    ASR(("ASR 服务<br/>:8000"))
+    TH(("Thinker 服务<br/>:8082"))
+    TT(("TTS 服务<br/>:8001"))
+
+    C -- "上行：Base64 PCM16 音频" --> V
+    S -- "下行①：识别文本 / 流式回复 / 状态" --> C
+    S -- "下行②：PCM16 音频块" --> C
+
+    A -. "语音段" .-> ASR
+    T -. "对话 + 记忆" .-> TH
+    S -. "回复文本" .-> TT
+
+    classDef client fill:#EEF2FF,stroke:#4F46E5,stroke-width:2px,color:#111827;
+    classDef gateway fill:#ECFDF5,stroke:#059669,stroke-width:1.5px,color:#111827;
+    classDef external fill:#F8FAFC,stroke:#64748B,stroke-width:1.5px,color:#111827;
+    class C client;
+    class V,A,T,S gateway;
+    class ASR,TH,TT external;
 ```
 
 ## 目录
