@@ -9,8 +9,8 @@ from tests.integration.fake_services import (
 )
 
 
-def test_disconnect_waits_for_berry_before_delete() -> None:
-    harness = FakeServiceHarness(["first"], block_first_berry=True)
+def test_disconnect_waits_for_thinker_before_delete() -> None:
+    harness = FakeServiceHarness(["first"], block_first_thinker=True)
     with (
         TestClient(harness.app()) as client,
         client.websocket_connect("/v1/realtime") as websocket,
@@ -30,8 +30,8 @@ def test_disconnect_waits_for_berry_before_delete() -> None:
         assert websocket.receive_json()["type"] == "SESSION_CREATED"
         send_audio(websocket, 0)
         receive_until(websocket, "TEXT_DELTA", turn_id=1)
-        assert harness.berry.first_delta.wait(timeout=1)
-        threading.Timer(0.05, harness.berry.release_first.set).start()
+        assert harness.thinker.first_delta.wait(timeout=1)
+        threading.Timer(0.05, harness.thinker.release_first.set).start()
         websocket.close()
-        assert harness.berry.deleted.wait(timeout=1)
-    assert harness.berry.calls.index("done:first") < harness.berry.calls.index("delete")
+        assert harness.thinker.deleted.wait(timeout=1)
+    assert harness.thinker.calls.index("done:first") < harness.thinker.calls.index("delete")

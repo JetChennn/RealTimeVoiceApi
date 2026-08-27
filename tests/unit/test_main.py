@@ -67,7 +67,7 @@ def test_health_never_touches_downstream_network_clients() -> None:
 
     app = create_app(Settings(_env_file=None))
     mark_downstream_ok(app)
-    for name in ("asr", "berry", "tts"):
+    for name in ("asr", "thinker", "tts"):
         getattr(app.state.services, f"{name}_client").http = NetworkSentinel()
 
     with TestClient(app) as client:

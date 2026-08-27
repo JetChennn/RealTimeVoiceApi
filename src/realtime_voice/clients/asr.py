@@ -1,4 +1,4 @@
-"""Asynchronous client for the downstream automatic speech recognizer."""
+"""下游语音识别服务的异步客户端。"""
 
 import base64
 
@@ -9,25 +9,25 @@ from realtime_voice.clients.limits import BoundedAdmission
 
 
 class AsrError(RuntimeError):
-    """Raised when the ASR service cannot provide a usable transcription."""
+    """当 ASR 服务无法返回可用转写结果时抛出。"""
 
 
 def clean_asr_text(content: str) -> str:
-    """Extract a Qwen ASR transcript and normalize empty sentinel values."""
+    """提取 Qwen ASR 转写文本，并将空占位值归一化为空字符串。"""
     _, tag, extracted = content.partition("<asr_text>")
     text = (extracted if tag else content).strip()
     return "" if text.lower() in {"", "none", "null", "undefined"} else text
 
 
 class AsrClient:
-    """Submit PCM16 audio to the injected shared ASR HTTP client."""
+    """通过注入的共享 ASR HTTP 客户端提交 PCM16 音频。"""
 
     def __init__(self, http: httpx.AsyncClient, admission: BoundedAdmission) -> None:
         self.http = http
         self.admission = admission
 
     async def transcribe(self, pcm16_16k: bytes) -> str:
-        """Return the normalized transcript for 16 kHz mono PCM16 audio."""
+        """返回 16 kHz 单声道 PCM16 音频的归一化转写文本。"""
         wav = pcm16_wav_bytes(pcm16_16k, 16000)
         payload = {
             "messages": [
@@ -61,7 +61,7 @@ class AsrClient:
 
 
 def _completion_content(payload: object) -> str:
-    """Validate and extract completion text without leaking shape errors."""
+    """校验并提取补全文本，且不外泄响应结构的细节错误。"""
     if not isinstance(payload, dict):
         raise TypeError("ASR response must be an object")
 

@@ -16,8 +16,8 @@ from realtime_voice.audio.vad import (
     VadWorker,
 )
 from realtime_voice.clients.asr import AsrClient
-from realtime_voice.clients.berry import BerryClient
 from realtime_voice.clients.limits import BoundedAdmission
+from realtime_voice.clients.thinker import ThinkerClient
 from realtime_voice.clients.tts import TtsClient
 from realtime_voice.protocol.client_messages import CreateSession
 from realtime_voice.session.registry import SessionRegistry
@@ -36,13 +36,14 @@ def configure_services(services: AppServices) -> None:
         httpx.AsyncClient(base_url=str(settings.asr_base_url), trust_env=False),
         BoundedAdmission("asr", 8, 64, metrics=services.metrics),
     )
-    services.berry_client = BerryClient(
-        httpx.AsyncClient(base_url=str(settings.berry_base_url), trust_env=False),
-        BoundedAdmission("berry", 8, 64, metrics=services.metrics),
+    services.thinker_client = ThinkerClient(
+        httpx.AsyncClient(base_url=str(settings.thinker_base_url), trust_env=False),
+        BoundedAdmission("thinker", 8, 64, metrics=services.metrics),
     )
     services.tts_client = TtsClient(
         httpx.AsyncClient(base_url=str(settings.tts_base_url), trust_env=False),
         BoundedAdmission("tts", 8, 64, metrics=services.metrics),
+        prompt_override=settings.tts_prompt_override,
     )
     services.detector_offload = BoundedDetectorOffload(
         settings.cpu_workers, metrics=services.metrics
@@ -93,7 +94,7 @@ def build_runtime(
     runtime = SessionRuntime(
         state=state,
         asr_client=services.asr_client,
-        berry_client=services.berry_client,
+        thinker_client=services.thinker_client,
         tts_client=services.tts_client,
         receiver=receiver,
         vad_worker=vad,
@@ -108,7 +109,7 @@ def build_runtime(
         event_queue=events,
         audio_queue=audio,
         outbound_queue=outbound,
-        berry_cleanup_timeout=settings.berry_cleanup_timeout_seconds,
+        thinker_cleanup_timeout=settings.thinker_cleanup_timeout_seconds,
         tts_drain_timeout=settings.tts_drain_timeout_seconds,
     )
     return runtime

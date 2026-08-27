@@ -1,6 +1,6 @@
 from realtime_voice.audio.vad import SpeechSegment
 from realtime_voice.session.actor import SendOutbound, SessionActor, SessionEffect
-from realtime_voice.session.events import AsrSucceeded, BerryCompleted, SpeechSegmentReady
+from realtime_voice.session.events import AsrSucceeded, SpeechSegmentReady, ThinkerCompleted
 from realtime_voice.session.state import SessionState
 from tests.helpers import valid_wav
 
@@ -39,7 +39,7 @@ def actor_with_streaming_turn(segment_id: int = 1) -> SessionActor:
 def actor_with_tts_turn(interrupted: bool = False) -> SessionActor:
     actor = actor_with_streaming_turn()
     actor.handle(
-        BerryCompleted(session_id="s", turn_id=1, generation=1, reply_text="reply")
+        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="reply")
     )
     actor.state.turns[1].interrupted = interrupted
     return actor

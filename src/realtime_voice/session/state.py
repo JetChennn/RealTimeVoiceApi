@@ -26,7 +26,7 @@ class TurnContext:
     audio_wav: bytes | None
     stage: TurnStage = TurnStage.WAITING_LLM
     interrupted: bool = False
-    berry_generation: int = 0
+    thinker_generation: int = 0
     tts_generation: int = 0
     reply_text: str = ""
     next_audio_sequence: int = 0

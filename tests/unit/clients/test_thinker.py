@@ -5,17 +5,17 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 
-from realtime_voice.clients.berry import (
-    BerryCleanupError,
-    BerryClient,
-    BerryDone,
-    BerryInterruptError,
-    BerryReplyRequest,
-    BerryStreamError,
-    BerryTextDelta,
-    DeleteResult,
-)
 from realtime_voice.clients.limits import AdmissionOverloaded, BoundedAdmission
+from realtime_voice.clients.thinker import (
+    DeleteResult,
+    ThinkerCleanupError,
+    ThinkerClient,
+    ThinkerDone,
+    ThinkerInterruptError,
+    ThinkerReplyRequest,
+    ThinkerStreamError,
+    ThinkerTextDelta,
+)
 from tests.helpers import stream_transport, valid_wav
 
 
@@ -34,7 +34,7 @@ class BlockingStream(httpx.AsyncByteStream):
         self.closed = True
 
 
-async def test_berry_streams_existing_multimodal_contract_across_chunk_boundaries() -> None:
+async def test_thinker_streams_existing_multimodal_contract_across_chunk_boundaries() -> None:
     transport, captured = stream_transport(
         [
             b'{"type":"text_del',
@@ -42,13 +42,13 @@ async def test_berry_streams_existing_multimodal_contract_across_chunk_boundarie
             b'text":"\\u4f60\\u597d\\uff0c\\u6211\\u5728\\u3002"}}\n',
         ]
     )
-    admission = BoundedAdmission("berry", concurrency=8, max_waiters=64)
-    request = BerryReplyRequest("device-01", "session-100", "你好", valid_wav())
+    admission = BoundedAdmission("thinker", concurrency=8, max_waiters=64)
+    request = ThinkerReplyRequest("device-01", "session-100", "你好", valid_wav())
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://berry") as http:
-        events = [event async for event in BerryClient(http, admission).stream_reply(request)]
+    async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
+        events = [event async for event in ThinkerClient(http, admission).stream_reply(request)]
 
-    assert events == [BerryTextDelta("你"), BerryDone("你好，我在。")]
+    assert events == [ThinkerTextDelta("你"), ThinkerDone("你好，我在。")]
     sent = captured["request"]
     assert sent.method == "POST"
     assert sent.url.path == "/api/v1/multimodal/reply"
@@ -75,41 +75,41 @@ async def test_berry_streams_existing_multimodal_contract_across_chunk_boundarie
         [b'{"type":"done","output":{}}\n'],
     ],
 )
-async def test_berry_stream_wraps_event_and_ndjson_failures(chunks: list[bytes]) -> None:
+async def test_thinker_stream_wraps_event_and_ndjson_failures(chunks: list[bytes]) -> None:
     transport, _ = stream_transport(chunks)
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
-    request = BerryReplyRequest("u", "s", "text", valid_wav())
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
+    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://berry") as http:
-        with pytest.raises(BerryStreamError):
-            _ = [event async for event in BerryClient(http, admission).stream_reply(request)]
+    async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
+        with pytest.raises(ThinkerStreamError):
+            _ = [event async for event in ThinkerClient(http, admission).stream_reply(request)]
 
 
-async def test_berry_stream_wraps_http_failure() -> None:
+async def test_thinker_stream_wraps_http_failure() -> None:
     transport, _ = stream_transport([b"failure"], status_code=500)
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
-    request = BerryReplyRequest("u", "s", "text", valid_wav())
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
+    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
 
-    async with httpx.AsyncClient(transport=transport, base_url="http://berry") as http:
-        with pytest.raises(BerryStreamError) as error:
-            _ = [event async for event in BerryClient(http, admission).stream_reply(request)]
+    async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
+        with pytest.raises(ThinkerStreamError) as error:
+            _ = [event async for event in ThinkerClient(http, admission).stream_reply(request)]
 
     assert isinstance(error.value.__cause__, httpx.HTTPStatusError)
 
 
-async def test_berry_stream_aclose_releases_response_and_admission_slot() -> None:
+async def test_thinker_stream_aclose_releases_response_and_admission_slot() -> None:
     stream = BlockingStream()
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
-    request = BerryReplyRequest("u", "s", "text", valid_wav())
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
+    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=stream)
 
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://berry"
+        transport=httpx.MockTransport(handler), base_url="http://thinker"
     ) as http:
-        iterator = BerryClient(http, admission).stream_reply(request)
-        assert await anext(iterator) == BerryTextDelta("first")
+        iterator = ThinkerClient(http, admission).stream_reply(request)
+        assert await anext(iterator) == ThinkerTextDelta("first")
         assert (await admission.snapshot()).active == 1
         await iterator.aclose()
 
@@ -117,21 +117,21 @@ async def test_berry_stream_aclose_releases_response_and_admission_slot() -> Non
     assert (await admission.snapshot()).active == 0
 
 
-async def test_berry_stream_cancellation_releases_response_and_admission_slot() -> None:
+async def test_thinker_stream_cancellation_releases_response_and_admission_slot() -> None:
     stream = BlockingStream()
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
-    request = BerryReplyRequest("u", "s", "text", valid_wav())
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
+    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=stream)
 
-    async def consume(client: BerryClient) -> list[object]:
+    async def consume(client: ThinkerClient) -> list[object]:
         return [event async for event in client.stream_reply(request)]
 
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://berry"
+        transport=httpx.MockTransport(handler), base_url="http://thinker"
     ) as http:
-        task = asyncio.create_task(consume(BerryClient(http, admission)))
+        task = asyncio.create_task(consume(ThinkerClient(http, admission)))
         await stream.waiting.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -139,18 +139,18 @@ async def test_berry_stream_cancellation_releases_response_and_admission_slot() 
 
     assert stream.closed is True
     assert (await admission.snapshot()).active == 0
-async def test_berry_interrupt_sends_only_user_and_session_ids() -> None:
+async def test_thinker_interrupt_sends_only_user_and_session_ids() -> None:
     captured: dict[str, httpx.Request] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
         return httpx.Response(200)
 
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://berry"
+        transport=httpx.MockTransport(handler), base_url="http://thinker"
     ) as http:
-        await BerryClient(http, admission).interrupt("device-01", "session-100")
+        await ThinkerClient(http, admission).interrupt("device-01", "session-100")
 
     assert captured["request"].url.path == "/api/v1/interrupt"
     assert json.loads(captured["request"].content) == {
@@ -163,7 +163,7 @@ async def test_berry_interrupt_sends_only_user_and_session_ids() -> None:
     ("status_code", "expected"),
     [(200, DeleteResult.DELETED), (404, DeleteResult.NOT_FOUND)],
 )
-async def test_berry_delete_session_accepts_deleted_or_absent_session(
+async def test_thinker_delete_session_accepts_deleted_or_absent_session(
     status_code: int, expected: DeleteResult
 ) -> None:
     captured: dict[str, httpx.Request] = {}
@@ -172,18 +172,18 @@ async def test_berry_delete_session_accepts_deleted_or_absent_session(
         captured["request"] = request
         return httpx.Response(status_code)
 
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://berry"
+        transport=httpx.MockTransport(handler), base_url="http://thinker"
     ) as http:
-        result = await BerryClient(http, admission).delete_session("user/one", "session/two")
+        result = await ThinkerClient(http, admission).delete_session("user/one", "session/two")
 
     assert result is expected
     assert captured["request"].url.raw_path == b"/api/v1/sessions/user%2Fone/session%2Ftwo"
 
 
 @pytest.mark.parametrize("user_id", ["", ".", ".."])
-async def test_berry_delete_rejects_unsafe_user_path_segments_before_request(
+async def test_thinker_delete_rejects_unsafe_user_path_segments_before_request(
     user_id: str,
 ) -> None:
     captured: list[httpx.Request] = []
@@ -192,18 +192,18 @@ async def test_berry_delete_rejects_unsafe_user_path_segments_before_request(
         captured.append(request)
         return httpx.Response(200)
 
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://berry"
+        transport=httpx.MockTransport(handler), base_url="http://thinker"
     ) as http:
-        with pytest.raises(BerryCleanupError):
-            await BerryClient(http, admission).delete_session(user_id, "session-100")
+        with pytest.raises(ThinkerCleanupError):
+            await ThinkerClient(http, admission).delete_session(user_id, "session-100")
 
     assert captured == []
 
 
 @pytest.mark.parametrize("session_id", ["", ".", ".."])
-async def test_berry_delete_rejects_unsafe_session_path_segments_before_request(
+async def test_thinker_delete_rejects_unsafe_session_path_segments_before_request(
     session_id: str,
 ) -> None:
     captured: list[httpx.Request] = []
@@ -212,38 +212,38 @@ async def test_berry_delete_rejects_unsafe_session_path_segments_before_request(
         captured.append(request)
         return httpx.Response(200)
 
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://berry"
+        transport=httpx.MockTransport(handler), base_url="http://thinker"
     ) as http:
-        with pytest.raises(BerryCleanupError):
-            await BerryClient(http, admission).delete_session("device-01", session_id)
+        with pytest.raises(ThinkerCleanupError):
+            await ThinkerClient(http, admission).delete_session("device-01", session_id)
 
     assert captured == []
 
 
-async def test_berry_delete_keeps_ordinary_identifiers_in_the_fixed_route() -> None:
+async def test_thinker_delete_keeps_ordinary_identifiers_in_the_fixed_route() -> None:
     captured: dict[str, httpx.Request] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["request"] = request
         return httpx.Response(200)
 
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://berry"
+        transport=httpx.MockTransport(handler), base_url="http://thinker"
     ) as http:
-        result = await BerryClient(http, admission).delete_session("device-01", "session-100")
+        result = await ThinkerClient(http, admission).delete_session("device-01", "session-100")
 
     assert result is DeleteResult.DELETED
     assert captured["request"].url.raw_path == b"/api/v1/sessions/device-01/session-100"
 
 
-async def test_berry_control_errors_are_stable_and_interrupt_skips_reply_limiter() -> None:
+async def test_thinker_control_errors_are_stable_and_interrupt_skips_reply_limiter() -> None:
     reply_stream = BlockingStream()
     requests: list[httpx.Request] = []
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
-    request = BerryReplyRequest("u", "s", "text", valid_wav())
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
+    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
 
     def handler(incoming: httpx.Request) -> httpx.Response:
         requests.append(incoming)
@@ -254,16 +254,16 @@ async def test_berry_control_errors_are_stable_and_interrupt_skips_reply_limiter
         return httpx.Response(500)
 
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://berry"
+        transport=httpx.MockTransport(handler), base_url="http://thinker"
     ) as http:
-        client = BerryClient(http, admission)
+        client = ThinkerClient(http, admission)
         iterator = client.stream_reply(request)
-        assert await anext(iterator) == BerryTextDelta("first")
+        assert await anext(iterator) == ThinkerTextDelta("first")
         await client.interrupt("u", "s")
         with pytest.raises(AdmissionOverloaded):
             await anext(client.stream_reply(request))
         await iterator.aclose()
-        with pytest.raises(BerryCleanupError):
+        with pytest.raises(ThinkerCleanupError):
             await client.delete_session("u", "s")
 
     assert [item.url.path for item in requests[:2]] == [
@@ -272,13 +272,13 @@ async def test_berry_control_errors_are_stable_and_interrupt_skips_reply_limiter
     ]
 
 
-async def test_berry_interrupt_wraps_http_errors() -> None:
+async def test_thinker_interrupt_wraps_http_errors() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, request=request)
 
-    admission = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
     async with httpx.AsyncClient(
-        transport=httpx.MockTransport(handler), base_url="http://berry"
+        transport=httpx.MockTransport(handler), base_url="http://thinker"
     ) as http:
-        with pytest.raises(BerryInterruptError):
-            await BerryClient(http, admission).interrupt("u", "s")
+        with pytest.raises(ThinkerInterruptError):
+            await ThinkerClient(http, admission).interrupt("u", "s")

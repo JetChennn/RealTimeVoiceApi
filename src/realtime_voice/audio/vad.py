@@ -1,4 +1,4 @@
-"""Per-session streaming voice activity detection and segmentation."""
+"""每会话流式语音活动检测与分段。"""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ class DetectorOffload(Protocol):
 
 
 class StreamingVadSegmenter:
-    """Stateful PCM16 segmenter; one instance belongs to exactly one session."""
+    """有状态 PCM16 分段器；每个实例从属于且仅从属于一个会话。"""
 
     def __init__(self, config: VadConfig):
         self.config = config
@@ -77,35 +77,36 @@ class StreamingVadSegmenter:
         if len(pcm16_16k) % 2:
             raise ValueError("PCM16 data must contain complete samples")
 
-        previously_ready = self.pop_ready()
+        previously_ready = self.pop_ready()  # 先取回上一轮遗留的就绪分段，避免被本轮新分段覆盖丢失
         remaining = pcm16_16k
-        while remaining:
+        while remaining:  # 一次输入可能跨多个分段边界（达上限即切段），故循环消耗
             if not self.active:
                 if not has_speech:
-                    break
+                    break  # 静默态且无语音则丢弃剩余，等待下一段语音再激活
                 self.active = True
                 self.silence_ms = 0.0
 
             capacity = self._max_samples - self._sample_count()
-            if capacity <= 0:
+            if capacity <= 0:  # 已达最大语音长度，强制切段防止分段无限增长
                 self._ready.append(self._finish())
                 continue
             chunk = remaining[: capacity * 2]
             remaining = remaining[len(chunk) :]
             self._chunks.append(chunk)
             if has_speech:
-                self.silence_ms = 0.0
+                self.silence_ms = 0.0  # 激活态检测到语音则重置静默计时
                 self._trailing_silence_samples = 0
             else:
+                # 累积尾部静默时长与采样数，用于推算语音段结束时刻 speech_end_at
                 self.silence_ms += self._duration_ms(chunk)
                 self._trailing_silence_samples += len(chunk) // 2
 
             reached_silence = self.silence_ms >= self.config.min_silence_ms
             reached_limit = self._sample_count() >= self._max_samples
-            if reached_silence or reached_limit:
+            if reached_silence or reached_limit:  # 满足最小静默或最大长度任一条件即结束当前分段
                 self._ready.append(self._finish())
 
-        return previously_ready or self.pop_ready()
+        return previously_ready or self.pop_ready()  # 合并本轮就绪分段与遗留分段统一返回
 
     @property
     def _max_samples(self) -> int:
@@ -135,7 +136,7 @@ class StreamingVadSegmenter:
 
 
 class SileroDetector:
-    """Silero adapter whose model can be injected for deterministic tests."""
+    """Silero 适配器；模型可注入以支持确定性测试。"""
 
     def __init__(
         self,
@@ -194,7 +195,7 @@ class SileroDetector:
 
 
 class BoundedDetectorOffload:
-    """Runs blocking detector calls in a bounded thread pool."""
+    """在有界线程池中执行阻塞式检测调用。"""
 
     def __init__(self, max_workers: int = 1, *, metrics: Metrics | None = None):
         if max_workers < 1:
@@ -210,13 +211,13 @@ class BoundedDetectorOffload:
 
     async def run(self, call: Callable[[], bool]) -> bool:
         with self._snapshot_lock:
-            self._pending += 1
+            self._pending += 1  # 入队前先记为 pending，用于监控等待中的任务数
             self._write_metrics_locked()
-        job = _DetectorJob()
+        job = _DetectorJob()  # 跟踪 pending/active 状态，防止跨线程重复计数
 
         def wrapped() -> bool:
             with self._snapshot_lock:
-                if job.pending:
+                if job.pending:  # 仅在尚未转 active 时减 pending，避免重复计数
                     self._pending -= 1
                     job.pending = False
                 self._active += 1
@@ -234,6 +235,7 @@ class BoundedDetectorOffload:
         def account_cancelled(future: Future[bool]) -> None:
             if not future.cancelled():
                 return
+            # future 在执行前被取消：回收 pending 计数，避免指标泄漏
             with self._snapshot_lock:
                 if job.pending:
                     self._pending -= 1
@@ -244,6 +246,7 @@ class BoundedDetectorOffload:
         try:
             future = self._executor.submit(wrapped)
         except BaseException:
+            # submit 本身失败：回收 pending 计数，避免指标泄漏
             with self._snapshot_lock:
                 if job.pending:
                     self._pending -= 1
@@ -266,7 +269,7 @@ class BoundedDetectorOffload:
 
 
 class VadWorker:
-    """Consumes one session's PCM chunks and publishes only completed segments."""
+    """消费单个会话的 PCM 数据块，仅发布已完成的分段。"""
 
     _DETECTOR_FRAME_BYTES = 512 * 2
 
@@ -298,7 +301,7 @@ class VadWorker:
         trailing_seconds = (
             segment.trailing_silence_samples / self._segmenter.config.sample_rate
         )
-        return self._clock() - trailing_seconds
+        return self._clock() - trailing_seconds  # 分段刚发出，故语音结束于 trailing_seconds 之前
 
     async def run(self) -> None:
         while (input_pcm16 := await self._audio_queue.get()) is not None:
@@ -309,6 +312,7 @@ class VadWorker:
                 if self._metrics is not None:
                     self._metrics.observe_stage_latency("vad", self._clock() - started)
 
+        # 流结束：冲刷重采样器与检测器残留，并发布最后就绪的分段
         await self._process_resampled(self._resampler.process_pcm16(b"", final=True))
         await self._process_eos_remainder()
         await self._publish_ready_segments()
@@ -318,7 +322,7 @@ class VadWorker:
             return
         remainder = bytes(self._detector_remainder)
         self._detector_remainder.clear()
-        detector_frame = remainder.ljust(self._DETECTOR_FRAME_BYTES, b"\x00")
+        detector_frame = remainder.ljust(self._DETECTOR_FRAME_BYTES, b"\x00")  # 不足一帧则用零样本补齐，满足 Silero 512 采样要求
         samples = pcm16_bytes_to_float32(detector_frame)
         has_speech = await self._detector_offload.run(partial(self._detector.has_speech, samples))
         segment = self._segmenter.push(remainder, has_speech)

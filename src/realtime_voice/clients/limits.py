@@ -1,4 +1,4 @@
-"""Bounded admission control for downstream services."""
+"""下游服务的有界准入控制。"""
 
 from __future__ import annotations
 
@@ -14,9 +14,8 @@ if TYPE_CHECKING:
     from realtime_voice.observability.metrics import Metrics
 
 Result = TypeVar("Result")
-
 class AdmissionOverloaded(RuntimeError):
-    """Raised when a downstream service has no remaining waiting capacity."""
+    """当下游服务已无剩余等待容量时抛出。"""
 
     def __init__(self, service: str) -> None:
         self.service = service
@@ -25,7 +24,7 @@ class AdmissionOverloaded(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class AdmissionSnapshot:
-    """A point-in-time view of admission usage."""
+    """准入使用情况的瞬时快照。"""
 
     active: int
     waiting: int
@@ -38,7 +37,7 @@ class _Waiter:
 
 
 class BoundedAdmission:
-    """Limit concurrent downstream work and bound the jobs allowed to wait."""
+    """限制下游并发量，并约束允许排队等待的任务数。"""
 
     def __init__(
         self, name: str, concurrency: int, max_waiters: int, *, metrics: Metrics | None = None
@@ -59,13 +58,13 @@ class BoundedAdmission:
         self._waiters: deque[_Waiter] = deque()
 
     async def run(self, operation: Callable[[], Awaitable[Result]]) -> Result:
-        """Run an operation after obtaining capacity, or reject it when the queue is full."""
+        """获取容量后执行操作；队列已满时直接拒绝。"""
         async with self.slot():
             return await operation()
 
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:
-        """Reserve one capacity slot until the enclosing async context exits."""
+        """预留一个容量槽，直到外层 async 上下文退出。"""
         await self._acquire()
         try:
             yield
@@ -77,11 +76,11 @@ class BoundedAdmission:
         waiter: _Waiter | None = None
 
         async with self._condition:
-            if self._active < self._concurrency and not self._waiters:
+            if self._active < self._concurrency and not self._waiters:  # 有空闲并发且无排队者时直接获取，避免插队
                 self._active += 1
                 self._condition.notify_all()
             else:
-                if self._waiting >= self._max_waiters:
+                if self._waiting >= self._max_waiters:  # 等待队列已满，快速失败而非无限堆积
                     if self._metrics is not None:
                         self._metrics.record_admission_overload(self.name)
                     raise AdmissionOverloaded(self.name)
@@ -97,12 +96,12 @@ class BoundedAdmission:
             return
 
         try:
-            await asyncio.shield(waiter.future)
+            await asyncio.shield(waiter.future)  # shield 防止取消时丢失唤醒；异常时据 granted 状态决定是否释放
             if self._metrics is not None:
                 self._metrics.record_admission_wait(self.name, monotonic() - wait_started)
         except BaseException:
             async with self._condition:
-                if waiter.granted:
+                if waiter.granted:  # 已被授予容量则必须释放，否则仅从队列移除
                     self._handoff_or_release_locked()
                 else:
                     self._waiters.remove(waiter)
@@ -112,7 +111,7 @@ class BoundedAdmission:
             raise
 
     def _handoff_or_release_locked(self) -> None:
-        if self._waiters:
+        if self._waiters:  # 有排队者时直接移交容量，避免先释放再竞争导致抖动
             waiter = self._waiters.popleft()
             waiter.granted = True
             self._waiting -= 1
@@ -124,16 +123,16 @@ class BoundedAdmission:
         self._condition.notify_all()
 
     async def snapshot(self) -> AdmissionSnapshot:
-        """Return current usage without changing admission state."""
+        """返回当前使用情况，不改变准入状态。"""
         async with self._condition:
             return AdmissionSnapshot(active=self._active, waiting=self._waiting)
 
     async def wait_until_active(self, count: int) -> None:
-        """Wait until at least ``count`` active operations are observable."""
+        """等待直到可观测到至少 ``count`` 个活跃操作。"""
         async with self._condition:
             await self._condition.wait_for(lambda: self._active >= count)
 
     async def wait_until_waiting(self, count: int) -> None:
-        """Wait until at least ``count`` waiting operations are observable."""
+        """等待直到可观测到至少 ``count`` 个等待操作。"""
         async with self._condition:
             await self._condition.wait_for(lambda: self._waiting >= count)

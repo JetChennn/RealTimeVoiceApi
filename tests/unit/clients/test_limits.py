@@ -9,7 +9,7 @@ from realtime_voice.observability.metrics import Metrics
 
 async def test_admission_slot_releases_capacity_after_normal_context_exit() -> None:
     """Leaving a slot context normally must make capacity immediately reusable."""
-    gate = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    gate = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
 
     async with gate.slot():
         assert (await gate.snapshot()).active == 1
@@ -44,7 +44,7 @@ async def test_admission_records_wait_and_overload_metrics():
 
 async def test_admission_slot_releases_capacity_after_context_exception() -> None:
     """An exception in a slot context must not strand its permit."""
-    gate = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    gate = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
 
     with pytest.raises(RuntimeError, match="stream failed"):
         async with gate.slot():
@@ -56,7 +56,7 @@ async def test_admission_slot_releases_capacity_after_context_exception() -> Non
 
 async def test_admission_slot_releases_waiting_capacity_when_cancelled() -> None:
     """Cancelling a waiting slot acquisition must free the bounded waiter position."""
-    gate = BoundedAdmission("berry", concurrency=1, max_waiters=1)
+    gate = BoundedAdmission("thinker", concurrency=1, max_waiters=1)
     release = asyncio.Event()
     slot = gate.slot
 
@@ -115,7 +115,7 @@ async def test_admission_releases_waiter_slot_when_waiting_job_is_cancelled() ->
 
 
 async def test_admission_releases_active_slot_when_job_raises() -> None:
-    gate = BoundedAdmission("berry", concurrency=1, max_waiters=0)
+    gate = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
 
     async def fails() -> None:
         raise RuntimeError("downstream failed")

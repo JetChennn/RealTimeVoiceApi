@@ -3,12 +3,12 @@ from copy import deepcopy
 
 import pytest
 
-from realtime_voice.session.actor import SendOutbound, StartBerry, StartTts
+from realtime_voice.session.actor import SendOutbound, StartThinker, StartTts
 from realtime_voice.session.events import (
     AsrFailed,
-    BerryCompleted,
-    BerryDeltaReceived,
-    BerryFailed,
+    ThinkerCompleted,
+    ThinkerDeltaReceived,
+    ThinkerFailed,
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
@@ -52,7 +52,7 @@ def test_non_empty_asr_allocates_public_turn_independently_from_segment_id() -> 
     assert actor.state.next_turn_id == 2
     assert actor.state.turns[1].asr_text == "你好"
     assert outbound_of_type(effects, "ASR_RESULT").turn_id == 1
-    start = next(effect for effect in effects if isinstance(effect, StartBerry))
+    start = next(effect for effect in effects if isinstance(effect, StartThinker))
     assert (start.turn_id, start.generation, start.text) == (1, 1, "你好")
 
 
@@ -61,13 +61,11 @@ def test_uninterrupted_turn_streams_text_then_audio_and_completes() -> None:
     recognize(actor, 7, "问题")
 
     delta = outbound_of_type(
-        actor.handle(
-            BerryDeltaReceived(session_id="s", turn_id=1, generation=1, delta="答")
-        ),
+        actor.handle(ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="答")),
         "TEXT_DELTA",
     )
     completed = actor.handle(
-        BerryCompleted(session_id="s", turn_id=1, generation=1, reply_text="答案")
+        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="答案")
     )
     text_end = outbound_of_type(completed, "TEXT_END")
     start_tts = next(effect for effect in completed if isinstance(effect, StartTts))
@@ -121,16 +119,16 @@ def test_asr_failure_emits_session_level_recoverable_error_without_turn() -> Non
     assert actor.state.turns == {}
 
 
-def test_berry_failure_ends_turn_failed_and_allows_next_berry() -> None:
+def test_thinker_failure_ends_turn_failed_and_allows_next_thinker() -> None:
     actor = actor_for_test()
     recognize(actor, 1, "one")
 
     effects = actor.handle(
-        BerryFailed(
+        ThinkerFailed(
             session_id="s",
             turn_id=1,
             generation=1,
-            code="BERRY_FAILED",
+            code="THINKER_FAILED",
             message="bad stream",
         )
     )
@@ -162,26 +160,24 @@ def test_tts_failure_ends_turn_failed() -> None:
     assert actor.state.turns[1].stage is TurnStage.FAILED
 
 
-def test_empty_berry_delta_is_ignored_without_mutating_turn() -> None:
+def test_empty_thinker_delta_is_ignored_without_mutating_turn() -> None:
     actor = actor_for_test()
     recognize(actor, 1, "question")
     before = deepcopy(actor.state)
 
-    effects = actor.handle(
-        BerryDeltaReceived(session_id="s", turn_id=1, generation=1, delta="")
-    )
+    effects = actor.handle(ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta=""))
 
     assert effects == []
     assert actor.state == before
 
 
 @pytest.mark.parametrize("reply_text", ["", "   \t"])
-def test_empty_berry_completion_fails_atomically(reply_text: str) -> None:
+def test_empty_thinker_completion_fails_atomically(reply_text: str) -> None:
     actor = actor_for_test()
     recognize(actor, 1, "question")
 
     effects = actor.handle(
-        BerryCompleted(
+        ThinkerCompleted(
             session_id="s",
             turn_id=1,
             generation=1,
@@ -193,7 +189,7 @@ def test_empty_berry_completion_fails_atomically(reply_text: str) -> None:
     ended = outbound_of_type(effects, "RESPONSE_END")
     assert (error.stage, error.code, error.interrupt) == (
         "LLM",
-        "BERRY_EMPTY_REPLY",
+        "THINKER_EMPTY_REPLY",
         False,
     )
     assert (ended.status, ended.interrupt) == ("FAILED", False)
@@ -201,7 +197,6 @@ def test_empty_berry_completion_fails_atomically(reply_text: str) -> None:
     assert actor.state.turns[1].stage is TurnStage.FAILED
     assert actor.state.turns[1].reply_text == ""
     assert not any(
-        isinstance(effect, SendOutbound) and effect.message.type == "TEXT_END"
-        for effect in effects
+        isinstance(effect, SendOutbound) and effect.message.type == "TEXT_END" for effect in effects
     )
     assert not any(isinstance(effect, StartTts) for effect in effects)

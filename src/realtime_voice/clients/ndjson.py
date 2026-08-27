@@ -1,4 +1,4 @@
-"""Incremental newline-delimited JSON parsing."""
+"""增量式换行分隔 JSON 解析。"""
 
 import json
 from collections.abc import AsyncIterable, AsyncIterator
@@ -13,7 +13,7 @@ def _decode_record(record: bytes) -> dict[str, Any]:
 
 
 async def iter_ndjson(chunks: AsyncIterable[bytes]) -> AsyncIterator[dict[str, Any]]:
-    """Yield JSON-object records from arbitrarily split byte chunks."""
+    """从任意分割的字节块中产出 JSON 对象记录。"""
     buffer = bytearray()
 
     async for chunk in chunks:

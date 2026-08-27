@@ -36,6 +36,12 @@ class Metrics:
         self.speech_end_to_first_tts = Histogram(
             "realtime_voice_speech_end_to_first_tts_seconds", "Speech end to TTS", registry=r
         )
+        self.thinker_full = Histogram(
+            "realtime_voice_thinker_full_seconds", "Thinker request start to reply done", registry=r
+        )
+        self.thinker_generate = Histogram(
+            "realtime_voice_thinker_generate_seconds", "Thinker first token to reply done", registry=r
+        )
         self.interruptions = Counter(
             "realtime_voice_turn_interruptions", "Interrupted turns", registry=r
         )
@@ -105,6 +111,12 @@ class Metrics:
 
     def observe_speech_end_to_first_tts(self, seconds: float) -> None:
         self._safe(self.speech_end_to_first_tts.observe, seconds)
+
+    def observe_thinker_full(self, seconds: float) -> None:
+        self._safe(self.thinker_full.observe, seconds)
+
+    def observe_thinker_generate(self, seconds: float) -> None:
+        self._safe(self.thinker_generate.observe, seconds)
 
     def record_interruption(self) -> None:
         self._safe(self.interruptions.inc)

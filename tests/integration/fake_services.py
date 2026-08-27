@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketTestSession
 
 from realtime_voice.audio.vad import SpeechSegment
-from realtime_voice.clients.berry import BerryDone, BerryTextDelta, DeleteResult
+from realtime_voice.clients.thinker import DeleteResult, ThinkerDone, ThinkerTextDelta
 from realtime_voice.clients.tts import TtsChunk
 from realtime_voice.config import Settings
 from realtime_voice.main import create_app
@@ -37,7 +37,7 @@ class FakeAsr:
         return self.texts.popleft() if self.texts else ""
 
 
-class FakeBerry:
+class FakeThinker:
     def __init__(self, *, block_first: bool = False, fail: bool = False) -> None:
         self.block_first = block_first
         self.fail = fail
@@ -50,20 +50,20 @@ class FakeBerry:
     async def stream_reply(self, request):
         self.calls.append(f"start:{request.text}")
         if self.fail:
-            raise RuntimeError("fake Berry failure")
+            raise RuntimeError("fake Thinker failure")
         if self.block_first and request.text == "first":
-            yield BerryTextDelta(delta="first-")
+            yield ThinkerTextDelta(delta="first-")
             self.first_delta.set()
             released = await asyncio.to_thread(self.release_first.wait, 2)
             if not released:
-                raise TimeoutError("fake Berry release timed out")
-            yield BerryTextDelta(delta="late")
+                raise TimeoutError("fake Thinker release timed out")
+            yield ThinkerTextDelta(delta="late")
         else:
-            yield BerryTextDelta(delta=f"reply:{request.text}")
+            yield ThinkerTextDelta(delta=f"reply:{request.text}")
         self.calls.append(f"done:{request.text}")
         if request.text == "first":
             self.first_done.set()
-        yield BerryDone(reply_text=f"reply:{request.text}")
+        yield ThinkerDone(reply_text=f"reply:{request.text}")
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         self.calls.append("interrupt")
@@ -129,12 +129,12 @@ class FakeServiceHarness:
         self,
         texts: list[str],
         *,
-        block_first_berry: bool = False,
+        block_first_thinker: bool = False,
         block_first_tts: bool = False,
         fail_stage: str | None = None,
     ) -> None:
         self.asr = FakeAsr(texts, fail=fail_stage == "asr")
-        self.berry = FakeBerry(block_first=block_first_berry, fail=fail_stage == "berry")
+        self.thinker = FakeThinker(block_first=block_first_thinker, fail=fail_stage == "thinker")
         self.tts = FakeTts(block_first=block_first_tts, fail=fail_stage == "tts")
         self.runtime: SessionRuntime | None = None
 
@@ -153,7 +153,7 @@ class FakeServiceHarness:
         runtime = SessionRuntime(
             state=SessionState(create.device_id, create.session_id, create.sample_rate),
             asr_client=self.asr,
-            berry_client=self.berry,
+            thinker_client=self.thinker,
             tts_client=self.tts,
             receiver=receiver,
             vad_worker=FakeVadWorker(create.session_id, audio, events),
@@ -161,7 +161,7 @@ class FakeServiceHarness:
             event_queue=events,
             audio_queue=audio,
             outbound_queue=outbound,
-            berry_cleanup_timeout=2,
+            thinker_cleanup_timeout=2,
             tts_drain_timeout=2,
         )
         self.runtime = runtime

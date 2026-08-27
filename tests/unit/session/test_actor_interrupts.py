@@ -1,13 +1,13 @@
 from realtime_voice.session.actor import (
     RecordDiscardedAudio,
     SendOutbound,
-    StartBerry,
-    StartNextBerry,
+    StartNextThinker,
+    StartThinker,
     StartTts,
 )
 from realtime_voice.session.events import (
-    BerryCompleted,
-    BerryDeltaReceived,
+    ThinkerCompleted,
+    ThinkerDeltaReceived,
     TtsChunkReceived,
 )
 from realtime_voice.session.state import TurnStage
@@ -27,37 +27,44 @@ def test_new_turn_interrupts_llm_once_but_keeps_old_text_flow() -> None:
     effects = recognize(actor, 2, "等一下")
     repeated = recognize(actor, 3, "再问")
     delta = actor.handle(
-        BerryDeltaReceived(session_id="s", turn_id=1, generation=1, delta="旧文本")
+        ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="旧文本")
     )
 
     assert actor.state.turns[1].interrupted is True
     assert outbound_of_type(effects, "TURN_STATE").turn_id == 1
-    assert [message.turn_id for message in outbound_messages(repeated) if message.type == "TURN_STATE"] == [2]
+    assert [
+        message.turn_id for message in outbound_messages(repeated) if message.type == "TURN_STATE"
+    ] == [2]
     assert outbound_of_type(delta, "TEXT_DELTA").interrupt is True
 
 
-def test_quick_turns_run_berry_fifo_and_interrupted_turns_skip_tts() -> None:
+def test_quick_turns_run_thinker_fifo_and_interrupted_turns_skip_tts() -> None:
     actor = actor_for_test()
     first = recognize(actor, 101, "one")
     second = recognize(actor, 102, "two")
     third = recognize(actor, 103, "three")
 
     first_done = actor.handle(
-        BerryCompleted(session_id="s", turn_id=1, generation=1, reply_text="reply-one")
+        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="reply-one")
     )
     second_done = actor.handle(
-        BerryCompleted(session_id="s", turn_id=2, generation=1, reply_text="reply-two")
+        ThinkerCompleted(session_id="s", turn_id=2, generation=1, reply_text="reply-two")
     )
     third_done = actor.handle(
-        BerryCompleted(session_id="s", turn_id=3, generation=1, reply_text="reply-three")
+        ThinkerCompleted(session_id="s", turn_id=3, generation=1, reply_text="reply-three")
     )
 
-    starts = [effect for effects in (first, second, third) for effect in effects if isinstance(effect, StartBerry)]
+    starts = [
+        effect
+        for effects in (first, second, third)
+        for effect in effects
+        if isinstance(effect, StartThinker)
+    ]
     next_starts = [
         effect
         for effects in (first_done, second_done)
         for effect in effects
-        if isinstance(effect, StartNextBerry)
+        if isinstance(effect, StartNextThinker)
     ]
     assert [effect.turn_id for effect in starts + next_starts] == [1, 2, 3]
     assert [effect.interrupt_first for effect in next_starts] == [True, True]
@@ -92,18 +99,18 @@ def test_new_llm_starts_without_waiting_for_interrupted_tts_to_drain() -> None:
     effects = recognize(actor, 2, "new")
 
     assert actor.state.turns[1].interrupted is True
-    start = next(effect for effect in effects if isinstance(effect, StartBerry))
+    start = next(effect for effect in effects if isinstance(effect, StartThinker))
     assert start.turn_id == 2
     assert actor.state.turns[1].stage is TurnStage.STREAMING_TTS
 
 
-def test_empty_interrupted_berry_completion_fails_and_starts_next_fifo_turn() -> None:
+def test_empty_interrupted_thinker_completion_fails_and_starts_next_fifo_turn() -> None:
     actor = actor_for_test()
     recognize(actor, 1, "one")
     recognize(actor, 2, "two")
 
     effects = actor.handle(
-        BerryCompleted(
+        ThinkerCompleted(
             session_id="s",
             turn_id=1,
             generation=1,
@@ -113,8 +120,8 @@ def test_empty_interrupted_berry_completion_fails_and_starts_next_fifo_turn() ->
 
     error = outbound_of_type(effects, "ERROR")
     ended = outbound_of_type(effects, "RESPONSE_END")
-    next_start = next(effect for effect in effects if isinstance(effect, StartNextBerry))
-    assert (error.code, error.interrupt) == ("BERRY_EMPTY_REPLY", True)
+    next_start = next(effect for effect in effects if isinstance(effect, StartNextThinker))
+    assert (error.code, error.interrupt) == ("THINKER_EMPTY_REPLY", True)
     assert (ended.status, ended.interrupt) == ("FAILED", True)
     assert (next_start.turn_id, next_start.interrupt_first) == (2, True)
     assert actor.state.turns[1].stage is TurnStage.FAILED

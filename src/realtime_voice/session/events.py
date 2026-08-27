@@ -33,7 +33,7 @@ class AsrFailed:
 
 
 @dataclass(frozen=True, slots=True)
-class BerryDeltaReceived:
+class ThinkerDeltaReceived:
     session_id: str
     turn_id: int
     generation: int
@@ -41,7 +41,7 @@ class BerryDeltaReceived:
 
 
 @dataclass(frozen=True, slots=True)
-class BerryCompleted:
+class ThinkerCompleted:
     session_id: str
     turn_id: int
     generation: int
@@ -49,7 +49,7 @@ class BerryCompleted:
 
 
 @dataclass(frozen=True, slots=True)
-class BerryFailed:
+class ThinkerFailed:
     session_id: str
     turn_id: int
     generation: int
@@ -92,9 +92,9 @@ SessionEvent: TypeAlias = (
     SpeechSegmentReady
     | AsrSucceeded
     | AsrFailed
-    | BerryDeltaReceived
-    | BerryCompleted
-    | BerryFailed
+    | ThinkerDeltaReceived
+    | ThinkerCompleted
+    | ThinkerFailed
     | TtsChunkReceived
     | TtsCompleted
     | TtsFailed

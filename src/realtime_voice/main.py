@@ -41,7 +41,7 @@ async def run_event_loop_lag_sampler(
     clock: Callable[[], float] = monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
-    """Continuously observe scheduler delay using injectable local timing primitives."""
+    """持续观测事件循环调度延迟，使用可注入的本地计时原语。"""
     while True:
         deadline = clock() + interval
         await sleep(interval)
@@ -59,6 +59,7 @@ class AppServices:
 
     process_snapshot: Callable[[], ProcessSnapshot] = local_process_snapshot
 
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -75,7 +76,7 @@ def create_app(
         settings=resolved,
         runtime_factory=runtime_factory,
         metrics=metrics or Metrics(),
-        downstream_health={name: {"status": "unknown"} for name in ("asr", "berry", "tts")},
+        downstream_health={name: {"status": "unknown"} for name in ("asr", "thinker", "tts")},
     )
     configure_services(services)
 
@@ -103,7 +104,7 @@ def create_app(
 
     async def limiter_state() -> dict[str, dict[str, object]]:
         snapshots: dict[str, dict[str, object]] = {}
-        for name in ("asr", "berry", "tts"):
+        for name in ("asr", "thinker", "tts"):
             try:
                 snapshot = await getattr(services, f"{name}_client").admission.snapshot()
             except Exception as error:  # noqa: BLE001 - health must remain available
@@ -184,25 +185,25 @@ def create_app(
                 memory_bytes=process_snapshot.memory_bytes,
             )
 
-        snapshots_available = (
+        snapshots_available = (  # 所有子系统快照必须均为 ok，任一不可用则视为降级
             activity["status"] == "ok"
             and executor["status"] == "ok"
             and process["status"] == "ok"
             and all(state["status"] == "ok" for state in limiters.values())
         )
-        downstream_ready = all(
+        downstream_ready = all(  # 下游可能上报 ok 或 healthy，二者均视为可达
             state.get("status") in {"ok", "healthy"}
             for state in services.downstream_health.values()
         )
-        capacity_available = (
+        capacity_available = (  # 严格小于上限以预留一个会话槽位，确保新连接可接入
             active_sessions is not None and active_sessions < resolved.max_sessions
         )
-        executor_available = (
+        executor_available = (  # 执行器需健康且待处理任务低于上限，保留处理余量
             executor["status"] == "ok"
             and isinstance(executor.get("pending"), int)
             and executor["pending"] < resolved.cpu_pending_jobs
         )
-        ready = bool(
+        ready = bool(  # 整体就绪要求四项条件全部满足：快照健康、下游可达、有容量、执行器有余量
             snapshots_available and downstream_ready and capacity_available and executor_available
         )
         return {

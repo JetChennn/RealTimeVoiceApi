@@ -1,4 +1,4 @@
-"""Supervised lifecycle and effect execution for one realtime session."""
+"""单会话的监督生命周期与 Effect 执行器。"""
 
 from __future__ import annotations
 
@@ -17,13 +17,13 @@ from realtime_voice.observability.metrics import Metrics
 
 if TYPE_CHECKING:
     from realtime_voice.audio.vad import SpeechSegment
-from realtime_voice.clients.berry import (
-    BerryClient,
-    BerryDone,
-    BerryReplyRequest,
-    BerryTextDelta,
-)
 from realtime_voice.clients.limits import AdmissionOverloaded
+from realtime_voice.clients.thinker import (
+    ThinkerClient,
+    ThinkerDone,
+    ThinkerReplyRequest,
+    ThinkerTextDelta,
+)
 from realtime_voice.clients.tts import TTS_SAMPLE_RATE, TtsClient, TtsRequest
 from realtime_voice.protocol.server_messages import ServerMessage, TurnState
 from realtime_voice.session.actor import (
@@ -34,18 +34,18 @@ from realtime_voice.session.actor import (
     SendOutbound,
     SessionActor,
     SessionEffect,
-    StartBerry,
-    StartNextBerry,
+    StartNextThinker,
+    StartThinker,
     StartTts,
 )
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
-    BerryCompleted,
-    BerryDeltaReceived,
-    BerryFailed,
     SessionEvent,
     SpeechSegmentReady,
+    ThinkerCompleted,
+    ThinkerDeltaReceived,
+    ThinkerFailed,
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
@@ -53,7 +53,7 @@ from realtime_voice.session.events import (
 from realtime_voice.session.registry import SessionRegistry
 from realtime_voice.session.state import TERMINAL_TURN_STAGES, SessionState
 
-BERRY_CLEANUP_SKIPPED = "BERRY_CLEANUP_SKIPPED"
+THINKER_CLEANUP_SKIPPED = "THINKER_CLEANUP_SKIPPED"
 DEFAULT_AUDIO_QUEUE_MAX_SECONDS = 3.0
 DEFAULT_OUTBOUND_QUEUE_MAX_BYTES = 8 * 1024 * 1024
 
@@ -67,7 +67,7 @@ class QueueSnapshot:
 
 
 class SessionQueueOverloaded(RuntimeError):
-    """Raised when an item would exceed a session queue's byte budget."""
+    """当单个待入队数据会使会话队列字节预算超限时抛出。"""
 
     def __init__(
         self,
@@ -86,13 +86,13 @@ class SessionQueueOverloaded(RuntimeError):
 
 
 class SlowClient(RuntimeError):
-    """Raised when the bounded outbound queue cannot admit another message."""
+    """当有界出站队列无法再接纳新消息时抛出。"""
 
     code = "SLOW_CLIENT"
 
 
 class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
-    """An item-bounded queue that also rejects byte-budget overflow immediately."""
+    """条目数有界的队列，同时立即拒绝超出字节预算的入队。"""
 
     def __init__(
         self,
@@ -122,7 +122,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
         max_bytes: int,
         metrics: Metrics | None = None,
     ) -> BoundedByteQueue[bytes | None]:
-        """Create an audio queue with the runtime's required PCM byte sizing."""
+        """创建音频队列，使用运行时所需的 PCM 字节计量规则。"""
         return cls(
             name="audio",
             maxsize=maxsize,
@@ -139,7 +139,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
         max_bytes: int,
         metrics: Metrics | None = None,
     ) -> BoundedByteQueue[ServerMessage]:
-        """Create an outbound queue with the runtime's JSON byte sizing."""
+        """创建出站队列，使用运行时所需的 JSON 字节计量规则。"""
         return cls(
             name="outbound",
             maxsize=maxsize,
@@ -150,7 +150,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
 
     @property
     def queued_bytes(self) -> int:
-        """Return the number of payload bytes currently admitted."""
+        """返回当前已入队的负载字节数。"""
         return self._queued_bytes
 
     def put_nowait(self, item: QueueItem) -> None:
@@ -191,7 +191,7 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
 
 
 class AsyncWorker(Protocol):
-    """One long-lived worker supervised by the session TaskGroup."""
+    """由会话 TaskGroup 监督的长驻工作协程。"""
 
     async def run(self) -> None: ...
 
@@ -205,18 +205,18 @@ class RegistryProtocol(Protocol):
 
 
 class SessionStop(Exception):
-    """Internal sentinel used to stop all long-lived workers together."""
+    """内部哨兵异常，用于一次性停止所有长驻工作协程。"""
 
 
 class SessionRuntime:
-    """Own all asynchronous work and queues belonging to one session."""
+    """持有单个会话的全部异步任务与队列。"""
 
     def __init__(
         self,
         *,
         state: SessionState,
         asr_client: AsrClientProtocol,
-        berry_client: BerryClient,
+        thinker_client: ThinkerClient,
         tts_client: TtsClient,
         receiver: AsyncWorker,
         vad_worker: AsyncWorker,
@@ -231,7 +231,7 @@ class SessionRuntime:
         event_queue: asyncio.Queue[SessionEvent] | None = None,
         audio_queue: BoundedByteQueue[bytes | None] | None = None,
         outbound_queue: BoundedByteQueue[ServerMessage] | None = None,
-        berry_cleanup_timeout: float = 120.0,
+        thinker_cleanup_timeout: float = 120.0,
         metrics: Metrics | None = None,
         tts_drain_timeout: float = 120.0,
         logger: logging.Logger | None = None,
@@ -249,7 +249,7 @@ class SessionRuntime:
             raise ValueError("audio queue duration must be positive and finite")
         if outbound_queue_max_bytes < 1:
             raise ValueError("outbound queue byte limit must be at least 1")
-        if berry_cleanup_timeout <= 0 or tts_drain_timeout <= 0:
+        if thinker_cleanup_timeout <= 0 or tts_drain_timeout <= 0:
             raise ValueError("session cleanup timeouts must be positive")
 
         self.actor = SessionActor(state)
@@ -284,13 +284,13 @@ class SessionRuntime:
         self._asr_queue: asyncio.Queue[SpeechSegment] = asyncio.Queue(maxsize=asr_queue_size)
 
         self._asr_client = asr_client
-        self._berry_client = berry_client
+        self._thinker_client = thinker_client
         self._tts_client = tts_client
         self._receiver = receiver
         self._vad_worker = vad_worker
         self._sender = sender
         self._registry = registry
-        self._berry_cleanup_timeout = berry_cleanup_timeout
+        self._thinker_cleanup_timeout = thinker_cleanup_timeout
         self._tts_drain_timeout = tts_drain_timeout
         self._logger = logger or logging.getLogger(__name__)
         self._metrics = metrics
@@ -299,14 +299,14 @@ class SessionRuntime:
         self._close_requested = asyncio.Event()
         self._long_tasks: dict[str, asyncio.Task[None]] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
-        self._berry_tasks: set[asyncio.Task[None]] = set()
+        self._thinker_tasks: set[asyncio.Task[None]] = set()
         self._speech_ends: dict[int, float] = {}
         self._turn_speech_ends: dict[int, float] = {}
         self._llm_milestones: set[int] = set()
         self._tts_tasks: set[asyncio.Task[None]] = set()
         self._tts_interrupt_signals: dict[tuple[int, int], asyncio.Event] = {}
-        self._berry_lock = asyncio.Lock()
-        self._berry_cleanup_safe = True
+        self._thinker_lock = asyncio.Lock()
+        self._thinker_cleanup_safe = True
         self._closing = False
         self._is_running = False
         self._cleanup_lock = asyncio.Lock()
@@ -334,7 +334,7 @@ class SessionRuntime:
         return sum(not task.done() for task in self._background_tasks)
 
     def queue_snapshot(self) -> dict[str, QueueSnapshot]:
-        """Return local queue usage without waiting or mutating runtime state."""
+        """返回本地各队列的占用快照，不等待也不修改运行时状态。"""
         return {
             "event": QueueSnapshot(self.events.qsize()),
             "audio": QueueSnapshot(self.audio_queue.qsize(), self.audio_queue.queued_bytes),
@@ -343,17 +343,17 @@ class SessionRuntime:
         }
 
     def bind_registry(self, registry: SessionRegistry) -> None:
-        """Bind the creating registry so cleanup always releases its admission."""
+        """绑定创建该会话的注册表，确保清理时一定释放其准入名额。"""
         if self._registry is not None and self._registry is not registry:
             raise RuntimeError("session runtime is already bound to another registry")
         self._registry = registry
 
     def request_close(self) -> None:
-        """Request orderly cleanup and TaskGroup shutdown."""
+        """请求有序清理并关闭 TaskGroup。"""
         self._close_requested.set()
 
     async def run(self) -> None:
-        """Run Receiver, VAD, ASR, Actor, and Sender in one TaskGroup."""
+        """在单个 TaskGroup 中并行运行 Receiver/VAD/ASR/Actor/Sender 五个长任务。"""
         if self._is_running:
             raise RuntimeError("session runtime is already running")
         if self._cleaned:
@@ -363,6 +363,7 @@ class SessionRuntime:
         try:
             try:
                 async with asyncio.TaskGroup() as group:
+                    # 同一 TaskGroup 中并行启动 5 个长任务，任一异常都会取消整组
                     self._long_tasks = {
                         "receiver": group.create_task(
                             self._receiver_loop(), name=f"{self.session_id}:receiver"
@@ -379,9 +380,11 @@ class SessionRuntime:
                         ),
                     }
                     await self._close_requested.wait()
+                    # 收到关闭请求后先做清理，再用 SessionStop 哨兵统一终止所有长任务
                     await self._finish_cleanup()
                     raise SessionStop
             except* SessionStop:
+                # 哨兵异常仅用于优雅停止，吞掉即可
                 pass
         finally:
             try:
@@ -391,9 +394,10 @@ class SessionRuntime:
                 self._long_tasks.clear()
 
     async def execute_effect(self, effect: SessionEffect) -> None:
-        """Execute one Actor command without allowing workers to mutate Actor state."""
+        """执行 Actor 产出的一条 Effect，避免工作协程直接修改 Actor 状态。"""
         if isinstance(effect, SendOutbound):
             if isinstance(effect.message, TurnState):
+                # TurnState 表示轮次切换，需中断上一轮未完成的 TTS 输出
                 self._signal_tts_interruption(effect.message.turn_id)
                 self._observe("turn_interrupted", turn_id=effect.message.turn_id, interrupt=True)
                 if self._metrics is not None:
@@ -411,13 +415,13 @@ class SessionRuntime:
             if not self._closing and effect.session_id == self.session_id:
                 await self._asr_queue.put(effect.segment)
             return
-        if isinstance(effect, (StartBerry, StartNextBerry)):
+        if isinstance(effect, (StartThinker, StartNextThinker)):
             if not self._closing:
                 self._spawn_background(
-                    self._run_berry(effect),
-                    tasks=self._berry_tasks,
-                    name=f"{self.session_id}:berry:{effect.turn_id}:{effect.generation}",
-                    marks_berry=True,
+                    self._run_thinker(effect),
+                    tasks=self._thinker_tasks,
+                    name=f"{self.session_id}:thinker:{effect.turn_id}:{effect.generation}",
+                    marks_thinker=True,
                 )
             return
         if isinstance(effect, StartTts):
@@ -425,6 +429,7 @@ class SessionRuntime:
                 key = (effect.turn_id, effect.generation)
                 interrupt_signal = asyncio.Event()
                 self._tts_interrupt_signals[key] = interrupt_signal
+                # 若该轮 TTS 启动前即被判定为应抑制，立即置位信号以触发排空宽限
                 if self._tts_output_suppressed(effect):
                     interrupt_signal.set()
                 self._spawn_background(
@@ -482,12 +487,12 @@ class SessionRuntime:
                 speech_end = self._speech_ends.pop(event.segment_id, None)
                 if speech_end is not None and self._metrics is not None:
                     self._metrics.observe_speech_end_to_asr(self._clock() - speech_end)
-                if (
-                    speech_end is not None
-                    and self.actor.state.next_turn_id == next_turn_id + 1
-                ):
+                if speech_end is not None and self.actor.state.next_turn_id == next_turn_id + 1:
                     self._turn_speech_ends[next_turn_id] = speech_end
-            if isinstance(event, (BerryCompleted, BerryFailed, TtsCompleted, TtsFailed)):
+            elif isinstance(event, AsrFailed):
+                # ASR 失败不产生 turn，也不再需要这段的结束时间，及时清理避免字典随段数无限增长
+                self._speech_ends.pop(event.segment_id, None)
+            if isinstance(event, (ThinkerCompleted, ThinkerFailed, TtsCompleted, TtsFailed)):
                 turn = self.actor.state.turns.get(event.turn_id)
                 if turn is not None and turn.stage in TERMINAL_TURN_STAGES:
                     self._turn_speech_ends.pop(event.turn_id, None)
@@ -539,7 +544,7 @@ class SessionRuntime:
         *,
         tasks: set[asyncio.Task[None]],
         name: str,
-        marks_berry: bool = False,
+        marks_thinker: bool = False,
     ) -> None:
         task = asyncio.create_task(coroutine, name=name)
         tasks.add(task)
@@ -548,19 +553,21 @@ class SessionRuntime:
         def finished(done: asyncio.Task[None]) -> None:
             tasks.discard(done)
             self._background_tasks.discard(done)
-            if marks_berry and done.cancelled():
-                self._berry_cleanup_safe = False
+            if marks_thinker and done.cancelled():
+                self._thinker_cleanup_safe = False
 
         task.add_done_callback(finished)
 
-    async def _run_berry(self, effect: StartBerry | StartNextBerry) -> None:
+    async def _run_thinker(self, effect: StartThinker | StartNextThinker) -> None:
         try:
-            async with self._berry_lock:
+            async with self._thinker_lock:
+                # thinker_lock 串行化所有 Thinker 请求，确保同一会话内不会并发调用 LLM
                 if self._closing:
                     return
-                if isinstance(effect, StartNextBerry) and effect.interrupt_first:
-                    await self._berry_client.interrupt(self.user_id, self.session_id)
-                request = BerryReplyRequest(
+                if isinstance(effect, StartNextThinker) and effect.interrupt_first:
+                    # 用户打断场景：先中断 Thinker 当前会话再发起新请求
+                    await self._thinker_client.interrupt(self.user_id, self.session_id)
+                request = ThinkerReplyRequest(
                     user_id=self.user_id,
                     session_id=self.session_id,
                     text=effect.text,
@@ -568,39 +575,53 @@ class SessionRuntime:
                 )
                 reply_text: str | None = None
                 first_delta = True
+                first_delta_ts: float | None = None
                 started = self._clock()
-                async for item in self._berry_client.stream_reply(request):
-                    if isinstance(item, BerryTextDelta):
+                async for item in self._thinker_client.stream_reply(request):
+                    if isinstance(item, ThinkerTextDelta):
                         if first_delta:
                             first_delta = False
-                            elapsed = self._clock() - started
+                            first_delta_ts = self._clock()
+                            elapsed = first_delta_ts - started
                             self._observe(
-                                "berry_first_delta",
+                                "thinker_first_delta",
                                 turn_id=effect.turn_id,
                                 duration_ms=elapsed * 1000,
                             )
                             if self._metrics is not None:
-                                self._metrics.observe_stage_latency("berry", elapsed)
+                                self._metrics.observe_stage_latency("thinker", elapsed)
                                 speech_end = self._turn_speech_ends.get(effect.turn_id)
-                                if speech_end is not None and effect.turn_id not in self._llm_milestones:
+                                if (
+                                    speech_end is not None
+                                    and effect.turn_id not in self._llm_milestones
+                                ):
                                     self._llm_milestones.add(effect.turn_id)
                                     self._metrics.observe_speech_end_to_first_llm(
-                                        self._clock() - speech_end
+                                        first_delta_ts - speech_end
                                     )
                         await self._publish_event(
-                            BerryDeltaReceived(
+                            ThinkerDeltaReceived(
                                 session_id=self.session_id,
                                 turn_id=effect.turn_id,
                                 generation=effect.generation,
                                 delta=item.delta,
                             )
                         )
-                    elif isinstance(item, BerryDone):
+                    elif isinstance(item, ThinkerDone):
                         reply_text = item.reply_text
+                        done_ts = self._clock()
+                        if self._metrics is not None:
+                            # 发起→末字：含首 token 等待，与非流式全量口径一致，可与 TTS prompt 全量对比
+                            self._metrics.observe_thinker_full(done_ts - started)
+                            if first_delta_ts is not None:
+                                # 首字→末字：衡量回复纯生成阶段的耗时
+                                self._metrics.observe_thinker_generate(
+                                    done_ts - first_delta_ts
+                                )
                 if reply_text is None:
-                    raise RuntimeError("Berry stream ended without done")
+                    raise RuntimeError("Thinker stream ended without done")
                 await self._publish_event(
-                    BerryCompleted(
+                    ThinkerCompleted(
                         session_id=self.session_id,
                         turn_id=effect.turn_id,
                         generation=effect.generation,
@@ -609,9 +630,9 @@ class SessionRuntime:
                 )
         except AdmissionOverloaded as error:
             if self._metrics is not None:
-                self._metrics.record_error("berry", "SERVICE_OVERLOADED")
+                self._metrics.record_error("thinker", "SERVICE_OVERLOADED")
             await self._publish_event(
-                BerryFailed(
+                ThinkerFailed(
                     session_id=self.session_id,
                     turn_id=effect.turn_id,
                     generation=effect.generation,
@@ -621,14 +642,14 @@ class SessionRuntime:
             )
         except Exception as error:  # noqa: BLE001 - background failures become Actor events
             if self._metrics is not None:
-                self._metrics.record_error("berry", "BERRY_STREAM_FAILED")
+                self._metrics.record_error("thinker", "THINKER_STREAM_FAILED")
             await self._publish_event(
-                BerryFailed(
+                ThinkerFailed(
                     session_id=self.session_id,
                     turn_id=effect.turn_id,
                     generation=effect.generation,
-                    code="BERRY_STREAM_FAILED",
-                    message=_error_message(error, "Berry reply stream failed"),
+                    code="THINKER_STREAM_FAILED",
+                    message=_error_message(error, "Thinker reply stream failed"),
                 )
             )
 
@@ -648,6 +669,8 @@ class SessionRuntime:
         )
         try:
             try:
+                # drain_timeout 初始无超时；收到中断信号后由 _arm_tts_drain_timeout
+                # 重设为 _tts_drain_timeout 宽限期，给 TTS 一段排空缓冲再终止
                 async with asyncio.timeout(None) as drain_timeout:
                     deadline_task = asyncio.create_task(
                         self._arm_tts_drain_timeout(interrupt_signal, drain_timeout),
@@ -658,6 +681,7 @@ class SessionRuntime:
                     )
                     try:
                         async for chunk in self._tts_client.stream(request):
+                            # 输出被抑制（轮次已切换/已中断）时跳过本块，但仍消费流以触发排空
                             if self._tts_output_suppressed(effect):
                                 continue
                             output = resampler.process_pcm16(
@@ -749,10 +773,11 @@ class SessionRuntime:
         if self._closing:
             return True
         turn = self.actor.state.turns.get(effect.turn_id)
+        # 抑制条件：轮次不存在 / 已被新 TTS 取代 / 已被显式打断
         return turn is None or turn.tts_generation != effect.generation or turn.interrupted
 
     def _observe(self, event: str, **fields: object) -> None:
-        """Emit best-effort lifecycle diagnostics without changing session behavior."""
+        """尽力输出生命周期诊断信息，不影响会话行为。"""
         try:
             log_event(event, user_id=self.user_id, session_id=self.session_id, **fields)
             if self._metrics is not None:
@@ -783,22 +808,25 @@ class SessionRuntime:
                 return
             self._closing = True
             try:
+                # 清理顺序：先停音频采集/发送，再取消 ASR，等待 Thinker 结束，
+                # 排空 TTS，最后（若 Thinker 正常结束）才删除 Thinker 会话
                 await self._stop_audio()
                 await self._cancel_asr()
-                berry_safe = await self._wait_berry()
+                thinker_safe = await self._wait_thinker()
                 await self._drain_tts()
-                if berry_safe:
-                    await self._delete_berry_session()
+                if thinker_safe:
+                    await self._delete_thinker_session()
                 else:
                     self._logger.warning(
-                        BERRY_CLEANUP_SKIPPED,
+                        THINKER_CLEANUP_SKIPPED,
                         extra={
-                            "event": BERRY_CLEANUP_SKIPPED,
+                            "event": THINKER_CLEANUP_SKIPPED,
                             "user_id": self.user_id,
                             "session_id": self.session_id,
                         },
                     )
             finally:
+                # 无论前面是否成功，都要释放注册表准入并标记已清理，避免泄漏
                 if self._registry is not None:
                     await self._registry.remove(self.session_id)
                 self._speech_ends.clear()
@@ -831,26 +859,26 @@ class SessionRuntime:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _wait_berry(self) -> bool:
-        pending = await _wait_tasks(self._berry_tasks, self._berry_cleanup_timeout)
+    async def _wait_thinker(self) -> bool:
+        pending = await _wait_tasks(self._thinker_tasks, self._thinker_cleanup_timeout)
         if pending:
-            self._berry_cleanup_safe = False
+            self._thinker_cleanup_safe = False
             await _cancel_tasks(pending)
-        return self._berry_cleanup_safe
+        return self._thinker_cleanup_safe
 
     async def _drain_tts(self) -> None:
         pending = await _wait_tasks(self._tts_tasks, self._tts_drain_timeout)
         if pending:
             await _cancel_tasks(pending)
 
-    async def _delete_berry_session(self) -> None:
+    async def _delete_thinker_session(self) -> None:
         try:
-            await self._berry_client.delete_session(self.user_id, self.session_id)
+            await self._thinker_client.delete_session(self.user_id, self.session_id)
         except Exception as error:  # noqa: BLE001 - cleanup must still release registry
             self._logger.warning(
-                "BERRY_CLEANUP_FAILED",
+                "THINKER_CLEANUP_FAILED",
                 extra={
-                    "event": "BERRY_CLEANUP_FAILED",
+                    "event": "THINKER_CLEANUP_FAILED",
                     "user_id": self.user_id,
                     "session_id": self.session_id,
                     "error_type": type(error).__name__,

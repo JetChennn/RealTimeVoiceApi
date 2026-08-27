@@ -5,25 +5,30 @@ import pytest
 from prometheus_client import CollectorRegistry
 
 from realtime_voice.audio.vad import SpeechSegment
-from realtime_voice.clients.berry import BerryDone, BerryReplyRequest, BerryTextDelta, DeleteResult
 from realtime_voice.clients.limits import BoundedAdmission
+from realtime_voice.clients.thinker import (
+    DeleteResult,
+    ThinkerDone,
+    ThinkerReplyRequest,
+    ThinkerTextDelta,
+)
 from realtime_voice.clients.tts import TtsChunk, TtsRequest
 from realtime_voice.observability.metrics import Metrics
 from realtime_voice.protocol.server_messages import TextDelta, TurnState
 from realtime_voice.session.actor import (
     QueueAsr,
     SendOutbound,
-    StartBerry,
-    StartNextBerry,
+    StartNextThinker,
+    StartThinker,
     StartTts,
 )
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
-    BerryCompleted,
-    BerryDeltaReceived,
-    BerryFailed,
     SpeechSegmentReady,
+    ThinkerCompleted,
+    ThinkerDeltaReceived,
+    ThinkerFailed,
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
@@ -63,7 +68,6 @@ class FailingWorker(BlockingWorker):
         raise RuntimeError("receiver failed")
 
 
-
 class ReturningReceiver(BlockingWorker):
     async def run(self) -> None:
         task = asyncio.current_task()
@@ -88,19 +92,19 @@ class ControlledAsr:
         return "hello"
 
 
-class ControlledBerry:
+class ControlledThinker:
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
     async def stream_reply(
-        self, request: BerryReplyRequest
-    ) -> AsyncIterator[BerryTextDelta | BerryDone]:
+        self, request: ThinkerReplyRequest
+    ) -> AsyncIterator[ThinkerTextDelta | ThinkerDone]:
         self.started.set()
         await self.release.wait()
-        yield BerryTextDelta(delta="first")
-        yield BerryTextDelta(delta="second")
-        yield BerryDone(reply_text="reply")
+        yield ThinkerTextDelta(delta="first")
+        yield ThinkerTextDelta(delta="second")
+        yield ThinkerDone(reply_text="reply")
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         return None
@@ -146,12 +150,12 @@ class SerialAsr:
             self.active -= 1
 
 
-class ImmediateBerry:
+class ImmediateThinker:
     def __init__(self) -> None:
         self.deleted = 0
 
-    async def stream_reply(self, request: BerryReplyRequest) -> AsyncIterator[BerryDone]:
-        yield BerryDone(reply_text=f"reply:{request.text}")
+    async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
+        yield ThinkerDone(reply_text=f"reply:{request.text}")
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         return None
@@ -161,7 +165,7 @@ class ImmediateBerry:
         return DeleteResult.DELETED
 
 
-class OrderedBerry(ImmediateBerry):
+class OrderedThinker(ImmediateThinker):
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[str] = []
@@ -169,29 +173,29 @@ class OrderedBerry(ImmediateBerry):
         self.release_first = asyncio.Event()
 
     async def stream_reply(
-        self, request: BerryReplyRequest
-    ) -> AsyncIterator[BerryTextDelta | BerryDone]:
+        self, request: ThinkerReplyRequest
+    ) -> AsyncIterator[ThinkerTextDelta | ThinkerDone]:
         self.calls.append(f"start:{request.text}")
         if request.text == "first":
             self.first_started.set()
             await self.release_first.wait()
-        yield BerryTextDelta(delta=request.text[0])
-        yield BerryDone(reply_text=f"reply:{request.text}")
+        yield ThinkerTextDelta(delta=request.text[0])
+        yield ThinkerDone(reply_text=f"reply:{request.text}")
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         self.calls.append("interrupt")
 
 
-class BlockingBerry(ImmediateBerry):
+class BlockingThinker(ImmediateThinker):
     def __init__(self) -> None:
         super().__init__()
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def stream_reply(self, request: BerryReplyRequest) -> AsyncIterator[BerryDone]:
+    async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
         self.started.set()
         await self.release.wait()
-        yield BerryDone(reply_text="reply")
+        yield ThinkerDone(reply_text="reply")
 
 
 class SignallingAsr:
@@ -252,14 +256,14 @@ class RecordingRegistry:
 def make_runtime(
     *,
     asr: object | None = None,
-    berry: object | None = None,
+    thinker: object | None = None,
     tts: object | None = None,
     receiver: BlockingWorker | None = None,
     vad_worker: BlockingWorker | None = None,
     sender: BlockingWorker | None = None,
     sample_rate: int = 16000,
     registry: RecordingRegistry | None = None,
-    berry_cleanup_timeout: float = 0.2,
+    thinker_cleanup_timeout: float = 0.2,
     tts_drain_timeout: float = 0.2,
     **runtime_options: object,
 ) -> tuple[SessionRuntime, tuple[BlockingWorker, BlockingWorker, BlockingWorker]]:
@@ -269,13 +273,13 @@ def make_runtime(
     runtime = SessionRuntime(
         state=SessionState(user_id="u", session_id="s", sample_rate=sample_rate),
         asr_client=asr or EmptyAsr(),
-        berry_client=berry or ImmediateBerry(),
+        thinker_client=thinker or ImmediateThinker(),
         tts_client=tts or EmptyTts(),
         receiver=resolved_receiver,
         vad_worker=vad,
         sender=resolved_sender,
         registry=registry,
-        berry_cleanup_timeout=berry_cleanup_timeout,
+        thinker_cleanup_timeout=thinker_cleanup_timeout,
         tts_drain_timeout=tts_drain_timeout,
         **runtime_options,
     )
@@ -354,11 +358,11 @@ async def test_runtime_records_each_real_speech_end_milestone_exactly_once() -> 
     metrics = Metrics(registry=CollectorRegistry())
     now = [10.0]
     asr = ControlledAsr()
-    berry = ControlledBerry()
+    thinker = ControlledThinker()
     tts = ControlledTts(sine_pcm16(sample_rate=24000, seconds=0.02, frequency=440))
     runtime, workers = make_runtime(
         asr=asr,
-        berry=berry,
+        thinker=thinker,
         tts=tts,
         metrics=metrics,
         clock=lambda: now[0],
@@ -378,9 +382,9 @@ async def test_runtime_records_each_real_speech_end_milestone_exactly_once() -> 
         now[0] = 12.0
         asr.release.set()
 
-        await asyncio.wait_for(berry.started.wait(), timeout=1)
+        await asyncio.wait_for(thinker.started.wait(), timeout=1)
         now[0] = 13.0
-        berry.release.set()
+        thinker.release.set()
 
         await asyncio.wait_for(tts.started.wait(), timeout=1)
         now[0] = 14.0
@@ -393,7 +397,7 @@ async def test_runtime_records_each_real_speech_end_milestone_exactly_once() -> 
                 await asyncio.sleep(0)
     finally:
         asr.release.set()
-        berry.release.set()
+        thinker.release.set()
         tts.release.set()
         runtime.request_close()
         await asyncio.wait_for(run_task, timeout=1)
@@ -409,9 +413,9 @@ async def test_runtime_records_each_real_speech_end_milestone_exactly_once() -> 
 
 async def test_runtime_retains_speech_end_for_a_turn_queued_behind_active_llm() -> None:
     metrics = Metrics(registry=CollectorRegistry())
-    berry = OrderedBerry()
+    thinker = OrderedThinker()
     tts = ChunkedTts(sine_pcm16(sample_rate=24000, seconds=0.02, frequency=440))
-    runtime, _ = make_runtime(berry=berry, tts=tts, metrics=metrics, clock=lambda: 20.0)
+    runtime, _ = make_runtime(thinker=thinker, tts=tts, metrics=metrics, clock=lambda: 20.0)
     actor_task = asyncio.create_task(runtime._actor_loop())
 
     try:
@@ -434,21 +438,17 @@ async def test_runtime_retains_speech_end_for_a_turn_queued_behind_active_llm() 
                 await asyncio.sleep(0)
 
         await runtime.events.put(
-            AsrSucceeded(
-                session_id="s", segment_id=1, text="first", audio_wav=valid_wav()
-            )
+            AsrSucceeded(session_id="s", segment_id=1, text="first", audio_wav=valid_wav())
         )
-        await asyncio.wait_for(berry.first_started.wait(), timeout=1)
+        await asyncio.wait_for(thinker.first_started.wait(), timeout=1)
         await runtime.events.put(
-            AsrSucceeded(
-                session_id="s", segment_id=2, text="second", audio_wav=valid_wav()
-            )
+            AsrSucceeded(session_id="s", segment_id=2, text="second", audio_wav=valid_wav())
         )
         async with asyncio.timeout(1):
             while runtime.actor.state.next_turn_id != 3:
                 await asyncio.sleep(0)
 
-        berry.release_first.set()
+        thinker.release_first.set()
         async with asyncio.timeout(1):
             while "realtime_voice_speech_end_to_first_tts_seconds_count 1.0" not in (
                 metrics.render().decode()
@@ -458,7 +458,7 @@ async def test_runtime_retains_speech_end_for_a_turn_queued_behind_active_llm() 
             while runtime.background_task_count:
                 await asyncio.sleep(0)
     finally:
-        berry.release_first.set()
+        thinker.release_first.set()
         actor_task.cancel()
         await asyncio.gather(actor_task, return_exceptions=True)
 
@@ -469,17 +469,17 @@ async def test_runtime_retains_speech_end_for_a_turn_queued_behind_active_llm() 
     assert 2 not in runtime._turn_speech_ends
 
 
-async def test_real_asr_berry_and_tts_failure_boundaries_record_one_error_each() -> None:
+async def test_real_asr_thinker_and_tts_failure_boundaries_record_one_error_each() -> None:
     class FailingAsr:
         async def transcribe(self, pcm16_16k: bytes) -> str:
             raise RuntimeError("asr failed")
 
-    class FailingBerry(ControlledBerry):
+    class FailingThinker(ControlledThinker):
         async def stream_reply(
-            self, request: BerryReplyRequest
-        ) -> AsyncIterator[BerryTextDelta | BerryDone]:
-            raise RuntimeError("berry failed")
-            yield BerryDone(reply_text="unreachable")
+            self, request: ThinkerReplyRequest
+        ) -> AsyncIterator[ThinkerTextDelta | ThinkerDone]:
+            raise RuntimeError("thinker failed")
+            yield ThinkerDone(reply_text="unreachable")
 
     class FailingTts:
         async def stream(self, request: TtsRequest) -> AsyncIterator[TtsChunk]:
@@ -489,7 +489,7 @@ async def test_real_asr_berry_and_tts_failure_boundaries_record_one_error_each()
     metrics = Metrics(registry=CollectorRegistry())
     runtime, _ = make_runtime(
         asr=FailingAsr(),
-        berry=FailingBerry(),
+        thinker=FailingThinker(),
         tts=FailingTts(),
         metrics=metrics,
     )
@@ -508,9 +508,9 @@ async def test_real_asr_berry_and_tts_failure_boundaries_record_one_error_each()
         await asyncio.gather(asr_task, return_exceptions=True)
 
     await runtime.execute_effect(
-        StartBerry(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+        StartThinker(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
     )
-    assert isinstance(await next_event(runtime, BerryFailed), BerryFailed)
+    assert isinstance(await next_event(runtime, ThinkerFailed), ThinkerFailed)
 
     runtime.actor.state.turns[1] = TurnContext(
         turn_id=1,
@@ -527,13 +527,10 @@ async def test_real_asr_berry_and_tts_failure_boundaries_record_one_error_each()
     rendered = metrics.render().decode()
     assert 'realtime_voice_errors_total{code="ASR_FAILED",stage="asr"} 1.0' in rendered
     assert (
-        'realtime_voice_errors_total{code="BERRY_STREAM_FAILED",stage="berry"} 1.0'
+        'realtime_voice_errors_total{code="THINKER_STREAM_FAILED",stage="thinker"} 1.0'
         in rendered
     )
-    assert (
-        'realtime_voice_errors_total{code="TTS_STREAM_FAILED",stage="tts"} 1.0'
-        in rendered
-    )
+    assert 'realtime_voice_errors_total{code="TTS_STREAM_FAILED",stage="tts"} 1.0' in rendered
 
 
 async def test_asr_failure_without_metrics_still_publishes_failure_event() -> None:
@@ -563,34 +560,32 @@ async def test_asr_failure_without_metrics_still_publishes_failure_event() -> No
     )
 
 
-async def test_start_berry_runs_in_background_and_returns_session_events() -> None:
-    berry = OrderedBerry()
-    berry.release_first.set()
-    runtime, _ = make_runtime(berry=berry)
+async def test_start_thinker_runs_in_background_and_returns_session_events() -> None:
+    thinker = OrderedThinker()
+    thinker.release_first.set()
+    runtime, _ = make_runtime(thinker=thinker)
 
     await runtime.execute_effect(
-        StartBerry(turn_id=1, generation=1, text="first", audio_wav=valid_wav())
+        StartThinker(turn_id=1, generation=1, text="first", audio_wav=valid_wav())
     )
 
-    delta = await next_event(runtime, BerryDeltaReceived)
-    completed = await next_event(runtime, BerryCompleted)
-    assert delta == BerryDeltaReceived(
-        session_id="s", turn_id=1, generation=1, delta="f"
-    )
-    assert completed == BerryCompleted(
+    delta = await next_event(runtime, ThinkerDeltaReceived)
+    completed = await next_event(runtime, ThinkerCompleted)
+    assert delta == ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="f")
+    assert completed == ThinkerCompleted(
         session_id="s", turn_id=1, generation=1, reply_text="reply:first"
     )
 
 
-async def test_berry_effects_remain_fifo_and_interrupt_before_next_request() -> None:
-    berry = OrderedBerry()
-    runtime, _ = make_runtime(berry=berry)
+async def test_thinker_effects_remain_fifo_and_interrupt_before_next_request() -> None:
+    thinker = OrderedThinker()
+    runtime, _ = make_runtime(thinker=thinker)
 
     await runtime.execute_effect(
-        StartBerry(turn_id=1, generation=1, text="first", audio_wav=valid_wav())
+        StartThinker(turn_id=1, generation=1, text="first", audio_wav=valid_wav())
     )
     await runtime.execute_effect(
-        StartNextBerry(
+        StartNextThinker(
             turn_id=2,
             generation=1,
             text="second",
@@ -599,31 +594,31 @@ async def test_berry_effects_remain_fifo_and_interrupt_before_next_request() -> 
         )
     )
 
-    await asyncio.wait_for(berry.first_started.wait(), timeout=1)
+    await asyncio.wait_for(thinker.first_started.wait(), timeout=1)
     await asyncio.sleep(0)
-    assert berry.calls == ["start:first"]
-    berry.release_first.set()
+    assert thinker.calls == ["start:first"]
+    thinker.release_first.set()
     completed = [
-        await next_event(runtime, BerryCompleted),
-        await next_event(runtime, BerryCompleted),
+        await next_event(runtime, ThinkerCompleted),
+        await next_event(runtime, ThinkerCompleted),
     ]
 
-    assert berry.calls == ["start:first", "interrupt", "start:second"]
+    assert thinker.calls == ["start:first", "interrupt", "start:second"]
     assert [event.turn_id for event in completed] == [1, 2]
 
 
-async def test_asr_can_detect_a_new_turn_while_berry_streams_the_previous_turn() -> None:
+async def test_asr_can_detect_a_new_turn_while_thinker_streams_the_previous_turn() -> None:
     asr = SignallingAsr()
-    berry = BlockingBerry()
-    runtime, workers = make_runtime(asr=asr, berry=berry)
+    thinker = BlockingThinker()
+    runtime, workers = make_runtime(asr=asr, thinker=thinker)
     run_task = asyncio.create_task(runtime.run())
     await asyncio.gather(*(worker.started.wait() for worker in workers))
 
     try:
         await runtime.execute_effect(
-            StartBerry(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+            StartThinker(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
         )
-        await asyncio.wait_for(berry.started.wait(), timeout=1)
+        await asyncio.wait_for(thinker.started.wait(), timeout=1)
         await runtime.execute_effect(
             QueueAsr(
                 session_id="s",
@@ -632,9 +627,9 @@ async def test_asr_can_detect_a_new_turn_while_berry_streams_the_previous_turn()
         )
 
         await asyncio.wait_for(asr.started.wait(), timeout=1)
-        assert not berry.release.is_set()
+        assert not thinker.release.is_set()
     finally:
-        berry.release.set()
+        thinker.release.set()
         runtime.request_close()
         await asyncio.wait_for(run_task, timeout=1)
 
@@ -664,10 +659,7 @@ async def test_audio_queue_records_byte_overload_at_real_runtime_boundary() -> N
         runtime.audio_queue.put_nowait(b"\x00\x00")
 
     rendered = metrics.render().decode()
-    assert (
-        'realtime_voice_queue_overload_total{limit="bytes",queue="audio"} 1.0'
-        in rendered
-    )
+    assert 'realtime_voice_queue_overload_total{limit="bytes",queue="audio"} 1.0' in rendered
 
 
 async def test_slow_client_close_is_recorded_only_on_real_outbound_overload() -> None:
@@ -698,10 +690,7 @@ async def test_slow_client_close_is_recorded_only_on_real_outbound_overload() ->
 
     rendered = metrics.render().decode()
     assert "realtime_voice_slow_client_close_total 1.0" in rendered
-    assert (
-        'realtime_voice_queue_overload_total{limit="items",queue="outbound"} 1.0'
-        in rendered
-    )
+    assert 'realtime_voice_queue_overload_total{limit="items",queue="outbound"} 1.0' in rendered
 
 
 @pytest.mark.parametrize(
@@ -887,8 +876,6 @@ async def test_worker_failure_cancels_siblings_and_releases_registry() -> None:
     assert runtime.background_task_count == 0
 
 
-
-
 async def test_receiver_normal_return_requests_orderly_runtime_close() -> None:
     registry = RecordingRegistry()
     receiver = ReturningReceiver()
@@ -917,6 +904,7 @@ async def test_returning_long_lived_worker_requests_orderly_runtime_close(
     assert returned_worker.started.is_set()
     assert all(worker.stopped.is_set() for worker in workers)
     assert registry.removed == ["s"]
+
 
 async def test_injected_queues_connect_receiver_vad_actor_and_sender() -> None:
     events: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
@@ -954,7 +942,7 @@ async def test_injected_queues_connect_receiver_vad_actor_and_sender() -> None:
     runtime = SessionRuntime(
         state=SessionState(user_id="u", session_id="s", sample_rate=16000),
         asr_client=Asr(),
-        berry_client=ImmediateBerry(),
+        thinker_client=ImmediateThinker(),
         tts_client=EmptyTts(),
         receiver=Receiver(),
         vad_worker=Vad(),
@@ -970,7 +958,6 @@ async def test_injected_queues_connect_receiver_vad_actor_and_sender() -> None:
     assert len(received) == 1
     assert received[0].type == "ASR_RESULT"
     assert received[0].text == "hello"
-
 
 
 class NeverEndingTts:

@@ -7,11 +7,11 @@ from realtime_voice.session.actor import CloseRuntime, QueueAsr, RecordStaleEven
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
-    BerryCompleted,
-    BerryDeltaReceived,
-    BerryFailed,
     SessionDisconnected,
     SpeechSegmentReady,
+    ThinkerCompleted,
+    ThinkerDeltaReceived,
+    ThinkerFailed,
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
@@ -31,16 +31,16 @@ def assert_only_stale(effects, reason: str) -> None:
     assert effects[0].reason == reason
 
 
-def test_old_berry_generation_is_stale_and_does_not_mutate_state() -> None:
+def test_old_thinker_generation_is_stale_and_does_not_mutate_state() -> None:
     actor = actor_with_streaming_turn()
     before = deepcopy(actor.state)
 
     effects = actor.handle(
-        BerryDeltaReceived(session_id="s", turn_id=1, generation=0, delta="stale")
+        ThinkerDeltaReceived(session_id="s", turn_id=1, generation=0, delta="stale")
     )
 
     assert actor.state == before
-    assert_only_stale(effects, "berry_generation")
+    assert_only_stale(effects, "thinker_generation")
 
 
 def test_unknown_turn_is_stale_and_does_not_mutate_state() -> None:
@@ -48,7 +48,7 @@ def test_unknown_turn_is_stale_and_does_not_mutate_state() -> None:
     before = deepcopy(actor.state)
 
     effects = actor.handle(
-        BerryCompleted(session_id="s", turn_id=99, generation=1, reply_text="ghost")
+        ThinkerCompleted(session_id="s", turn_id=99, generation=1, reply_text="ghost")
     )
 
     assert actor.state == before
@@ -228,17 +228,17 @@ def test_asr_failure_consumes_pending_segment_and_duplicate_is_stale() -> None:
         lambda: AsrFailed(
             session_id="other", segment_id=1, code="ASR_FAILED", message="late"
         ),
-        lambda: BerryDeltaReceived(
+        lambda: ThinkerDeltaReceived(
             session_id="other", turn_id=1, generation=1, delta="late"
         ),
-        lambda: BerryCompleted(
+        lambda: ThinkerCompleted(
             session_id="other", turn_id=1, generation=1, reply_text="late"
         ),
-        lambda: BerryFailed(
+        lambda: ThinkerFailed(
             session_id="other",
             turn_id=1,
             generation=1,
-            code="BERRY_FAILED",
+            code="THINKER_FAILED",
             message="late",
         ),
         lambda: TtsChunkReceived(

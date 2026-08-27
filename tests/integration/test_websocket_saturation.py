@@ -27,7 +27,7 @@ class NoopAsr:
         return ""
 
 
-class NoopBerry:
+class NoopThinker:
     async def delete_session(self, _: str, __: str) -> None:
         return None
 
@@ -128,7 +128,7 @@ def _controlled_runtime_factory(
                 sample_rate=create.sample_rate,
             ),
             asr_client=NoopAsr(),
-            berry_client=NoopBerry(),
+            thinker_client=NoopThinker(),
             tts_client=NoopTts(),
             receiver=receiver,
             vad_worker=producer,
@@ -141,7 +141,7 @@ def _controlled_runtime_factory(
             outbound_queue_max_bytes=settings.session_outbound_queue_max_bytes,
             audio_queue=audio,
             outbound_queue=outbound,
-            berry_cleanup_timeout=settings.berry_cleanup_timeout_seconds,
+            thinker_cleanup_timeout=settings.thinker_cleanup_timeout_seconds,
             tts_drain_timeout=settings.tts_drain_timeout_seconds,
         )
         if isinstance(producer, SaturateOutbound):

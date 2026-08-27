@@ -1,4 +1,4 @@
-"""WebSocket handshake and protocol-error handling."""
+"""WebSocket 握手与协议错误处理。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 async def serve_realtime(websocket: WebSocket, services: AppServices) -> None:
-    """Accept a realtime socket and require CREATE_SESSION as its first frame."""
+    """接受 WebSocket 连接，并要求首帧必须是 CREATE_SESSION 消息。"""
     await websocket.accept()
     try:
         try:
@@ -37,9 +37,11 @@ async def serve_realtime(websocket: WebSocket, services: AppServices) -> None:
         try:
             await runtime.run()
         except* ProtocolViolation as errors:
+            # runtime.run 抛出的协议违规，转为关闭流程
             error = errors.exceptions[0]
             await _close_with_protocol_error(websocket, error)
         except* SlowClient:
+            # 出站积压已满，按慢客户端协议违规关闭
             await _close_with_protocol_error(
                 websocket,
                 ProtocolViolation("SLOW_CLIENT", "outbound client backlog is full"),
@@ -56,14 +58,14 @@ async def serve_realtime(websocket: WebSocket, services: AppServices) -> None:
 
 
 def require_create_session(message: object) -> CreateSession:
-    """Require the protocol's mandatory CREATE_SESSION opening message."""
+    """校验消息为协议规定的开场消息 CREATE_SESSION，否则抛出协议违规。"""
     if not isinstance(message, CreateSession):
         raise ProtocolViolation("CREATE_SESSION_REQUIRED", "first message must be CREATE_SESSION")
     return message
 
 
 async def _close_with_protocol_error(websocket: WebSocket, error: ProtocolViolation) -> None:
-    """Best-effort ERROR and policy close for a socket that may already be gone."""
+    """尽力发送 ERROR 并按策略关闭连接；连接可能已断开，故容错。"""
     await send_protocol_error(websocket, error)
     try:
         await websocket.close(code=1008)
@@ -72,7 +74,7 @@ async def _close_with_protocol_error(websocket: WebSocket, error: ProtocolViolat
 
 
 async def send_protocol_error(websocket: WebSocket, error: ProtocolViolation) -> None:
-    """Send one stable transport error before closing an invalid connection."""
+    """在关闭异常连接前发送一条稳定的传输层错误消息。"""
     message = ErrorMessage(
         type="ERROR",
         user_id="unknown",

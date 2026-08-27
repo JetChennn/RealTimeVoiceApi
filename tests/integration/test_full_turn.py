@@ -25,7 +25,7 @@ def test_full_turn_emits_asr_text_and_audio() -> None:
     assert messages[-1]["status"] == "COMPLETED"
 
 
-@pytest.mark.parametrize("stage", ["berry", "tts"])
+@pytest.mark.parametrize("stage", ["thinker", "tts"])
 def test_downstream_turn_failure_emits_error_and_failed_response(stage: str) -> None:
     harness = FakeServiceHarness(["hello"], fail_stage=stage)
     with connected_session(harness) as (websocket, _):
@@ -34,7 +34,7 @@ def test_downstream_turn_failure_emits_error_and_failed_response(stage: str) -> 
 
     errors = [message for message in messages if message["type"] == "ERROR"]
     assert len(errors) == 1
-    assert errors[0]["stage"] == ("LLM" if stage == "berry" else "TTS")
+    assert errors[0]["stage"] == ("LLM" if stage == "thinker" else "TTS")
     assert messages[-1]["status"] == "FAILED"
 
 
