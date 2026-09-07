@@ -39,7 +39,7 @@ async def test_thinker_streams_existing_multimodal_contract_across_chunk_boundar
         [
             b'{"type":"text_del',
             b'ta","delta":"\\u4f60"}\n{"type":"done","output":{"reply_',
-            b'text":"\\u4f60\\u597d\\uff0c\\u6211\\u5728\\u3002"}}\n',
+            b'text":"\\u4f60\\u597d\\uff0c\\u6211\\u5728\\u3002","tone":"\\u6e29\\u67d4"}}\n',
         ]
     )
     admission = BoundedAdmission("thinker", concurrency=8, max_waiters=64)
@@ -48,7 +48,7 @@ async def test_thinker_streams_existing_multimodal_contract_across_chunk_boundar
     async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
         events = [event async for event in ThinkerClient(http, admission).stream_reply(request)]
 
-    assert events == [ThinkerTextDelta("你"), ThinkerDone("你好，我在。")]
+    assert events == [ThinkerTextDelta("你"), ThinkerDone("你好，我在。", "温柔")]
     sent = captured["request"]
     assert sent.method == "POST"
     assert sent.url.path == "/api/v1/multimodal/reply"

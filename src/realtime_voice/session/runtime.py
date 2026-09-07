@@ -234,6 +234,7 @@ class SessionRuntime:
         thinker_cleanup_timeout: float = 120.0,
         metrics: Metrics | None = None,
         tts_drain_timeout: float = 120.0,
+        tts_prompt_override: str = "",
         logger: logging.Logger | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> None:
@@ -292,6 +293,7 @@ class SessionRuntime:
         self._registry = registry
         self._thinker_cleanup_timeout = thinker_cleanup_timeout
         self._tts_drain_timeout = tts_drain_timeout
+        self._tts_prompt_override = str(tts_prompt_override or "").strip()
         self._logger = logger or logging.getLogger(__name__)
         self._metrics = metrics
         self._clock = clock
@@ -574,6 +576,7 @@ class SessionRuntime:
                     audio_wav=effect.audio_wav,
                 )
                 reply_text: str | None = None
+                tone = ""
                 first_delta = True
                 first_delta_ts: float | None = None
                 started = self._clock()
@@ -609,6 +612,7 @@ class SessionRuntime:
                         )
                     elif isinstance(item, ThinkerDone):
                         reply_text = item.reply_text
+                        tone = item.tone
                         done_ts = self._clock()
                         if self._metrics is not None:
                             # 发起→末字：含首 token 等待，与非流式全量口径一致，可与 TTS prompt 全量对比
@@ -626,6 +630,7 @@ class SessionRuntime:
                         turn_id=effect.turn_id,
                         generation=effect.generation,
                         reply_text=reply_text,
+                        tone=tone,
                     )
                 )
         except AdmissionOverloaded as error:
@@ -662,9 +667,11 @@ class SessionRuntime:
         first_audio = True
         started = self._clock()
         resampler = StreamingResampler(TTS_SAMPLE_RATE, self.sample_rate)
+        # prompt 优先级：显式覆盖 > Thinker 回复携带的 tone > BerryThinker 默认语调
+        prompt = self._tts_prompt_override or effect.tone.strip() or "平和"
         request = TtsRequest(
-            user_input=effect.user_input,
             model_reply=effect.reply_text,
+            prompt=prompt,
             trace_id=f"{self.user_id}/{self.session_id}/turn-{effect.turn_id}",
         )
         try:

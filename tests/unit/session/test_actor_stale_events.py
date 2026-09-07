@@ -48,7 +48,7 @@ def test_unknown_turn_is_stale_and_does_not_mutate_state() -> None:
     before = deepcopy(actor.state)
 
     effects = actor.handle(
-        ThinkerCompleted(session_id="s", turn_id=99, generation=1, reply_text="ghost")
+        ThinkerCompleted(session_id="s", turn_id=99, generation=1, reply_text="ghost", tone="温柔")
     )
 
     assert actor.state == before
@@ -232,7 +232,7 @@ def test_asr_failure_consumes_pending_segment_and_duplicate_is_stale() -> None:
             session_id="other", turn_id=1, generation=1, delta="late"
         ),
         lambda: ThinkerCompleted(
-            session_id="other", turn_id=1, generation=1, reply_text="late"
+            session_id="other", turn_id=1, generation=1, reply_text="late", tone="温柔"
         ),
         lambda: ThinkerFailed(
             session_id="other",

@@ -104,7 +104,7 @@ class ControlledThinker:
         await self.release.wait()
         yield ThinkerTextDelta(delta="first")
         yield ThinkerTextDelta(delta="second")
-        yield ThinkerDone(reply_text="reply")
+        yield ThinkerDone(reply_text="reply", tone="测试语气 prompt")
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         return None
@@ -155,7 +155,7 @@ class ImmediateThinker:
         self.deleted = 0
 
     async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
-        yield ThinkerDone(reply_text=f"reply:{request.text}")
+        yield ThinkerDone(reply_text=f"reply:{request.text}", tone="测试语气 prompt")
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         return None
@@ -180,7 +180,7 @@ class OrderedThinker(ImmediateThinker):
             self.first_started.set()
             await self.release_first.wait()
         yield ThinkerTextDelta(delta=request.text[0])
-        yield ThinkerDone(reply_text=f"reply:{request.text}")
+        yield ThinkerDone(reply_text=f"reply:{request.text}", tone="测试语气 prompt")
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         self.calls.append("interrupt")
@@ -195,7 +195,7 @@ class BlockingThinker(ImmediateThinker):
     async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
         self.started.set()
         await self.release.wait()
-        yield ThinkerDone(reply_text="reply")
+        yield ThinkerDone(reply_text="reply", tone="测试语气 prompt")
 
 
 class SignallingAsr:
@@ -479,7 +479,7 @@ async def test_real_asr_thinker_and_tts_failure_boundaries_record_one_error_each
             self, request: ThinkerReplyRequest
         ) -> AsyncIterator[ThinkerTextDelta | ThinkerDone]:
             raise RuntimeError("thinker failed")
-            yield ThinkerDone(reply_text="unreachable")
+            yield ThinkerDone(reply_text="unreachable", tone="")
 
     class FailingTts:
         async def stream(self, request: TtsRequest) -> AsyncIterator[TtsChunk]:
@@ -520,7 +520,7 @@ async def test_real_asr_thinker_and_tts_failure_boundaries_record_one_error_each
         tts_generation=1,
     )
     await runtime.execute_effect(
-        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply")
+        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply", tone="测试语气 prompt")
     )
     assert isinstance(await next_event(runtime, TtsFailed), TtsFailed)
 
@@ -573,7 +573,7 @@ async def test_start_thinker_runs_in_background_and_returns_session_events() -> 
     completed = await next_event(runtime, ThinkerCompleted)
     assert delta == ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="f")
     assert completed == ThinkerCompleted(
-        session_id="s", turn_id=1, generation=1, reply_text="reply:first"
+        session_id="s", turn_id=1, generation=1, reply_text="reply:first", tone="测试语气 prompt"
     )
 
 
@@ -805,7 +805,7 @@ async def test_tts_uses_one_flushed_resampler_for_the_turn() -> None:
     )
 
     await runtime.execute_effect(
-        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply")
+        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply", tone="测试语气 prompt")
     )
     chunks: list[TtsChunkReceived] = []
     while True:
@@ -842,11 +842,11 @@ async def test_interrupted_tts_drains_while_new_turn_completes_independently() -
     )
 
     await runtime.execute_effect(
-        StartTts(turn_id=1, generation=1, user_input="old", reply_text="old reply")
+        StartTts(turn_id=1, generation=1, user_input="old", reply_text="old reply", tone="测试语气 prompt")
     )
     await asyncio.wait_for(tts.first_started.wait(), timeout=1)
     await runtime.execute_effect(
-        StartTts(turn_id=2, generation=1, user_input="new", reply_text="new reply")
+        StartTts(turn_id=2, generation=1, user_input="new", reply_text="new reply", tone="测试语气 prompt")
     )
     await asyncio.wait_for(tts.second_completed.wait(), timeout=1)
 
@@ -990,7 +990,7 @@ async def test_live_interrupted_tts_has_a_per_turn_drain_deadline() -> None:
     run_task = asyncio.create_task(runtime.run())
     await asyncio.gather(*(worker.started.wait() for worker in workers))
     await runtime.execute_effect(
-        StartTts(turn_id=1, generation=1, user_input="old", reply_text="old reply")
+        StartTts(turn_id=1, generation=1, user_input="old", reply_text="old reply", tone="测试语气 prompt")
     )
     await asyncio.wait_for(tts.started.wait(), timeout=1)
 

@@ -63,7 +63,7 @@ class FakeThinker:
         self.calls.append(f"done:{request.text}")
         if request.text == "first":
             self.first_done.set()
-        yield ThinkerDone(reply_text=f"reply:{request.text}")
+        yield ThinkerDone(reply_text=f"reply:{request.text}", tone="fake 语气 prompt")
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         self.calls.append("interrupt")

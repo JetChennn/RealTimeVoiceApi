@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import quote
+from uuid import uuid4
 
 import httpx
 
@@ -46,9 +47,10 @@ class ThinkerTextDelta:
 
 @dataclass(frozen=True, slots=True)
 class ThinkerDone:
-    """BerryThinker 完整的回复文本。"""
+    """BerryThinker 完整的回复文本与语音语调提示。"""
 
     reply_text: str
+    tone: str
 
 
 ThinkerEvent = ThinkerTextDelta | ThinkerDone
@@ -71,6 +73,7 @@ class ThinkerClient:
     async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerEvent]:
         """发送单个 VAD 分段并产出 Thinker 事件，不缓冲整个流。"""
         data = {
+            "req_id": f"rtva-{uuid4().hex}",
             "text": request.text,
             "user_id": request.user_id,
             "session_id": request.session_id,
@@ -150,7 +153,8 @@ def _thinker_event(payload: dict[str, object]) -> ThinkerEvent:
         reply_text = output.get("reply_text")
         if not isinstance(reply_text, str):
             raise ValueError("Thinker done output must contain reply text")
-        return ThinkerDone(reply_text)
+        tone = output.get("tone")
+        return ThinkerDone(reply_text, tone if isinstance(tone, str) else "")
 
     if event_type == "error":
         message = payload.get("error_message")

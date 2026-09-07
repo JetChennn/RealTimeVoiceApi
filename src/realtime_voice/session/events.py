@@ -46,6 +46,7 @@ class ThinkerCompleted:
     turn_id: int
     generation: int
     reply_text: str
+    tone: str
 
 
 @dataclass(frozen=True, slots=True)

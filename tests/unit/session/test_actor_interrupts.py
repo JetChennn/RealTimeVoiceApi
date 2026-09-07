@@ -45,13 +45,13 @@ def test_quick_turns_run_thinker_fifo_and_interrupted_turns_skip_tts() -> None:
     third = recognize(actor, 103, "three")
 
     first_done = actor.handle(
-        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="reply-one")
+        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="reply-one", tone="温柔")
     )
     second_done = actor.handle(
-        ThinkerCompleted(session_id="s", turn_id=2, generation=1, reply_text="reply-two")
+        ThinkerCompleted(session_id="s", turn_id=2, generation=1, reply_text="reply-two", tone="温柔")
     )
     third_done = actor.handle(
-        ThinkerCompleted(session_id="s", turn_id=3, generation=1, reply_text="reply-three")
+        ThinkerCompleted(session_id="s", turn_id=3, generation=1, reply_text="reply-three", tone="温柔")
     )
 
     starts = [
@@ -115,6 +115,7 @@ def test_empty_interrupted_thinker_completion_fails_and_starts_next_fifo_turn() 
             turn_id=1,
             generation=1,
             reply_text="   ",
+            tone="温柔",
         )
     )
 

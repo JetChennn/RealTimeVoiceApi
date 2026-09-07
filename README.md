@@ -29,11 +29,11 @@ flowchart LR
     %% 网关 → 下游
     O -->|"④ 语音段转写"| ASR
     O -->|"⑥ ASR文本+语音段<br/>stream=true"| TH
-    O -->|"⑩ 完整回复"| TT
+    O -->|"⑩ 完整回复 + TTS prompt"| TT
 
     %% 下游 → 网关
     ASR -.->|"⑤ 转写文本"| O
-    TH -.->|"⑦ LLM 增量文本"| O
+    TH -.->|"⑦ LLM 增量文本<br/>完成事件含 reply_text + tone"| O
     TT -.->|"⑪ 24kHz 音频块<br/>重采样为协商采样率"| O
 
     %% 编排层 → 客户端（下行全部由编排层发出，源头不同）
@@ -133,7 +133,7 @@ RealTimeVoiceAPI/
 ## 4. 快速开始
 
 ```bash
-# 1. 安装依赖（项目使用 uv + uv.lock）
+# 1. 安装依赖（项目使用 uv + uv.lock，默认通过阿里云 PyPI 镜像解析）
 uv sync --extra dev
 
 # 2. 准备配置
@@ -166,9 +166,17 @@ curl http://127.0.0.1:8003/metrics   # Prometheus 指标
 | `RTVA_MAX_SESSIONS` | `64` | 最大并发会话数 |
 | `RTVA_CPU_WORKERS` | `4` | VAD 等 CPU 任务线程池大小 |
 | `RTVA_HANDSHAKE_TIMEOUT_SECONDS` | `5` | 建连首帧超时 |
-| `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 非空时透传给 TTS 的 `prompt_override`，跳过其内部 LLM 生成 prompt（可消除约 18s 首块延迟） |
+| `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 非空时直接作为 TTS `prompt`；为空时依次使用 Thinker `done.output.tone` 和默认值“平和” |
 
 更多队列大小、超时、背压相关配置见 `.env.example`。
+
+### Thinker 与 TTS 调用约定
+
+- 网关调用 Thinker `POST /api/v1/multimodal/reply` 时传入唯一 `req_id`，并使用 `stream=true` 消费 NDJSON。
+- Thinker 的 `text_delta` 会立即转成 WebSocket `TEXT_DELTA`；`done.output.reply_text` 作为完整回复，`done.output.tone` 作为候选 TTS prompt。
+- Thinker 未返回 `tone` 时网关使用“平和”，也可用 `RTVA_TTS_PROMPT_OVERRIDE` 全局覆盖。
+- 网关调用 TTS `POST /v1/dialogue-tts/stream` 时只发送 `model_reply`、非空 `prompt` 和 `trace_id`；TTS 不再负责调用外部模型生成 prompt。
+- Thinker 的独立 `/api/v1/tts/prompt` 可供其他调用方生成或预览 prompt，但不是当前网关主链路的必经接口。
 
 ## 6. WebSocket 协议 V1
 

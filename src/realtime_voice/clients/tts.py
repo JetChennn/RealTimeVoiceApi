@@ -25,8 +25,8 @@ class TtsStreamError(RuntimeError):
 class TtsRequest:
     """PromptDialogAPI TTS 端点所需的对话字段。"""
 
-    user_input: str
     model_reply: str
+    prompt: str
     trace_id: str
 
 
@@ -49,25 +49,20 @@ class TtsClient:
         *,
         first_audio_timeout: float = TTS_FIRST_AUDIO_TIMEOUT,
         idle_timeout: float = TTS_IDLE_TIMEOUT,
-        prompt_override: str = "",
     ) -> None:
         self.http = http
         self.admission = admission
         self.first_audio_timeout = first_audio_timeout
         self.idle_timeout = idle_timeout
-        self.prompt_override = prompt_override
 
     async def stream(self, request: TtsRequest) -> AsyncIterator[TtsChunk]:
         """流式产出校验后的音频块，不缓冲整个 HTTP 流。"""
         payload: dict[str, object] = {
-            "user_input": request.user_input,
             "model_reply": request.model_reply,
+            "prompt": request.prompt,
             "include_prompt_event": False,
             "trace_id": request.trace_id,
         }
-        if self.prompt_override:
-            # 传固定 prompt 覆盖，跳过 TTS 内部的远程 qwen-flash prompt 生成
-            payload["prompt_override"] = self.prompt_override
 
         async with self.admission.slot():
             try:

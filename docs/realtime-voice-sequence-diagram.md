@@ -106,7 +106,7 @@ sequenceDiagram
     ActorLoop->>Thinker: spawn _run_thinker
 
     Note over Client,DTTS: 阶段6 Thinker流式回复
-    Thinker->>DThinker: stream_reply POST /api/v1/multimodal/reply
+    Thinker->>DThinker: stream_reply POST /api/v1/multimodal/reply（含唯一req_id）
     loop 流式NDJSON
         DThinker-->>Thinker: ThinkerTextDelta
         Thinker->>ActorLoop: events.put ThinkerDeltaReceived
@@ -115,12 +115,12 @@ sequenceDiagram
         ActorLoop->>Sender: outbound.put TextDelta
         Sender->>Client: TEXT_DELTA
     end
-    DThinker-->>Thinker: ThinkerDone reply_text
+    DThinker-->>Thinker: ThinkerDone reply_text + tone
     Thinker->>ActorLoop: events.put ThinkerCompleted
 
     Note over Client,DTTS: 阶段7 Thinker完成启动TTS
     ActorLoop->>SActor: handle ThinkerCompleted
-    SActor->>SActor: 存reply_text释放活跃LLM槽
+    SActor->>SActor: 存reply_text和tone，释放活跃LLM槽
     SActor->>SActor: stage切到STREAMING_TTS
     SActor-->>ActorLoop: SendOutbound TextEnd
     SActor-->>ActorLoop: StartTts
@@ -129,7 +129,8 @@ sequenceDiagram
     ActorLoop->>TTS: spawn _run_tts
 
     Note over Client,DTTS: 阶段8 TTS流式合成
-    TTS->>DTTS: stream POST /v1/dialogue-tts/stream
+    Note over TTS: prompt优先级为配置覆盖 > Thinker tone > “平和”
+    TTS->>DTTS: stream POST /v1/dialogue-tts/stream（model_reply + prompt）
     Note over TTS: 重采样24k到客户端采样率 收到中断信号给宽限期
     loop 流式NDJSON音频块
         DTTS-->>TTS: TtsChunk pcm16_24k

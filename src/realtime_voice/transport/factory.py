@@ -43,7 +43,6 @@ def configure_services(services: AppServices) -> None:
     services.tts_client = TtsClient(
         httpx.AsyncClient(base_url=str(settings.tts_base_url), trust_env=False),
         BoundedAdmission("tts", 8, 64, metrics=services.metrics),
-        prompt_override=settings.tts_prompt_override,
     )
     services.detector_offload = BoundedDetectorOffload(
         settings.cpu_workers, metrics=services.metrics
@@ -111,5 +110,6 @@ def build_runtime(
         outbound_queue=outbound,
         thinker_cleanup_timeout=settings.thinker_cleanup_timeout_seconds,
         tts_drain_timeout=settings.tts_drain_timeout_seconds,
+        tts_prompt_override=settings.tts_prompt_override,
     )
     return runtime

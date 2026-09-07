@@ -42,7 +42,7 @@ async def test_tts_maps_dialogue_and_decodes_audio() -> None:
     transport, captured = stream_transport([json.dumps(_audio_event()).encode() + b"\n"])
     admission = BoundedAdmission("tts", concurrency=8, max_waiters=64)
     request = TtsRequest(
-        user_input="你好", model_reply="你好，我在。", trace_id="device/session/turn-1"
+        model_reply="你好，我在。", prompt="温柔自然地回应。", trace_id="device/session/turn-1"
     )
 
     async with httpx.AsyncClient(transport=transport, base_url="http://tts") as http:
@@ -54,8 +54,8 @@ async def test_tts_maps_dialogue_and_decodes_audio() -> None:
     assert sent.method == "POST"
     assert sent.url.path == "/v1/dialogue-tts/stream"
     assert json.loads(sent.content) == {
-        "user_input": "你好",
         "model_reply": "你好，我在。",
+        "prompt": "温柔自然地回应。",
         "include_prompt_event": False,
         "trace_id": "device/session/turn-1",
     }

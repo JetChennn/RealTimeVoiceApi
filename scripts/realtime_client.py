@@ -32,7 +32,13 @@ def iter_pcm_chunks(pcm: bytes, sample_rate: int, chunk_ms: int = 40) -> Iterato
     chunk_bytes = sample_rate * chunk_ms // 1000 * 2
     if chunk_bytes <= 0:
         raise ValueError("chunk duration is too short for the sample rate")
-    for sequence, offset in enumerate(range(0, len(pcm), chunk_bytes)):
+    # 协议要求每个 AUDIO_CHUNK 为 10-500ms：完整块之外，仅保留不短于 10ms 的
+    # 尾块；低于 10ms 的余数会被服务端以 AUDIO_CHUNK_DURATION 拒绝。
+    full_chunks = len(pcm) // chunk_bytes
+    min_tail_bytes = sample_rate * 10 // 1000 * 2
+    tail_bytes = len(pcm) - full_chunks * chunk_bytes
+    total_bytes = full_chunks * chunk_bytes + (tail_bytes if tail_bytes >= min_tail_bytes else 0)
+    for sequence, offset in enumerate(range(0, total_bytes, chunk_bytes)):
         yield AudioChunk(sequence, pcm[offset : offset + chunk_bytes])
 
 

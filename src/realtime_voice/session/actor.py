@@ -84,6 +84,7 @@ class StartTts:
     generation: int
     user_input: str
     reply_text: str
+    tone: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +332,7 @@ class SessionActor:
                 turn.tts_generation,
                 user_input=turn.asr_text,
                 reply_text=turn.reply_text,
+                tone=event.tone,
             )
         )
         return effects

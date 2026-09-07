@@ -84,7 +84,7 @@ class OrderedThinker(ImmediateThinker):
             await self.release.wait()
         self.calls.append("wait_thinker")
         self.thinker_finished.set()
-        yield ThinkerDone(reply_text="reply")
+        yield ThinkerDone(reply_text="reply", tone="温柔")
 
     async def delete_session(self, user_id: str, session_id: str) -> DeleteResult:
         self.calls.append("delete_thinker_session")
@@ -127,7 +127,7 @@ class HungThinker(ImmediateThinker):
         finally:
             self.cancelled.set()
         if False:
-            yield ThinkerDone(reply_text="unreachable")
+            yield ThinkerDone(reply_text="unreachable", tone="温柔")
 
 
 async def test_disconnect_cleanup_follows_the_required_order() -> None:
@@ -164,7 +164,7 @@ async def test_disconnect_cleanup_follows_the_required_order() -> None:
             )
         )
         await runtime.execute_effect(
-            StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply")
+            StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply", tone="温柔")
         )
         await asyncio.wait_for(tts.started.wait(), timeout=1)
         await asyncio.wait_for(asr.started.wait(), timeout=1)
@@ -252,7 +252,7 @@ async def test_external_cancellation_drains_background_work_and_releases_registr
         StartThinker(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
     )
     await runtime.execute_effect(
-        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply")
+        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply", tone="温柔")
     )
 
     run_task.cancel()
@@ -290,7 +290,7 @@ async def test_tts_cleanup_timeout_cancels_stream_before_delete() -> None:
     run_task = asyncio.create_task(runtime.run())
     await asyncio.gather(*(worker.started.wait() for worker in workers))
     await runtime.execute_effect(
-        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply")
+        StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply", tone="温柔")
     )
     await asyncio.wait_for(tts.started.wait(), timeout=1)
 

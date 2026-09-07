@@ -39,7 +39,7 @@ def actor_with_streaming_turn(segment_id: int = 1) -> SessionActor:
 def actor_with_tts_turn(interrupted: bool = False) -> SessionActor:
     actor = actor_with_streaming_turn()
     actor.handle(
-        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="reply")
+        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="reply", tone="温柔")
     )
     actor.state.turns[1].interrupted = interrupted
     return actor

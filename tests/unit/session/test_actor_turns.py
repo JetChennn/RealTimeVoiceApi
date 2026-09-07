@@ -65,7 +65,7 @@ def test_uninterrupted_turn_streams_text_then_audio_and_completes() -> None:
         "TEXT_DELTA",
     )
     completed = actor.handle(
-        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="答案")
+        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="答案", tone="温柔")
     )
     text_end = outbound_of_type(completed, "TEXT_END")
     start_tts = next(effect for effect in completed if isinstance(effect, StartTts))
@@ -182,6 +182,7 @@ def test_empty_thinker_completion_fails_atomically(reply_text: str) -> None:
             turn_id=1,
             generation=1,
             reply_text=reply_text,
+            tone="温柔",
         )
     )
 
