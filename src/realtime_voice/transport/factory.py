@@ -34,7 +34,12 @@ def configure_services(services: AppServices) -> None:
     settings = services.settings
     services.asr_client = AsrClient(
         httpx.AsyncClient(base_url=str(settings.asr_base_url), trust_env=False),
-        BoundedAdmission("asr", 8, 64, metrics=services.metrics),
+        BoundedAdmission(
+            "asr",
+            settings.asr_concurrency,
+            settings.asr_max_waiters,
+            metrics=services.metrics,
+        ),
     )
     services.thinker_client = ThinkerClient(
         httpx.AsyncClient(base_url=str(settings.thinker_base_url), trust_env=False),

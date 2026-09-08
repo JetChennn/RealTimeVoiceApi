@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     max_sessions: int = Field(default=64, ge=1)
     cpu_workers: int = Field(default=4, ge=1)
     cpu_pending_jobs: int = Field(default=128, ge=1)
+    asr_concurrency: int = Field(default=8, ge=1)
+    asr_max_waiters: int = Field(default=64, ge=0)
     handshake_timeout_seconds: float = Field(default=5.0, gt=0)
     session_event_queue_size: int = Field(default=256, ge=1)
     session_audio_queue_size: int = Field(default=64, ge=1)
