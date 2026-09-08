@@ -123,7 +123,7 @@ RealTimeVoiceAPI/
 | 下游 | 默认地址 | 作用 | 调用接口 |
 |------|----------|------|----------|
 | ASR | `http://127.0.0.1:8000` | 语音转文本 | `POST /v1/chat/completions` |
-| Thinker | `http://127.0.0.1:8082` | LLM 回复 + 记忆 | `/api/v1/multimodal/reply`（流式）、`/api/v1/interrupt`、`DELETE /api/v1/sessions/{…}` |
+| Thinker | `http://127.0.0.1:8082` | LLM 回复 + 记忆 | `/api/v1/reply`（纯文本流式）、`/api/v1/interrupt`、`DELETE /api/v1/sessions/{…}` |
 | TTS | `http://127.0.0.1:8001` | 文本合成语音 | `POST /v1/dialogue-tts/stream` |
 
 > 上述接口结构均沿用现有服务，网关不做修改；只要三个服务可达，本服务即可联调。
@@ -172,7 +172,7 @@ curl http://127.0.0.1:8003/metrics   # Prometheus 指标
 
 ### Thinker 与 TTS 调用约定
 
-- 网关调用 Thinker `POST /api/v1/multimodal/reply` 时传入唯一 `req_id`，并使用 `stream=true` 消费 NDJSON。
+- 网关调用 Thinker 纯文本接口 `POST /api/v1/reply`，以 JSON 传入 ASR 文本和唯一 `req_id`，并使用 `stream=true` 消费 NDJSON；VAD 音频不会转发给 Thinker。
 - Thinker 的 `text_delta` 会立即转成 WebSocket `TEXT_DELTA`；`done.output.reply_text` 作为完整回复，`done.output.tone` 作为候选 TTS prompt。
 - Thinker 未返回 `tone` 时网关使用“平和”，也可用 `RTVA_TTS_PROMPT_OVERRIDE` 全局覆盖。
 - 网关调用 TTS `POST /v1/dialogue-tts/stream` 时只发送 `model_reply`、非空 `prompt` 和 `trace_id`；TTS 不再负责调用外部模型生成 prompt。

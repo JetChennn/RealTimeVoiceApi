@@ -106,7 +106,7 @@ sequenceDiagram
     ActorLoop->>Thinker: spawn _run_thinker
 
     Note over Client,DTTS: 阶段6 Thinker流式回复
-    Thinker->>DThinker: stream_reply POST /api/v1/multimodal/reply（含唯一req_id）
+    Thinker->>DThinker: stream_reply POST /api/v1/reply（纯文本 JSON，含唯一 req_id）
     loop 流式NDJSON
         DThinker-->>Thinker: ThinkerTextDelta
         Thinker->>ActorLoop: events.put ThinkerDeltaReceived

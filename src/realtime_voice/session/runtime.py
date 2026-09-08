@@ -573,7 +573,6 @@ class SessionRuntime:
                     user_id=self.user_id,
                     session_id=self.session_id,
                     text=effect.text,
-                    audio_wav=effect.audio_wav,
                 )
                 reply_text: str | None = None
                 tone = ""

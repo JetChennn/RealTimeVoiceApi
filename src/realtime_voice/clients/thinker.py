@@ -30,12 +30,11 @@ class ThinkerCleanupError(ThinkerError):
 
 @dataclass(frozen=True, slots=True)
 class ThinkerReplyRequest:
-    """BerryThinker 回复端点所需的多模态字段。"""
+    """BerryThinker 纯文本回复端点所需字段。"""
 
     user_id: str
     session_id: str
     text: str
-    audio_wav: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,26 +70,22 @@ class ThinkerClient:
         self.admission = admission
 
     async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerEvent]:
-        """发送单个 VAD 分段并产出 Thinker 事件，不缓冲整个流。"""
-        data = {
+        """发送 ASR 文本并逐条产出 Thinker 的 NDJSON 流式事件。"""
+        payload = {
             "req_id": f"rtva-{uuid4().hex}",
             "text": request.text,
             "user_id": request.user_id,
             "session_id": request.session_id,
-            "stream": "true",
+            "stream": True,
             "reply_mode": "dialogue",
-            "audio_is_vad_segment": "true",
-            "skip_internal_asr": "true",
         }
-        files = {"audio": ("segment.wav", request.audio_wav, "audio/wav")}
 
         async with self.admission.slot():
             try:
                 async with self.http.stream(
                     "POST",
-                    "/api/v1/multimodal/reply",
-                    data=data,
-                    files=files,
+                    "/api/v1/reply",
+                    json=payload,
                     timeout=180.0,
                 ) as response:
                     response.raise_for_status()

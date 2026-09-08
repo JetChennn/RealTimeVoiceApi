@@ -16,7 +16,7 @@ from realtime_voice.clients.thinker import (
     ThinkerStreamError,
     ThinkerTextDelta,
 )
-from tests.helpers import stream_transport, valid_wav
+from tests.helpers import stream_transport
 
 
 class BlockingStream(httpx.AsyncByteStream):
@@ -34,7 +34,7 @@ class BlockingStream(httpx.AsyncByteStream):
         self.closed = True
 
 
-async def test_thinker_streams_existing_multimodal_contract_across_chunk_boundaries() -> None:
+async def test_thinker_streams_text_contract_across_chunk_boundaries() -> None:
     transport, captured = stream_transport(
         [
             b'{"type":"text_del',
@@ -43,7 +43,7 @@ async def test_thinker_streams_existing_multimodal_contract_across_chunk_boundar
         ]
     )
     admission = BoundedAdmission("thinker", concurrency=8, max_waiters=64)
-    request = ThinkerReplyRequest("device-01", "session-100", "你好", valid_wav())
+    request = ThinkerReplyRequest("device-01", "session-100", "你好")
 
     async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
         events = [event async for event in ThinkerClient(http, admission).stream_reply(request)]
@@ -51,20 +51,16 @@ async def test_thinker_streams_existing_multimodal_contract_across_chunk_boundar
     assert events == [ThinkerTextDelta("你"), ThinkerDone("你好，我在。", "温柔")]
     sent = captured["request"]
     assert sent.method == "POST"
-    assert sent.url.path == "/api/v1/multimodal/reply"
-    for field in (
-        b'name="text"',
-        b'name="audio"',
-        b'name="user_id"',
-        b'name="session_id"',
-        b'name="stream"',
-        b'name="reply_mode"',
-        b'name="audio_is_vad_segment"',
-        b'name="skip_internal_asr"',
-        b'filename="segment.wav"',
-        b'Content-Type: audio/wav',
-    ):
-        assert field in sent.content
+    assert sent.url.path == "/api/v1/reply"
+    assert sent.headers["content-type"].startswith("application/json")
+    payload = json.loads(sent.content)
+    assert payload["text"] == "你好"
+    assert payload["user_id"] == "device-01"
+    assert payload["session_id"] == "session-100"
+    assert payload["stream"] is True
+    assert payload["reply_mode"] == "dialogue"
+    assert payload["req_id"].startswith("rtva-")
+    assert "audio" not in payload
 
 
 @pytest.mark.parametrize(
@@ -78,7 +74,7 @@ async def test_thinker_streams_existing_multimodal_contract_across_chunk_boundar
 async def test_thinker_stream_wraps_event_and_ndjson_failures(chunks: list[bytes]) -> None:
     transport, _ = stream_transport(chunks)
     admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
-    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
+    request = ThinkerReplyRequest("u", "s", "text")
 
     async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
         with pytest.raises(ThinkerStreamError):
@@ -88,7 +84,7 @@ async def test_thinker_stream_wraps_event_and_ndjson_failures(chunks: list[bytes
 async def test_thinker_stream_wraps_http_failure() -> None:
     transport, _ = stream_transport([b"failure"], status_code=500)
     admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
-    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
+    request = ThinkerReplyRequest("u", "s", "text")
 
     async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
         with pytest.raises(ThinkerStreamError) as error:
@@ -100,7 +96,7 @@ async def test_thinker_stream_wraps_http_failure() -> None:
 async def test_thinker_stream_aclose_releases_response_and_admission_slot() -> None:
     stream = BlockingStream()
     admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
-    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
+    request = ThinkerReplyRequest("u", "s", "text")
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=stream)
@@ -120,7 +116,7 @@ async def test_thinker_stream_aclose_releases_response_and_admission_slot() -> N
 async def test_thinker_stream_cancellation_releases_response_and_admission_slot() -> None:
     stream = BlockingStream()
     admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
-    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
+    request = ThinkerReplyRequest("u", "s", "text")
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=stream)
@@ -243,11 +239,11 @@ async def test_thinker_control_errors_are_stable_and_interrupt_skips_reply_limit
     reply_stream = BlockingStream()
     requests: list[httpx.Request] = []
     admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
-    request = ThinkerReplyRequest("u", "s", "text", valid_wav())
+    request = ThinkerReplyRequest("u", "s", "text")
 
     def handler(incoming: httpx.Request) -> httpx.Response:
         requests.append(incoming)
-        if incoming.url.path == "/api/v1/multimodal/reply":
+        if incoming.url.path == "/api/v1/reply":
             return httpx.Response(200, stream=reply_stream)
         if incoming.url.path == "/api/v1/interrupt":
             return httpx.Response(200)
@@ -267,7 +263,7 @@ async def test_thinker_control_errors_are_stable_and_interrupt_skips_reply_limit
             await client.delete_session("u", "s")
 
     assert [item.url.path for item in requests[:2]] == [
-        "/api/v1/multimodal/reply",
+        "/api/v1/reply",
         "/api/v1/interrupt",
     ]
 
