@@ -33,9 +33,8 @@ def test_decode_pcm16_rejects_invalid_base64() -> None:
         decode_pcm16(message, sample_rate=16000)
 
 
-@pytest.mark.parametrize("duration_ms", [9, 501])
-def test_decode_pcm16_rejects_out_of_range_duration(duration_ms: int) -> None:
-    payload = b"\x00\x00" * round(16000 * duration_ms / 1000)
+def test_decode_pcm16_rejects_duration_over_500ms() -> None:
+    payload = b"\x00\x00" * round(16000 * 501 / 1000)
     message = AudioChunkMessage(
         type="AUDIO_CHUNK",
         session_id="s",

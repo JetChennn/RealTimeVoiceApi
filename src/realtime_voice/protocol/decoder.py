@@ -56,8 +56,10 @@ def decode_pcm16(message: AudioChunkMessage, sample_rate: int) -> DecodedAudioCh
         raise ProtocolViolation("PCM16_BYTE_ALIGNMENT", "PCM16 must contain complete int16 samples")
 
     duration_ms = len(payload) / 2 / sample_rate * 1000.0
-    if not 10.0 <= duration_ms <= 500.0:
-        raise ProtocolViolation("AUDIO_CHUNK_DURATION", "audio chunk must be 10-500 ms")
+    # 低于 10ms 的碎片块直接放行：下游 VadWorker 会按 512 采样帧自行累积合并，
+    # 客户端无需预先合并尾块；超过 500ms 仍拒绝，以防一次性大块绕过背压约束。
+    if duration_ms > 500.0:
+        raise ProtocolViolation("AUDIO_CHUNK_DURATION", "audio chunk must not exceed 500 ms")
 
     return DecodedAudioChunk(
         sequence=message.sequence,

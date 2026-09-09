@@ -261,7 +261,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 1. **裸 PCM16 采样流**：`audio_b64` 解码后必须是**小端有符号 16 位整数的原始采样字节**（little-endian int16 PCM）。**不是** WAV 文件字节、不是 float32、不是 Opus/MP3——不要把整个 WAV 文件（含文件头）base64 后直接发送。
 2. **采样率必须与 `CREATE_SESSION` 声明一致**：声明 16000 就必须发 16kHz 采样的音频。网关内部会统一重采样到 16kHz 供 VAD/ASR 使用；如果声明与实际不符，音频会被拉快/拉慢，VAD 大概率不触发，表现为「连上了但永远没有响应」。
 3. **单声道**：立体声请先混缩为单声道。
-4. **每块时长 10–500ms**：按块的实际字节时长校验，越界触发 `AUDIO_CHUNK_DURATION`。推荐 **40ms/块**（16kHz 时为 1280 字节，base64 后约 1708 字符）。不足 10ms 的尾块应丢弃或并入前一块。
+4. **每块时长上限 500ms**：按块的实际字节时长校验，超限触发 `AUDIO_CHUNK_DURATION`。推荐 **40ms/块**（16kHz 时为 1280 字节，base64 后约 1708 字符）。低于 10ms 的碎片块（如尾块）无需客户端处理，服务端会自动累积进 VAD 检测帧。
 5. **字节对齐**：PCM 数据长度必须是偶数（完整 int16 采样），否则 `PCM16_BYTE_ALIGNMENT`。
 6. **Base64 必须严格合法**：标准 Base64，校验位不容忍（`INVALID_BASE64`）。
 7. **发送节奏**：按真实时间流式发送（如 40ms 音频每 40ms 一块）。网关侧音频积压上限默认 **3 秒**（`RTVA_SESSION_AUDIO_QUEUE_MAX_SECONDS`），超出触发 `CLIENT_AUDIO_BACKPRESSURE` 并关闭连接；拉取过慢则正常排队。
@@ -320,7 +320,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `AUDIO_SEQUENCE_GAP` | `sequence` 未从 0 严格递增 |
 | `INVALID_BASE64` | `audio_b64` 不是合法 Base64 |
 | `PCM16_BYTE_ALIGNMENT` | PCM 字节数为奇数 |
-| `AUDIO_CHUNK_DURATION` | 单块时长不在 10–500ms |
+| `AUDIO_CHUNK_DURATION` | 单块时长超过 500ms |
 | `CLIENT_AUDIO_BACKPRESSURE` | 客户端音频积压超过上限（默认 3 秒） |
 | `SLOW_CLIENT` | 下行队列积压满（客户端收包太慢） |
 
@@ -397,7 +397,7 @@ async def main():
 asyncio.run(main())
 ```
 
-完整参考实现见 [scripts/realtime_client.py](scripts/realtime_client.py)（含尾块 <10ms 丢弃、音频序号校验、打断处理等细节）。
+完整参考实现见 [scripts/realtime_client.py](scripts/realtime_client.py)（含音频序号校验、打断处理等细节；不足 10ms 的尾块可直接发送，由服务端累积合并）。
 
 ### 6.8 排障速查
 
@@ -497,7 +497,7 @@ asyncio.run(main())
 ```bash
 uv run python scripts/realtime_client.py \
   --url ws://127.0.0.1:8000/v1/realtime \
-  --wav tests/fixtures/audio/speech_16k.wav \
+  --wav tests/asr_zh.wav \
   --sample-rate 16000 \
   --output reply.wav
 ```
@@ -516,7 +516,7 @@ uv run python scripts/chain_latency_test.py --ws-url ws://127.0.0.1:8000/v1/real
 
 ```bash
 uv run python scripts/load_test.py --url ws://127.0.0.1:8000/v1/realtime \
-  --clients 30 --wav tests/fixtures/audio/speech_16k.wav --report report-30.json
+  --clients 30 --wav tests/asr_zh.wav --report report-30.json
 ```
 
 压测报告包含连接/失败数、错误码统计，以及「语音结束 → ASR、首段文本、首段音频」的 p50/p95/p99 延迟。

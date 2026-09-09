@@ -293,13 +293,13 @@ async def test_vad_worker_records_real_processing_latency() -> None:
     assert 'realtime_voice_stage_latency_seconds_count{stage="vad"} 1.0' in rendered
 
 
-@pytest.mark.parametrize("name", ["speech_16k.wav", "silence_16k.wav"])
-def test_audio_fixtures_are_mono_16khz_pcm16(name: str) -> None:
-    fixture = Path(__file__).parents[2] / "fixtures" / "audio" / name
+def test_asr_zh_fixture_is_mono_16khz_pcm16() -> None:
+    # 联调音频（README 第 7 节）的格式守卫：必须可直接作为 16kHz 单声道 PCM16 输入。
+    fixture = Path(__file__).parents[2] / "asr_zh.wav"
 
     with wave.open(str(fixture), "rb") as wav:
         assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 16000)
-        assert wav.getnframes() == 1600
+        assert wav.getnframes() > 0
 
 
 def test_max_speech_duration_splits_at_exact_sample_limit_and_retains_overflow() -> None:
