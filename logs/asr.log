@@ -1,342 +1,0 @@
-WARNING 09-08 15:12:37 [registry.py:801] Model architecture Qwen3ASRForConditionalGeneration is already registered, and will be overwritten by the new model class <class 'qwen_asr.core.vllm_backend.qwen3_asr.Qwen3ASRForConditionalGeneration'>.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:12:38 [api_server.py:1272] vLLM API server version 0.14.0
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:12:38 [utils.py:263] non-default args: {'model_tag': '/root/asr/Qwen3-ASR-0.6B', 'host': '127.0.0.1', 'port': 8001, 'model': '/root/asr/Qwen3-ASR-0.6B', 'gpu_memory_utilization': 0.5}
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:12:38 [model.py:530] Resolved architecture: Qwen3ASRForConditionalGeneration
-[0;36m(APIServer pid=1217677)[0;0m ERROR 09-08 15:12:38 [repo_utils.py:65] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/root/asr/Qwen3-ASR-0.6B'. Use `repo_type` argument if needed., retrying 1 of 2
-[0;36m(APIServer pid=1217677)[0;0m ERROR 09-08 15:12:40 [repo_utils.py:63] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/root/asr/Qwen3-ASR-0.6B'. Use `repo_type` argument if needed.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:12:40 [model.py:1866] Downcasting torch.float32 to torch.bfloat16.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:12:40 [model.py:1545] Using max model len 65536
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:12:41 [scheduler.py:229] Chunked prefill is enabled with max_num_batched_tokens=2048.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:12:41 [vllm.py:630] Asynchronous scheduling is enabled.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:12:41 [vllm.py:637] Disabling NCCL for DP synchronization when using async scheduling.
-[0;36m(APIServer pid=1217677)[0;0m The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-[0;36m(APIServer pid=1217677)[0;0m The following generation flags are not valid and may be ignored: ['temperature']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
-WARNING 09-08 15:12:48 [registry.py:801] Model architecture Qwen3ASRForConditionalGeneration is already registered, and will be overwritten by the new model class <class 'qwen_asr.core.vllm_backend.qwen3_asr.Qwen3ASRForConditionalGeneration'>.
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:49 [core.py:97] Initializing a V1 LLM engine (v0.14.0) with config: model='/root/asr/Qwen3-ASR-0.6B', speculative_config=None, tokenizer='/root/asr/Qwen3-ASR-0.6B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=65536, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/root/asr/Qwen3-ASR-0.6B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::kda_attention', 'vllm::sparse_attn_indexer'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_split_points': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': True, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 512, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': True}, 'local_cache_dir': None}
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:50 [parallel_state.py:1214] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://172.20.184.117:37731 backend=nccl
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:50 [parallel_state.py:1425] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:53 [gpu_model_runner.py:3808] Starting to load model /root/asr/Qwen3-ASR-0.6B...
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:54 [mm_encoder_attention.py:86] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:54 [vllm.py:630] Asynchronous scheduling is enabled.
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m /root/asr/.venv/lib/python3.12/site-packages/tvm_ffi/_optional_torch_c_dlpack.py:192: UserWarning: Failed to JIT torch c dlpack extension, EnvTensorAllocator will not be enabled.
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m We recommend installing via `pip install torch-c-dlpack-ext`
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m   warnings.warn(
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:55 [cuda.py:351] Using FLASH_ATTN attention backend out of potential backends: ('FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION')
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  3.53it/s]
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  3.53it/s]
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:56 [default_loader.py:291] Loading weights took 0.31 seconds
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:56 [gpu_model_runner.py:3905] Model loading took 1.53 GiB memory and 2.022835 seconds
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:12:57 [gpu_model_runner.py:4715] Encoder cache will be initialized with a budget of 2048 tokens, and profiled with 5 audio items of the maximum feature size.
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:13:02 [backends.py:644] Using cache directory: /root/.cache/vllm/torch_compile_cache/5028c15c2f/rank_0_0/backbone for vLLM's torch.compile
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:13:02 [backends.py:704] Dynamo bytecode transform time: 4.51 s
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:13:06 [backends.py:226] Directly load the compiled graph(s) for compile range (1, 2048) from the cache, took 0.764 s
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:13:06 [monitor.py:34] torch.compile takes 5.27 s in total
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:13:07 [gpu_worker.py:358] Available KV cache memory: 12.67 GiB
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:13:07 [kv_cache_utils.py:1305] GPU KV cache size: 118,592 tokens
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:13:07 [kv_cache_utils.py:1310] Maximum concurrency for 65,536 tokens per request: 1.81x
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   8%|▊         | 4/51 [00:00<00:01, 37.85it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  16%|█▌        | 8/51 [00:00<00:01, 38.57it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  24%|██▎       | 12/51 [00:00<00:01, 35.64it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  31%|███▏      | 16/51 [00:00<00:00, 35.83it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  39%|███▉      | 20/51 [00:00<00:00, 35.35it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  47%|████▋     | 24/51 [00:00<00:00, 36.26it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  55%|█████▍    | 28/51 [00:00<00:00, 36.17it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  63%|██████▎   | 32/51 [00:00<00:00, 33.79it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  71%|███████   | 36/51 [00:01<00:00, 35.05it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  78%|███████▊  | 40/51 [00:01<00:00, 35.64it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  86%|████████▋ | 44/51 [00:01<00:00, 36.24it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  94%|█████████▍| 48/51 [00:01<00:00, 35.78it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:01<00:00, 35.79it/s]
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m Capturing CUDA graphs (decode, FULL):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):   3%|▎         | 1/35 [00:00<00:05,  6.46it/s]Capturing CUDA graphs (decode, FULL):  17%|█▋        | 6/35 [00:00<00:01, 25.36it/s]Capturing CUDA graphs (decode, FULL):  31%|███▏      | 11/35 [00:00<00:00, 32.90it/s]Capturing CUDA graphs (decode, FULL):  46%|████▌     | 16/35 [00:00<00:00, 35.57it/s]Capturing CUDA graphs (decode, FULL):  60%|██████    | 21/35 [00:00<00:00, 37.32it/s]Capturing CUDA graphs (decode, FULL):  74%|███████▍  | 26/35 [00:00<00:00, 39.32it/s]Capturing CUDA graphs (decode, FULL):  89%|████████▊ | 31/35 [00:00<00:00, 40.81it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:00<00:00, 36.58it/s]
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:13:11 [gpu_model_runner.py:4856] Graph capturing finished in 3 secs, took 0.28 GiB
-[0;36m(EngineCore_DP0 pid=1218355)[0;0m INFO 09-08 15:13:11 [core.py:273] init engine (profile, create kv cache, warmup model) took 14.14 seconds
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:11 [api_server.py:1014] Supported tasks: ['generate', 'transcription']
-[0;36m(APIServer pid=1217677)[0;0m WARNING 09-08 15:13:11 [model.py:1358] Default sampling parameters have been overridden by the model's Hugging Face generation config recommended from the model creator. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:11 [serving_responses.py:224] Using default chat sampling params from model: {'temperature': 1e-06}
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:11 [serving_chat.py:146] Using default chat sampling params from model: {'temperature': 1e-06}
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:11 [serving_chat.py:182] Warming up chat template processing...
-[0;36m(APIServer pid=1217677)[0;0m The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:12 [chat_utils.py:599] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:12 [serving_chat.py:218] Chat template warmup completed in 603.3ms
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:12 [serving_completion.py:78] Using default completion sampling params from model: {'temperature': 1e-06}
-[0;36m(APIServer pid=1217677)[0;0m The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:12 [speech_to_text.py:111] Overwriting default completion sampling param with: {'temperature': 1e-06}
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:12 [speech_to_text.py:138] Warming up audio preprocessing libraries...
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:13 [speech_to_text.py:174] Audio preprocessing warmup completed in 0.32s
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:13 [speech_to_text.py:201] Warming up multimodal input processor...
-[0;36m(APIServer pid=1217677)[0;0m The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-[0;36m(APIServer pid=1217677)[0;0m The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [speech_to_text.py:234] Input processor warmup completed in 3.00s
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [speech_to_text.py:111] Overwriting default completion sampling param with: {'temperature': 1e-06}
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [speech_to_text.py:138] Warming up audio preprocessing libraries...
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [speech_to_text.py:174] Audio preprocessing warmup completed in 0.00s
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [speech_to_text.py:201] Warming up multimodal input processor...
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [speech_to_text.py:234] Input processor warmup completed in 0.00s
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [serving_chat.py:146] Using default chat sampling params from model: {'temperature': 1e-06}
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [api_server.py:1346] Starting vLLM API server 0 on http://127.0.0.1:8001
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [launcher.py:38] Available routes are:
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [launcher.py:46] Route: /openapi.json, Methods: GET, HEAD
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [launcher.py:46] Route: /docs, Methods: GET, HEAD
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: GET, HEAD
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [launcher.py:46] Route: /redoc, Methods: GET, HEAD
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:13:16 [launcher.py:46] Route: /metrics, Methods: GET
-[0;36m(APIServer pid=1217677)[0;0m INFO:     Started server process [1217677]
-[0;36m(APIServer pid=1217677)[0;0m INFO:     Waiting for application startup.
-[0;36m(APIServer pid=1217677)[0;0m INFO:     Application startup complete.
-[0;36m(APIServer pid=1217677)[0;0m INFO:     127.0.0.1:44716 - "GET /health HTTP/1.1" 200 OK
-[0;36m(APIServer pid=1217677)[0;0m INFO:     127.0.0.1:49476 - "GET /health HTTP/1.1" 200 OK
-[0;36m(APIServer pid=1217677)[0;0m INFO:     127.0.0.1:59588 - "GET /health HTTP/1.1" 200 OK
-[0;36m(APIServer pid=1217677)[0;0m INFO:     127.0.0.1:59592 - "GET /health HTTP/1.1" 200 OK
-[0;36m(APIServer pid=1217677)[0;0m INFO:     127.0.0.1:53252 - "GET /health HTTP/1.1" 200 OK
-[0;36m(APIServer pid=1217677)[0;0m INFO:     127.0.0.1:39854 - "GET /health HTTP/1.1" 200 OK
-[0;36m(APIServer pid=1217677)[0;0m INFO:     127.0.0.1:52260 - "GET /health HTTP/1.1" 200 OK
-[0;36m(APIServer pid=1217677)[0;0m INFO:     127.0.0.1:52274 - "GET /health HTTP/1.1" 200 OK
-[0;36m(APIServer pid=1217677)[0;0m INFO:     127.0.0.1:40926 - "GET /health HTTP/1.1" 200 OK
-[0;36m(APIServer pid=1217677)[0;0m INFO 09-08 15:30:02 [launcher.py:110] Shutting down FastAPI HTTP server.
-[rank0]:[W908 15:30:02.136828720 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
-[0;36m(APIServer pid=1217677)[0;0m INFO:     Shutting down
-[0;36m(APIServer pid=1217677)[0;0m INFO:     Waiting for application shutdown.
-[0;36m(APIServer pid=1217677)[0;0m INFO:     Application shutdown complete.
-WARNING 09-08 15:30:39 [registry.py:801] Model architecture Qwen3ASRForConditionalGeneration is already registered, and will be overwritten by the new model class <class 'qwen_asr.core.vllm_backend.qwen3_asr.Qwen3ASRForConditionalGeneration'>.
-(APIServer pid=1251836) INFO 09-08 15:30:40 [api_server.py:1272] vLLM API server version 0.14.0
-(APIServer pid=1251836) INFO 09-08 15:30:40 [utils.py:263] non-default args: {'model_tag': '/root/asr/Qwen3-ASR-0.6B', 'host': '127.0.0.1', 'port': 8001, 'model': '/root/asr/Qwen3-ASR-0.6B', 'max_model_len': 4096, 'gpu_memory_utilization': 0.8, 'max_num_batched_tokens': 8192, 'max_num_seqs': 30}
-(APIServer pid=1251836) INFO 09-08 15:30:40 [model.py:530] Resolved architecture: Qwen3ASRForConditionalGeneration
-(APIServer pid=1251836) ERROR 09-08 15:30:40 [repo_utils.py:65] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/root/asr/Qwen3-ASR-0.6B'. Use `repo_type` argument if needed., retrying 1 of 2
-(APIServer pid=1251836) ERROR 09-08 15:30:42 [repo_utils.py:63] Error retrieving safetensors: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/root/asr/Qwen3-ASR-0.6B'. Use `repo_type` argument if needed.
-(APIServer pid=1251836) INFO 09-08 15:30:42 [model.py:1866] Downcasting torch.float32 to torch.bfloat16.
-(APIServer pid=1251836) INFO 09-08 15:30:42 [model.py:1545] Using max model len 4096
-(APIServer pid=1251836) INFO 09-08 15:30:43 [scheduler.py:229] Chunked prefill is enabled with max_num_batched_tokens=8192.
-(APIServer pid=1251836) INFO 09-08 15:30:43 [vllm.py:630] Asynchronous scheduling is enabled.
-(APIServer pid=1251836) INFO 09-08 15:30:43 [vllm.py:637] Disabling NCCL for DP synchronization when using async scheduling.
-(APIServer pid=1251836) The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-(APIServer pid=1251836) The following generation flags are not valid and may be ignored: ['temperature']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
-WARNING 09-08 15:30:50 [registry.py:801] Model architecture Qwen3ASRForConditionalGeneration is already registered, and will be overwritten by the new model class <class 'qwen_asr.core.vllm_backend.qwen3_asr.Qwen3ASRForConditionalGeneration'>.
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:51 [core.py:97] Initializing a V1 LLM engine (v0.14.0) with config: model='/root/asr/Qwen3-ASR-0.6B', speculative_config=None, tokenizer='/root/asr/Qwen3-ASR-0.6B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/root/asr/Qwen3-ASR-0.6B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::kda_attention', 'vllm::sparse_attn_indexer'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_split_points': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': True, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 56, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': True}, 'local_cache_dir': None}
-(EngineCore_DP0 pid=1252528) The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:52 [parallel_state.py:1214] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://172.20.184.117:48299 backend=nccl
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:52 [parallel_state.py:1425] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A
-(EngineCore_DP0 pid=1252528) The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-(EngineCore_DP0 pid=1252528) The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:56 [gpu_model_runner.py:3808] Starting to load model /root/asr/Qwen3-ASR-0.6B...
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:56 [mm_encoder_attention.py:86] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:56 [vllm.py:630] Asynchronous scheduling is enabled.
-(EngineCore_DP0 pid=1252528) /root/asr/.venv/lib/python3.12/site-packages/tvm_ffi/_optional_torch_c_dlpack.py:192: UserWarning: Failed to JIT torch c dlpack extension, EnvTensorAllocator will not be enabled.
-(EngineCore_DP0 pid=1252528) We recommend installing via `pip install torch-c-dlpack-ext`
-(EngineCore_DP0 pid=1252528)   warnings.warn(
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:58 [cuda.py:351] Using FLASH_ATTN attention backend out of potential backends: ('FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION')
-(EngineCore_DP0 pid=1252528) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-(EngineCore_DP0 pid=1252528) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  3.64it/s]
-(EngineCore_DP0 pid=1252528) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  3.64it/s]
-(EngineCore_DP0 pid=1252528)
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:58 [default_loader.py:291] Loading weights took 0.30 seconds
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:59 [gpu_model_runner.py:3905] Model loading took 1.53 GiB memory and 2.046412 seconds
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:30:59 [gpu_model_runner.py:4715] Encoder cache will be initialized with a budget of 8192 tokens, and profiled with 21 audio items of the maximum feature size.
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:04 [backends.py:644] Using cache directory: /root/.cache/vllm/torch_compile_cache/e9dca33af4/rank_0_0/backbone for vLLM's torch.compile
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:04 [backends.py:704] Dynamo bytecode transform time: 4.33 s
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:08 [backends.py:261] Cache the graph of compile range (1, 8192) for later use
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:09 [backends.py:278] Compiling a graph for compile range (1, 8192) takes 1.67 s
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:09 [monitor.py:34] torch.compile takes 6.00 s in total
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:10 [gpu_worker.py:358] Available KV cache memory: 19.86 GiB
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:10 [kv_cache_utils.py:1305] GPU KV cache size: 185,920 tokens
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:10 [kv_cache_utils.py:1310] Maximum concurrency for 4,096 tokens per request: 45.39x
-(EngineCore_DP0 pid=1252528) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/10 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  40%|████      | 4/10 [00:00<00:00, 33.57it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  90%|█████████ | 9/10 [00:00<00:00, 38.03it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 10/10 [00:00<00:00, 35.30it/s]
-(EngineCore_DP0 pid=1252528) Capturing CUDA graphs (decode, FULL):   0%|          | 0/6 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  17%|█▋        | 1/6 [00:00<00:00,  6.69it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 6/6 [00:00<00:00, 26.44it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 6/6 [00:00<00:00, 23.02it/s]
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:12 [gpu_model_runner.py:4856] Graph capturing finished in 1 secs, took 0.07 GiB
-(EngineCore_DP0 pid=1252528) INFO 09-08 15:31:12 [core.py:273] init engine (profile, create kv cache, warmup model) took 13.12 seconds
-(APIServer pid=1251836) INFO 09-08 15:31:13 [api_server.py:1014] Supported tasks: ['generate', 'transcription']
-(APIServer pid=1251836) WARNING 09-08 15:31:13 [model.py:1358] Default sampling parameters have been overridden by the model's Hugging Face generation config recommended from the model creator. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
-(APIServer pid=1251836) INFO 09-08 15:31:13 [serving_responses.py:224] Using default chat sampling params from model: {'temperature': 1e-06}
-(APIServer pid=1251836) INFO 09-08 15:31:13 [serving_chat.py:146] Using default chat sampling params from model: {'temperature': 1e-06}
-(APIServer pid=1251836) INFO 09-08 15:31:13 [serving_chat.py:182] Warming up chat template processing...
-(APIServer pid=1251836) The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-(APIServer pid=1251836) INFO 09-08 15:31:13 [chat_utils.py:599] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
-(APIServer pid=1251836) INFO 09-08 15:31:13 [serving_chat.py:218] Chat template warmup completed in 623.8ms
-(APIServer pid=1251836) INFO 09-08 15:31:13 [serving_completion.py:78] Using default completion sampling params from model: {'temperature': 1e-06}
-(APIServer pid=1251836) The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-(APIServer pid=1251836) INFO 09-08 15:31:14 [speech_to_text.py:111] Overwriting default completion sampling param with: {'temperature': 1e-06}
-(APIServer pid=1251836) INFO 09-08 15:31:14 [speech_to_text.py:138] Warming up audio preprocessing libraries...
-(APIServer pid=1251836) INFO 09-08 15:31:14 [speech_to_text.py:174] Audio preprocessing warmup completed in 0.31s
-(APIServer pid=1251836) INFO 09-08 15:31:14 [speech_to_text.py:201] Warming up multimodal input processor...
-(APIServer pid=1251836) The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-(APIServer pid=1251836) The tokenizer you are loading from '/root/asr/Qwen3-ASR-0.6B' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
-(APIServer pid=1251836) INFO 09-08 15:31:17 [speech_to_text.py:234] Input processor warmup completed in 2.85s
-(APIServer pid=1251836) INFO 09-08 15:31:17 [speech_to_text.py:111] Overwriting default completion sampling param with: {'temperature': 1e-06}
-(APIServer pid=1251836) INFO 09-08 15:31:17 [speech_to_text.py:138] Warming up audio preprocessing libraries...
-(APIServer pid=1251836) INFO 09-08 15:31:17 [speech_to_text.py:174] Audio preprocessing warmup completed in 0.00s
-(APIServer pid=1251836) INFO 09-08 15:31:17 [speech_to_text.py:201] Warming up multimodal input processor...
-(APIServer pid=1251836) INFO 09-08 15:31:17 [speech_to_text.py:234] Input processor warmup completed in 0.00s
-(APIServer pid=1251836) INFO 09-08 15:31:17 [serving_chat.py:146] Using default chat sampling params from model: {'temperature': 1e-06}
-(APIServer pid=1251836) INFO 09-08 15:31:17 [api_server.py:1346] Starting vLLM API server 0 on http://127.0.0.1:8001
-(APIServer pid=1251836) INFO 09-08 15:31:17 [launcher.py:38] Available routes are:
-(APIServer pid=1251836) INFO 09-08 15:31:17 [launcher.py:46] Route: /openapi.json, Methods: HEAD, GET
-(APIServer pid=1251836) INFO 09-08 15:31:17 [launcher.py:46] Route: /docs, Methods: HEAD, GET
-(APIServer pid=1251836) INFO 09-08 15:31:17 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: HEAD, GET
-(APIServer pid=1251836) INFO 09-08 15:31:17 [launcher.py:46] Route: /redoc, Methods: HEAD, GET
-(APIServer pid=1251836) INFO 09-08 15:31:17 [launcher.py:46] Route: /metrics, Methods: GET
-(APIServer pid=1251836) INFO:     Started server process [1251836]
-(APIServer pid=1251836) INFO:     Waiting for application startup.
-(APIServer pid=1251836) INFO:     Application startup complete.
-(APIServer pid=1251836) INFO:     127.0.0.1:47262 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:51756 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:51770 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:37298 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:37302 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 15:53:26 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:59840 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 15:53:27 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, MM cache hit rate: 33.3%
-(APIServer pid=1251836) INFO 09-08 15:53:37 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%, MM cache hit rate: 33.3%
-(APIServer pid=1251836) WARNING 09-08 15:54:14 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:34308 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 15:54:17 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 37.5%, MM cache hit rate: 50.0%
-(APIServer pid=1251836) INFO 09-08 15:54:27 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 37.5%, MM cache hit rate: 50.0%
-(APIServer pid=1251836) WARNING 09-08 15:54:33 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:33904 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 15:54:37 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 14.4%, MM cache hit rate: 40.0%
-(APIServer pid=1251836) WARNING 09-08 15:54:38 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:33904 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 15:54:47 [loggers.py:257] Engine 000: Avg prompt throughput: 6.5 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 12.0%, MM cache hit rate: 33.3%
-(APIServer pid=1251836) INFO 09-08 15:54:57 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 12.0%, MM cache hit rate: 33.3%
-(APIServer pid=1251836) INFO:     127.0.0.1:37844 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:37860 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:53314 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:19:15 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:60290 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:19:17 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 20.7%, MM cache hit rate: 42.9%
-(APIServer pid=1251836) INFO 09-08 16:19:27 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 20.7%, MM cache hit rate: 42.9%
-(APIServer pid=1251836) WARNING 09-08 16:19:34 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:54098 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:19:37 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 43.0%, MM cache hit rate: 50.0%
-(APIServer pid=1251836) WARNING 09-08 16:19:39 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:54098 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:19:44 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:54098 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:19:47 [loggers.py:257] Engine 000: Avg prompt throughput: 12.9 tokens/s, Avg generation throughput: 2.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 50.1%, MM cache hit rate: 60.0%
-(APIServer pid=1251836) INFO 09-08 16:19:57 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 50.1%, MM cache hit rate: 60.0%
-(APIServer pid=1251836) WARNING 09-08 16:20:00 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:51978 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:20:05 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:51978 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:20:07 [loggers.py:257] Engine 000: Avg prompt throughput: 27.1 tokens/s, Avg generation throughput: 5.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 61.4%, MM cache hit rate: 66.7%
-(APIServer pid=1251836) WARNING 09-08 16:20:10 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:51978 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:20:17 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 62.1%, MM cache hit rate: 69.2%
-(APIServer pid=1251836) WARNING 09-08 16:20:27 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:52200 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:20:27 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 66.9%, MM cache hit rate: 71.4%
-(APIServer pid=1251836) WARNING 09-08 16:20:32 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:52200 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:20:37 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:52200 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:20:37 [loggers.py:257] Engine 000: Avg prompt throughput: 12.9 tokens/s, Avg generation throughput: 2.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 68.7%, MM cache hit rate: 75.0%
-(APIServer pid=1251836) INFO 09-08 16:20:47 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 68.7%, MM cache hit rate: 75.0%
-(APIServer pid=1251836) WARNING 09-08 16:20:54 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:36648 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:20:57 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 71.7%, MM cache hit rate: 76.5%
-(APIServer pid=1251836) WARNING 09-08 16:20:59 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:36648 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:21:04 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:36648 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:21:07 [loggers.py:257] Engine 000: Avg prompt throughput: 12.9 tokens/s, Avg generation throughput: 2.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 72.8%, MM cache hit rate: 78.9%
-(APIServer pid=1251836) INFO 09-08 16:21:17 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 72.8%, MM cache hit rate: 78.9%
-(APIServer pid=1251836) WARNING 09-08 16:21:20 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:32800 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:21:25 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:32800 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:21:27 [loggers.py:257] Engine 000: Avg prompt throughput: 27.1 tokens/s, Avg generation throughput: 5.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 75.6%, MM cache hit rate: 81.0%
-(APIServer pid=1251836) INFO 09-08 16:21:37 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 75.6%, MM cache hit rate: 81.0%
-(APIServer pid=1251836) INFO:     127.0.0.1:59516 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:59520 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:25:07 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:42558 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:25:08 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 75.6%, MM cache hit rate: 81.8%
-(APIServer pid=1251836) INFO 09-08 16:25:18 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 75.6%, MM cache hit rate: 81.8%
-(APIServer pid=1251836) WARNING 09-08 16:25:28 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:35348 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:25:37 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:37620 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:25:38 [loggers.py:257] Engine 000: Avg prompt throughput: 27.1 tokens/s, Avg generation throughput: 5.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 77.7%, MM cache hit rate: 83.3%
-(APIServer pid=1251836) WARNING 09-08 16:25:47 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:42486 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:25:48 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 77.6%, MM cache hit rate: 84.0%
-(APIServer pid=1251836) INFO 09-08 16:25:58 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 77.6%, MM cache hit rate: 84.0%
-(APIServer pid=1251836) WARNING 09-08 16:26:09 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:57018 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:26:17 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:43632 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:26:18 [loggers.py:257] Engine 000: Avg prompt throughput: 27.1 tokens/s, Avg generation throughput: 5.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 79.3%, MM cache hit rate: 85.2%
-(APIServer pid=1251836) WARNING 09-08 16:26:27 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:40010 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:26:28 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 79.2%, MM cache hit rate: 85.7%
-(APIServer pid=1251836) INFO 09-08 16:26:38 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 79.2%, MM cache hit rate: 85.7%
-(APIServer pid=1251836) WARNING 09-08 16:26:47 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:37826 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:26:48 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 80.2%, MM cache hit rate: 86.2%
-(APIServer pid=1251836) WARNING 09-08 16:26:57 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:44334 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:26:58 [loggers.py:257] Engine 000: Avg prompt throughput: 6.5 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 80.5%, MM cache hit rate: 86.7%
-(APIServer pid=1251836) WARNING 09-08 16:27:07 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:36760 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:27:08 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 80.4%, MM cache hit rate: 87.1%
-(APIServer pid=1251836) INFO 09-08 16:27:18 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 80.4%, MM cache hit rate: 87.1%
-(APIServer pid=1251836) WARNING 09-08 16:27:29 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:43948 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:27:38 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 81.2%, MM cache hit rate: 87.5%
-(APIServer pid=1251836) WARNING 09-08 16:27:39 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:36968 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:27:48 [loggers.py:257] Engine 000: Avg prompt throughput: 6.5 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 81.5%, MM cache hit rate: 87.9%
-(APIServer pid=1251836) WARNING 09-08 16:27:49 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:40480 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:27:58 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 81.4%, MM cache hit rate: 88.2%
-(APIServer pid=1251836) INFO 09-08 16:28:08 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 81.4%, MM cache hit rate: 88.2%
-(APIServer pid=1251836) WARNING 09-08 16:28:10 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:57570 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:28:18 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 82.1%, MM cache hit rate: 88.6%
-(APIServer pid=1251836) WARNING 09-08 16:28:20 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:43052 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:28:28 [loggers.py:257] Engine 000: Avg prompt throughput: 6.5 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 82.4%, MM cache hit rate: 88.9%
-(APIServer pid=1251836) INFO 09-08 16:28:38 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 82.4%, MM cache hit rate: 88.9%
-(APIServer pid=1251836) INFO:     127.0.0.1:57528 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:57534 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:50664 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO:     127.0.0.1:50678 - "GET /health HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:53:12 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:49512 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:53:18 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 82.2%, MM cache hit rate: 89.2%
-(APIServer pid=1251836) INFO 09-08 16:53:28 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 82.2%, MM cache hit rate: 89.2%
-(APIServer pid=1251836) WARNING 09-08 16:53:31 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:35358 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:53:38 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 82.8%, MM cache hit rate: 89.5%
-(APIServer pid=1251836) WARNING 09-08 16:53:40 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:54110 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:53:47 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:54152 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:53:48 [loggers.py:257] Engine 000: Avg prompt throughput: 12.9 tokens/s, Avg generation throughput: 2.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 82.9%, MM cache hit rate: 90.0%
-(APIServer pid=1251836) INFO 09-08 16:53:58 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 82.9%, MM cache hit rate: 90.0%
-(APIServer pid=1251836) WARNING 09-08 16:54:06 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:33844 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:54:08 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 83.4%, MM cache hit rate: 90.2%
-(APIServer pid=1251836) WARNING 09-08 16:54:13 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:60946 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:54:18 [loggers.py:257] Engine 000: Avg prompt throughput: 6.5 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 83.6%, MM cache hit rate: 90.5%
-(APIServer pid=1251836) WARNING 09-08 16:54:21 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:54446 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:54:28 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 83.5%, MM cache hit rate: 90.7%
-(APIServer pid=1251836) INFO 09-08 16:54:38 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 83.5%, MM cache hit rate: 90.7%
-(APIServer pid=1251836) WARNING 09-08 16:54:40 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:48600 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:54:48 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 83.9%, MM cache hit rate: 90.9%
-(APIServer pid=1251836) WARNING 09-08 16:54:48 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:48622 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:54:55 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:43314 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:54:58 [loggers.py:257] Engine 000: Avg prompt throughput: 12.9 tokens/s, Avg generation throughput: 2.2 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 84.0%, MM cache hit rate: 91.3%
-(APIServer pid=1251836) INFO 09-08 16:55:08 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 84.0%, MM cache hit rate: 91.3%
-(APIServer pid=1251836) WARNING 09-08 16:55:16 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:59260 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:55:18 [loggers.py:257] Engine 000: Avg prompt throughput: 20.6 tokens/s, Avg generation throughput: 4.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 84.4%, MM cache hit rate: 91.5%
-(APIServer pid=1251836) WARNING 09-08 16:55:23 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:45138 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:55:28 [loggers.py:257] Engine 000: Avg prompt throughput: 6.5 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 84.6%, MM cache hit rate: 91.7%
-(APIServer pid=1251836) WARNING 09-08 16:55:30 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:37682 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:55:38 [loggers.py:257] Engine 000: Avg prompt throughput: 6.4 tokens/s, Avg generation throughput: 1.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 84.5%, MM cache hit rate: 91.8%
-(APIServer pid=1251836) INFO 09-08 16:55:48 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 84.5%, MM cache hit rate: 91.8%
-(APIServer pid=1251836) WARNING 09-08 16:55:49 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:33360 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) WARNING 09-08 16:55:57 [sampling_params.py:326] temperature 1e-06 is less than 0.01, which may cause numerical errors nan or inf in tensors. We have maxed it out to 0.01.
-(APIServer pid=1251836) INFO:     127.0.0.1:33398 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=1251836) INFO 09-08 16:55:58 [loggers.py:257] Engine 000: Avg prompt throughput: 27.1 tokens/s, Avg generation throughput: 5.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 85.0%, MM cache hit rate: 92.2%
-(APIServer pid=1251836) INFO 09-08 16:56:08 [loggers.py:257] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 85.0%, MM cache hit rate: 92.2%
