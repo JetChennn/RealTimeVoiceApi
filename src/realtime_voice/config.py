@@ -27,5 +27,8 @@ class Settings(BaseSettings):
     session_outbound_queue_max_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
     thinker_cleanup_timeout_seconds: float = Field(default=120.0, gt=0)
     tts_drain_timeout_seconds: float = Field(default=120.0, gt=0)
+    # 下游 /health 后台探测：周期刷新缓存，避免 /health 路由产生网络等待
+    downstream_probe_interval_seconds: float = Field(default=10.0, gt=0)
+    downstream_probe_timeout_seconds: float = Field(default=2.0, gt=0)
     # 非空时透传给 TTS，跳过其内部 qwen-flash prompt 生成（可消除 ~18s 网络延迟）
     tts_prompt_override: str = ""

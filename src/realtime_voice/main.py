@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
 
+import httpx
 from fastapi import FastAPI, Response, WebSocket
 from prometheus_client import CONTENT_TYPE_LATEST
 
@@ -15,6 +16,8 @@ from realtime_voice.observability.metrics import Metrics
 from realtime_voice.session.registry import RuntimeFactory
 from realtime_voice.transport.factory import configure_services
 from realtime_voice.transport.websocket import serve_realtime
+
+DOWNSTREAM_SERVICES = ("asr", "thinker", "tts")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +51,65 @@ async def run_event_loop_lag_sampler(
         metrics.record_event_loop_lag(max(0.0, clock() - deadline))
 
 
+def classify_downstream_payload(status_code: int, payload: object) -> str:
+    """把下游 /health 的 HTTP 状态码与 JSON 体归类为统一状态词。
+
+    下游各自异构：ASR 返回 200 空体，Thinker 上报 {"ok": true}，
+    TTS 上报 {"status": "healthy"}；自报的非健康状态词（如 degraded）
+    直接透传，交由 ready 判定识别。
+    """
+    if status_code != 200:
+        return "unhealthy"
+    if isinstance(payload, dict):
+        status = payload.get("status")
+        if isinstance(status, str) and status:
+            return status
+        if payload.get("ok") is False:
+            return "unhealthy"
+    return "ok"
+
+
+def _optional_json(response: httpx.Response) -> object:
+    """尽力解析 JSON 体；空体或非 JSON 视为无结构化健康信息。"""
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+async def probe_downstream(http: httpx.AsyncClient, timeout: float) -> dict[str, str]:
+    """探测单个下游 /health 端点，返回可写入 downstream_health 的状态字典。"""
+    try:
+        response = await http.get("/health", timeout=timeout)
+    except Exception as error:  # noqa: BLE001 - 探测失败本身就是健康状态
+        return {"status": "unreachable", "error_type": type(error).__name__}
+    return {"status": classify_downstream_payload(response.status_code, _optional_json(response))}
+
+
+async def run_downstream_health_prober(
+    services: "AppServices",
+    *,
+    interval: float,
+    timeout: float = 2.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """周期并发探测下游 /health，把结果刷新进 downstream_health 缓存。
+
+    首轮探测延迟一个周期，给下游服务启动留出时间；/health 路由
+    始终只读该缓存，不产生任何网络等待。
+    """
+    while True:
+        await sleep(interval)
+        states = await asyncio.gather(
+            *(
+                probe_downstream(getattr(services, f"{name}_client").http, timeout)
+                for name in DOWNSTREAM_SERVICES
+            )
+        )
+        for name, state in zip(DOWNSTREAM_SERVICES, states, strict=True):
+            services.downstream_health[name] = state
+
+
 @dataclass
 class AppServices:
     """Application services used by the realtime WebSocket route."""
@@ -76,7 +138,7 @@ def create_app(
         settings=resolved,
         runtime_factory=runtime_factory,
         metrics=metrics or Metrics(),
-        downstream_health={name: {"status": "unknown"} for name in ("asr", "thinker", "tts")},
+        downstream_health={name: {"status": "unknown"} for name in DOWNSTREAM_SERVICES},
     )
     configure_services(services)
 
@@ -91,11 +153,20 @@ def create_app(
             ),
             name="event-loop-lag-sampler",
         )
+        prober = asyncio.create_task(
+            run_downstream_health_prober(
+                services,
+                interval=resolved.downstream_probe_interval_seconds,
+                timeout=resolved.downstream_probe_timeout_seconds,
+            ),
+            name="downstream-health-prober",
+        )
         try:
             yield
         finally:
             sampler.cancel()
-            await asyncio.gather(sampler, return_exceptions=True)
+            prober.cancel()
+            await asyncio.gather(sampler, prober, return_exceptions=True)
             await services.detector_offload.aclose()
 
     app = FastAPI(title="RealTimeVoiceAPI", version="1.0.0", lifespan=lifespan)
@@ -104,7 +175,7 @@ def create_app(
 
     async def limiter_state() -> dict[str, dict[str, object]]:
         snapshots: dict[str, dict[str, object]] = {}
-        for name in ("asr", "thinker", "tts"):
+        for name in DOWNSTREAM_SERVICES:
             try:
                 snapshot = await getattr(services, f"{name}_client").admission.snapshot()
             except Exception as error:  # noqa: BLE001 - health must remain available

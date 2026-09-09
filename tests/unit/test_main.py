@@ -1,11 +1,16 @@
 import asyncio
 import threading
 
+import httpx
 from fastapi.testclient import TestClient
 
 from realtime_voice.audio.vad import SpeechSegment
 from realtime_voice.config import Settings
-from realtime_voice.main import create_app
+from realtime_voice.main import (
+    classify_downstream_payload,
+    create_app,
+    run_downstream_health_prober,
+)
 from realtime_voice.protocol.server_messages import TextDelta
 from realtime_voice.session.actor import QueueAsr
 from tests.unit.session.test_runtime import make_runtime
@@ -305,3 +310,93 @@ def test_lifespan_sampler_records_injected_event_loop_lag() -> None:
         rendered = app.state.services.metrics.render().decode()
         assert "realtime_voice_event_loop_lag_seconds_count 1.0" in rendered
         assert "realtime_voice_event_loop_lag_seconds_sum 0.25" in rendered
+
+
+class _FakeDownstreamResponse:
+    """模拟 httpx.Response：仅提供 status_code 与受限的 json()。"""
+
+    def __init__(self, status_code: int, payload: object = None) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> object:
+        if self._payload is None:
+            raise ValueError("empty body")
+        return self._payload
+
+
+class _FakeDownstreamHttp:
+    """模拟共享 httpx.AsyncClient：返回预设响应或抛出预设异常。"""
+
+    def __init__(self, response=None, error: Exception | None = None) -> None:
+        self._response = response
+        self._error = error
+
+    async def get(self, url: str, timeout: float | None = None):
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+async def _run_one_probe_round(services) -> dict[str, dict[str, str]]:
+    """驱动 prober 恰好完成一轮探测，返回刷新后的 downstream_health 快照。"""
+    sleeps = 0
+    round_done = asyncio.Event()
+    hold = asyncio.Event()
+
+    async def fake_sleep(delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:  # 第二次休眠开始 ⇒ 第一轮探测结果已写入缓存
+            round_done.set()
+            await hold.wait()
+
+    task = asyncio.create_task(
+        run_downstream_health_prober(services, interval=10.0, sleep=fake_sleep)
+    )
+    await asyncio.wait_for(round_done.wait(), timeout=1.0)
+    snapshot = {name: dict(state) for name, state in services.downstream_health.items()}
+    task.cancel()
+    hold.set()
+    await asyncio.gather(task, return_exceptions=True)
+    return snapshot
+
+
+def test_classify_downstream_payload_maps_heterogeneous_bodies() -> None:
+    assert classify_downstream_payload(200, None) == "ok"  # ASR：200 空体
+    assert classify_downstream_payload(200, {"ok": True}) == "ok"  # Thinker
+    assert classify_downstream_payload(200, {"status": "healthy"}) == "healthy"  # TTS
+    assert classify_downstream_payload(200, {"status": "degraded"}) == "degraded"  # 透传自报降级
+    assert classify_downstream_payload(200, {"ok": False}) == "unhealthy"
+    assert classify_downstream_payload(503, {"status": "unhealthy"}) == "unhealthy"
+
+
+def test_downstream_prober_refreshes_cached_health() -> None:
+    app = create_app(Settings(_env_file=None))
+    services = app.state.services
+    services.asr_client.http = _FakeDownstreamHttp(_FakeDownstreamResponse(200))
+    services.thinker_client.http = _FakeDownstreamHttp(
+        _FakeDownstreamResponse(200, {"ok": True})
+    )
+    services.tts_client.http = _FakeDownstreamHttp(_FakeDownstreamResponse(503))
+
+    states = asyncio.run(_run_one_probe_round(services))
+
+    assert states["asr"] == {"status": "ok"}
+    assert states["thinker"] == {"status": "ok"}
+    assert states["tts"] == {"status": "unhealthy"}
+
+
+def test_downstream_prober_marks_unreachable_with_error_type() -> None:
+    app = create_app(Settings(_env_file=None))
+    services = app.state.services
+    for name in ("asr", "thinker", "tts"):
+        getattr(services, f"{name}_client").http = _FakeDownstreamHttp(
+            error=httpx.ConnectError("connection refused")
+        )
+
+    states = asyncio.run(_run_one_probe_round(services))
+
+    assert states["asr"] == {"status": "unreachable", "error_type": "ConnectError"}
+    assert states["thinker"] == {"status": "unreachable", "error_type": "ConnectError"}
+    assert states["tts"] == {"status": "unreachable", "error_type": "ConnectError"}
