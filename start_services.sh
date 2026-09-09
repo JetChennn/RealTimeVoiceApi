@@ -298,6 +298,7 @@ start_tts() {
         export SOULX_STREAM_TOKEN_HOP_LEN=15
         export FLOW_N_TIMESTEPS=10
         export VLLM_CUDA_VISIBLE_DEVICES="$TTS_VLLM_CUDA_VISIBLE_DEVICES"
+        export VLLM_GPU_MEMORY_UTILIZATION=0.2
         export CUDA_VISIBLE_DEVICES="$TTS_CUDA_VISIBLE_DEVICES"
         exec "$TTS_PYTHON" -m uvicorn api.dialogue_tts_api:app \
             --host "$INTERNAL_HOST" \
