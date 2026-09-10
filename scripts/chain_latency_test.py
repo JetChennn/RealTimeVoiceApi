@@ -1,10 +1,11 @@
-"""Exercise five sequential three-turn WebSocket rounds and report end-to-end latency.
+"""Exercise one WebSocket session with N sequential turns of a single audio file.
 
-The default utterances are resolved relative to the repository layout:
-``asr_zh.wav -> asr_en.wav -> asr_zh.wav``.  Each round opens one WebSocket
-session and waits for a completed response before sending the next utterance,
-so the timings describe the full ASR -> Thinker -> TTS path without turn
-interruptions.
+The default utterance is resolved relative to the repository layout
+(``asr_zh.wav``).  The script opens a single WebSocket connection and sends the
+test audio ``--turns`` times, waiting for each completed response before
+sending the next utterance, so the timings describe the full
+ASR -> Thinker -> TTS path per turn without turn interruptions.  The report
+is rendered as a human-readable Markdown document in Chinese.
 """
 
 from __future__ import annotations
@@ -34,12 +35,36 @@ else:
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 WORKSPACE_DIR = PROJECT_DIR.parent
-DEFAULT_AUDIO = (
-    WORKSPACE_DIR / "asr" / "asr_zh.wav",
-    WORKSPACE_DIR / "asr" / "asr_en.wav",
-    WORKSPACE_DIR / "asr" / "asr_zh.wav",
-)
+DEFAULT_AUDIO = WORKSPACE_DIR / "asr" / "asr_zh.wav"
 SILENCE_MS = 600
+
+# 每个延迟指标的中文名称与说明，顺序即报告中的展示顺序。
+METRIC_LABELS: dict[str, tuple[str, str]] = {
+    "speech_end_to_asr_ms": (
+        "语音结束 → ASR 结果",
+        "发送完测试语音（含尾部静音）到收到 ASR 识别结果的耗时，衡量 ASR 链路延迟",
+    ),
+    "asr_to_first_llm_ms": (
+        "ASR 结果 → 首段文本",
+        "收到 ASR 结果到收到第一段 LLM 回复文本的耗时，衡量 LLM 首包延迟",
+    ),
+    "first_llm_to_text_end_ms": (
+        "首段文本 → 文本结束",
+        "第一段 LLM 文本到文本全部生成完毕的耗时，衡量 LLM 流式生成时长",
+    ),
+    "text_end_to_first_tts_ms": (
+        "文本结束 → 首段音频",
+        "文本生成结束到收到第一段 TTS 音频的耗时，衡量 TTS 首包延迟",
+    ),
+    "first_tts_to_response_end_ms": (
+        "首段音频 → 响应结束",
+        "第一段 TTS 音频到整轮响应结束的耗时，衡量 TTS 流式合成时长",
+    ),
+    "speech_end_to_response_end_ms": (
+        "语音结束 → 响应结束",
+        "整轮端到端耗时，即从语音发送完毕到收到完整回复的总延迟",
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +76,6 @@ class PreparedAudio:
 
 @dataclass(slots=True)
 class TurnResult:
-    round_index: int
     turn_index: int
     audio_path: str
     audio_duration_ms: float
@@ -175,14 +199,13 @@ async def send_turn(
     websocket: Any,
     *,
     session_id: str,
-    round_index: int,
     turn_index: int,
     audio: PreparedAudio,
     sample_rate: int,
     sequence: int,
     timeout: float,
 ) -> tuple[TurnResult, int]:
-    result = TurnResult(round_index, turn_index, audio.path, audio.duration_ms)
+    result = TurnResult(turn_index, audio.path, audio.duration_ms)
     first_speech_sent_at: float | None = None
     speech_ended_at: float | None = None
 
@@ -273,16 +296,16 @@ async def send_turn(
     return result, sequence
 
 
-async def run_round(
+async def run_session(
     *,
-    round_index: int,
     ws_url: str,
     metrics_url: str,
-    audio: Sequence[PreparedAudio],
+    audio: PreparedAudio,
+    turns: int,
     sample_rate: int,
     timeout: float,
 ) -> list[TurnResult]:
-    session_id = f"chain-latency-{round_index}-{uuid.uuid4().hex}"
+    session_id = f"chain-latency-{uuid.uuid4().hex}"
     results: list[TurnResult] = []
     async with connect(ws_url, max_size=None, open_timeout=timeout) as websocket:
         await websocket.send(json.dumps(create_session_message(session_id, sample_rate)))
@@ -291,14 +314,13 @@ async def run_round(
             raise RuntimeError(f"session creation failed: {created}")
 
         sequence = 0
-        for turn_index, utterance in enumerate(audio, start=1):
+        for turn_index in range(1, turns + 1):
             before = await asyncio.to_thread(metrics_snapshot, metrics_url)
             result, sequence = await send_turn(
                 websocket,
                 session_id=session_id,
-                round_index=round_index,
                 turn_index=turn_index,
-                audio=utterance,
+                audio=audio,
                 sample_rate=sample_rate,
                 sequence=sequence,
                 timeout=timeout,
@@ -315,75 +337,139 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ws-url", default="ws://127.0.0.1:8000/v1/realtime")
     parser.add_argument("--metrics-url", default="http://127.0.0.1:8000/metrics")
-    parser.add_argument("--rounds", type=int, default=5)
+    parser.add_argument("--turns", type=int, default=5, help="number of times to send the audio within one connection")
     parser.add_argument("--sample-rate", type=int, default=16000, choices=(16000, 24000, 48000))
     parser.add_argument("--timeout", type=float, default=240.0)
-    parser.add_argument("--audio", type=Path, nargs=3, default=DEFAULT_AUDIO, metavar=("AUDIO_1", "AUDIO_2", "AUDIO_3"))
-    parser.add_argument("--report", type=Path, help="JSON report path; defaults to reports/chain_latency_<UTC>.json")
+    parser.add_argument("--audio", type=Path, default=DEFAULT_AUDIO, metavar="AUDIO")
+    parser.add_argument("--report", type=Path, help="Markdown report path; defaults to reports/chain_latency_<UTC>.md")
     args = parser.parse_args(argv)
-    if args.rounds < 1:
-        parser.error("--rounds must be positive")
+    if args.turns < 1:
+        parser.error("--turns must be positive")
     return args
 
 
 async def async_main(args: argparse.Namespace) -> dict[str, object]:
-    audio = [decode_as_pcm16(path, args.sample_rate) for path in args.audio]
+    audio = decode_as_pcm16(args.audio, args.sample_rate)
     started_at = time.monotonic()
-    rounds: list[list[TurnResult]] = []
-    for round_index in range(1, args.rounds + 1):
-        print(f"Starting round {round_index}/{args.rounds}...")
-        rounds.append(
-            await run_round(
-                round_index=round_index,
-                ws_url=args.ws_url,
-                metrics_url=args.metrics_url,
-                audio=audio,
-                sample_rate=args.sample_rate,
-                timeout=args.timeout,
-            )
-        )
-
-    turns = [turn for round_turns in rounds for turn in round_turns]
-    latency_fields = (
-        "speech_end_to_asr_ms",
-        "asr_to_first_llm_ms",
-        "first_llm_to_text_end_ms",
-        "text_end_to_first_tts_ms",
-        "first_tts_to_response_end_ms",
-        "speech_end_to_response_end_ms",
+    print(f"开始测试：单连接内发送 {args.turns} 轮音频 {audio.path}...")
+    turns = await run_session(
+        ws_url=args.ws_url,
+        metrics_url=args.metrics_url,
+        audio=audio,
+        turns=args.turns,
+        sample_rate=args.sample_rate,
+        timeout=args.timeout,
     )
+
     return {
         "started_at_utc": datetime.now(UTC).isoformat(),
         "duration_seconds": round(time.monotonic() - started_at, 3),
         "configuration": {
             "ws_url": args.ws_url,
             "metrics_url": args.metrics_url,
-            "rounds": args.rounds,
-            "turns_per_round": len(audio),
+            "turns": args.turns,
             "sample_rate": args.sample_rate,
-            "audio": [{"path": item.path, "duration_ms": item.duration_ms} for item in audio],
+            "audio": {"path": audio.path, "duration_ms": audio.duration_ms},
         },
         "summary": {
             "total_turns": len(turns),
             "completed_turns": sum(turn.response_status == "COMPLETED" for turn in turns),
             "failed_turns": sum(turn.error_code is not None for turn in turns),
-            "latency": {field: _summary(turns, field) for field in latency_fields},
+            "latency": {field: _summary(turns, field) for field in METRIC_LABELS},
         },
-        "rounds": [[asdict(turn) for turn in round_turns] for round_turns in rounds],
+        "turns": [asdict(turn) for turn in turns],
     }
+
+
+def render_report(report: dict[str, object]) -> str:
+    """Render the collected measurements as a human-readable Markdown document."""
+    config = report["configuration"]
+    summary = report["summary"]
+    audio = config["audio"]
+    lines: list[str] = [
+        "# RealTimeVoiceApi 链路延迟测试报告",
+        "",
+        "## 测试配置",
+        "",
+        f"- 生成时间（UTC）：{report['started_at_utc']}",
+        f"- 测试总耗时：{report['duration_seconds']} s",
+        f"- WebSocket 地址：{config['ws_url']}",
+        f"- 指标地址：{config['metrics_url']}",
+        f"- 测试轮数：{config['turns']}（单连接内顺序发送）",
+        f"- 采样率：{config['sample_rate']} Hz",
+        f"- 测试音频：{audio['path']}（时长 {audio['duration_ms']} ms）",
+        "",
+        "## 结果概览",
+        "",
+        f"- 总轮数：{summary['total_turns']}",
+        f"- 成功轮数：{summary['completed_turns']}（RESPONSE_END 状态为 COMPLETED）",
+        f"- 失败轮数：{summary['failed_turns']}（收到 ERROR 消息）",
+        "",
+        "## 各阶段延迟统计（单位：毫秒）",
+        "",
+        "| 指标 | 样本数 | 平均值 | P50 | P95 |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+
+    for field, (label, _) in METRIC_LABELS.items():
+        stats = summary["latency"].get(field)
+        if stats is None:
+            lines.append(f"| {label} | 0 | - | - | - |")
+        else:
+            lines.append(
+                f"| {label} | {stats['count']} | {stats['mean_ms']} | {stats['p50_ms']} | {stats['p95_ms']} |"
+            )
+
+    lines += ["", "## 指标说明", ""]
+    lines += [f"- **{label}**：{description}" for label, description in METRIC_LABELS.values()]
+
+    lines += ["", "## 每轮明细（单位：毫秒）"]
+    for turn in report["turns"]:
+        status = turn["response_status"] or turn["error_code"] or "未完成"
+        header = f"### 第 {turn['turn_index']} 轮"
+        if turn["turn_id"] is not None:
+            header += f"（turn_id={turn['turn_id']}）"
+        lines += ["", header, "", f"- 状态：{status}"]
+        if turn["asr_text"]:
+            lines.append(f"- ASR 识别文本：{turn['asr_text']}")
+        if turn["reply_text"]:
+            reply = turn["reply_text"]
+            if len(reply) > 60:
+                reply = reply[:60] + "…"
+            lines.append(f"- 回复文本：{reply}")
+        if turn["error_code"]:
+            lines.append(f"- 错误：{turn['error_code']}（阶段：{turn['error_stage']}）")
+
+        lines += ["", "| 阶段 | 延迟 |", "| --- | ---: |"]
+        lines += [
+            f"| {label} | {turn[field] if turn[field] is not None else '-'} |"
+            for field, (label, _) in METRIC_LABELS.items()
+        ]
+
+        delta = turn["gateway_metrics_delta"] or {}
+        if delta:
+            lines += ["", "网关指标增量："]
+            lines += [
+                f"- {key}：{stats['count']} 次，总计 {stats['sum_ms']} ms，平均 {stats['mean_ms']} ms"
+                for key, stats in sorted(delta.items())
+            ]
+
+    lines.append("")
+    return "\n".join(lines)
 
 
 def main() -> None:
     args = parse_args()
     report = asyncio.run(async_main(args))
+    rendered = render_report(report)
     report_path = args.report
     if report_path is None:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        report_path = PROJECT_DIR / "reports" / f"chain_latency_{stamp}.json"
+        report_path = PROJECT_DIR / "reports" / f"chain_latency_{stamp}.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(json.dumps(report["summary"], indent=2, ensure_ascii=False))
-    print(f"Detailed report: {report_path}")
+    report_path.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+    print(f"\n详细报告已保存：{report_path}")
 
 
 if __name__ == "__main__":

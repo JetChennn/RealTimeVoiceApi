@@ -114,7 +114,7 @@ RealTimeVoiceAPI/
 │   └── observability/        # 结构化日志与 Prometheus 指标
 ├── scripts/                  # 联调与压测工具
 │   ├── realtime_client.py    # 单段 WAV 联调客户端（协议参考实现）
-│   ├── chain_latency_test.py # 五轮×三轮端到端链路延迟测试
+│   ├── chain_latency_test.py # 单音频×N轮单连接端到端链路延迟测试
 │   └── load_test.py          # 多并发压测
 ├── deploy/                   # 生产部署模板（systemd / supervisord）
 ├── docs/                     # 内部调用时序图等文档
@@ -506,11 +506,12 @@ uv run python scripts/realtime_client.py \
 
 ### 链路延迟测试
 
-```bash
-uv run python scripts/chain_latency_test.py --ws-url ws://127.0.0.1:8000/v1/realtime
-```
+跑一次 WebSocket 连接，把同一份测试音频连续发送 N 轮，并输出 ASR / 首段文本 / 首段音频的端到端延迟统计（支持 `--turns`、`--audio`、`--report` 等参数，报告为带中文指标说明的 Markdown 文本，默认保存到 `reports/chain_latency_<UTC>.md`）：
 
-跑五轮「三句话」会话并输出 ASR / 首段文本 / 首段音频的端到端延迟统计（支持 `--rounds`、`--audio`、`--report` 等参数）。
+```bash
+uv run python scripts/chain_latency_test.py --ws-url ws://127.0.0.1:8000/v1/realtime \
+  --audio tests/asr_zh.wav --turns 5
+```
 
 ### 多并发压测
 
