@@ -18,6 +18,7 @@ from realtime_voice.observability.metrics import Metrics
 if TYPE_CHECKING:
     from realtime_voice.audio.vad import SpeechSegment
 from realtime_voice.clients.limits import AdmissionOverloaded
+from realtime_voice.clients.rag import RagClient, RagResult
 from realtime_voice.clients.thinker import (
     ThinkerClient,
     ThinkerDone,
@@ -46,12 +47,13 @@ from realtime_voice.session.events import (
     ThinkerCompleted,
     ThinkerDeltaReceived,
     ThinkerFailed,
+    ThinkerSkipped,
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
 )
 from realtime_voice.session.registry import SessionRegistry
-from realtime_voice.session.state import TERMINAL_TURN_STAGES, SessionState
+from realtime_voice.session.state import TERMINAL_TURN_STAGES, SessionState, TurnStage
 
 THINKER_CLEANUP_SKIPPED = "THINKER_CLEANUP_SKIPPED"
 DEFAULT_AUDIO_QUEUE_MAX_SECONDS = 3.0
@@ -221,6 +223,9 @@ class SessionRuntime:
         receiver: AsyncWorker,
         vad_worker: AsyncWorker,
         sender: AsyncWorker,
+        rag_client: RagClient | None = None,
+        rag_enabled: bool = False,
+        scenes: tuple[str, ...] = (),
         registry: RegistryProtocol | None = None,
         event_queue_size: int = 256,
         audio_queue_size: int = 64,
@@ -284,6 +289,10 @@ class SessionRuntime:
         )
         self._asr_queue: asyncio.Queue[SpeechSegment] = asyncio.Queue(maxsize=asr_queue_size)
 
+        self._rag_client = rag_client
+        self._rag_enabled = rag_enabled
+        self._rag_scenes = tuple(scenes)
+        self._rag_tasks: dict[int, asyncio.Task[RagResult]] = {}
         self._asr_client = asr_client
         self._thinker_client = thinker_client
         self._tts_client = tts_client
@@ -401,6 +410,9 @@ class SessionRuntime:
             if isinstance(effect.message, TurnState):
                 # TurnState 表示轮次切换，需中断上一轮未完成的 TTS 输出
                 self._signal_tts_interruption(effect.message.turn_id)
+                rag_task = self._rag_tasks.get(effect.message.turn_id)
+                if rag_task is not None:
+                    rag_task.cancel()
                 self._observe("turn_interrupted", turn_id=effect.message.turn_id, interrupt=True)
                 if self._metrics is not None:
                     self._metrics.record_interruption()
@@ -560,6 +572,35 @@ class SessionRuntime:
 
         task.add_done_callback(finished)
 
+    async def _retrieve_knowledge(self, effect: StartThinker | StartNextThinker) -> str:
+        turn = self.actor.state.turns.get(effect.turn_id)
+        if (
+            turn is None
+            or turn.interrupted
+            or turn.thinker_generation != effect.generation
+            or turn.stage is not TurnStage.STREAMING_LLM
+            or self.actor.state.active_llm_turn_id != effect.turn_id
+        ):
+            return ""
+        task = asyncio.create_task(self._rag_client.retrieve(effect.text, self._rag_scenes))
+        self._rag_tasks[effect.turn_id] = task
+        try:
+            result = await task
+            self._observe(
+                "rag_retrieved",
+                turn_id=effect.turn_id,
+                status=result.status,
+                snippet_count=result.snippet_count,
+                duration_ms=result.duration * 1000,
+            )
+            return result.context
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+            return ""
+        finally:
+            self._rag_tasks.pop(effect.turn_id, None)
+
     async def _run_thinker(self, effect: StartThinker | StartNextThinker) -> None:
         try:
             async with self._thinker_lock:
@@ -569,10 +610,29 @@ class SessionRuntime:
                 if isinstance(effect, StartNextThinker) and effect.interrupt_first:
                     # 用户打断场景：先中断 Thinker 当前会话再发起新请求
                     await self._thinker_client.interrupt(self.user_id, self.session_id)
+                knowledge_context = ""
+                if self._rag_enabled and self._rag_client is not None:
+                    knowledge_context = await self._retrieve_knowledge(effect)
+                    if self._closing:
+                        return
+                    turn = self.actor.state.turns.get(effect.turn_id)
+                    if (
+                        turn is None
+                        or turn.thinker_generation != effect.generation
+                        or turn.stage is not TurnStage.STREAMING_LLM
+                        or self.actor.state.active_llm_turn_id != effect.turn_id
+                    ):
+                        return
+                    if turn.interrupted:
+                        await self._publish_event(
+                            ThinkerSkipped(self.session_id, effect.turn_id, effect.generation)
+                        )
+                        return
                 request = ThinkerReplyRequest(
                     user_id=self.user_id,
                     session_id=self.session_id,
                     text=effect.text,
+                    knowledge_context=knowledge_context,
                 )
                 reply_text: str | None = None
                 tone = ""
@@ -618,9 +678,7 @@ class SessionRuntime:
                             self._metrics.observe_thinker_full(done_ts - started)
                             if first_delta_ts is not None:
                                 # 首字→末字：衡量回复纯生成阶段的耗时
-                                self._metrics.observe_thinker_generate(
-                                    done_ts - first_delta_ts
-                                )
+                                self._metrics.observe_thinker_generate(done_ts - first_delta_ts)
                 if reply_text is None:
                     raise RuntimeError("Thinker stream ended without done")
                 await self._publish_event(
@@ -813,6 +871,8 @@ class SessionRuntime:
             if self._cleaned:
                 return
             self._closing = True
+            for task in self._rag_tasks.values():
+                task.cancel()
             try:
                 # 清理顺序：先停音频采集/发送，再取消 ASR，等待 Thinker 结束，
                 # 排空 TTS，最后（若 Thinker 正常结束）才删除 Thinker 会话

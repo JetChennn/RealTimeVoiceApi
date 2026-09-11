@@ -168,6 +168,7 @@ def create_app(
             prober.cancel()
             await asyncio.gather(sampler, prober, return_exceptions=True)
             await services.detector_offload.aclose()
+            await services.rag_client.http.aclose()
 
     app = FastAPI(title="RealTimeVoiceAPI", version="1.0.0", lifespan=lifespan)
     app.state.settings = resolved

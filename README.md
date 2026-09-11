@@ -1,52 +1,24 @@
 # RealTimeVoiceAPI
 
-一个基于 **异步 WebSocket** 的实时语音网关。它把本地的 **VAD**、**ASR**、**Thinker(LLM)** 和 **TTS** 四个环节编排进单一会话，客户端只要连上一个 WebSocket，就能拿到「识别文本 → LLM 流式回复 → 可播放音频」的完整链路。客户端无需感知任何下游服务。
+基于异步 WebSocket 的实时语音网关，统一编排 **VAD → ASR → 可选 RAG → Thinker → TTS**。客户端在创建会话时决定是否使用知识检索、指定检索场景，随后持续上传语音并接收识别文本、回复文本和音频。
 
 ```mermaid
-%%{init: {"flowchart": {"curve": "linear", "nodeSpacing": 44, "rankSpacing": 56}, "themeVariables": {"fontSize": "14px"}}}%%
 flowchart LR
-    C["客户端<br/>WebSocket"]
-
-    subgraph G["RealTimeVoiceAPI · 单进程异步网关 · :8000"]
-        direction TB
-        WS["WebSocket 接入层<br/>握手 · 协议编解码 · 收发 worker"]
-        V["VAD（进程内运行）<br/>Silero 检测 · 语音切段"]
-        O["会话编排层<br/>Runtime + Actor 状态机<br/>Turn 管理 · 打断控制"]
-    end
-
-    subgraph E["后台下游服务 · 仅本机回环 · 按现有 API 调用"]
-        direction TB
-        ASR["ASR 服务<br/>:8001 语音转文本"]
-        TH["Thinker 服务（LLM）<br/>:8002 流式回复 + 记忆"]
-        TT["TTS 服务<br/>:9000 文本合成语音"]
-    end
-
-    %% 上行链路
-    C ==>|"① 上行 AUDIO_CHUNK<br/>Base64 PCM16"| WS
-    WS -->|"② 解码后 PCM"| V
-    V -->|"③ 完整语音段"| O
-
-    %% 网关 → 下游
-    O -->|"④ 语音段转写"| ASR
-    O -->|"⑥ ASR文本+语音段<br/>stream=true"| TH
-    O -->|"⑩ 完整回复 + TTS prompt"| TT
-
-    %% 下游 → 网关
-    ASR -.->|"⑤ 转写文本"| O
-    TH -.->|"⑦ LLM 增量文本<br/>完成事件含 reply_text + tone"| O
-    TT -.->|"⑪ 24kHz 音频块<br/>重采样为协商采样率"| O
-
-    %% 编排层 → 客户端（下行全部由编排层发出，源头不同）
-    O -.->|"SESSION_CREATED ← 建连<br/>ASR_RESULT ← ⑤<br/>TEXT_DELTA / TEXT_END ← ⑦<br/>TURN_STATE / RESPONSE_END / ERROR"| C
-    O -.->|"AUDIO_DELTA ← ⑪<br/>Base64 PCM16 音频块"| C
-
-    classDef client fill:#EEF2FF,stroke:#4F46E5,stroke-width:2px,color:#111827;
-    classDef gateway fill:#ECFDF5,stroke:#059669,stroke-width:1.5px,color:#111827;
-    classDef external fill:#F8FAFC,stroke:#64748B,stroke-width:1.5px,color:#111827;
-    class C client;
-    class WS,V,O gateway;
-    class ASR,TH,TT external;
+    C[客户端 PCM16 音频] --> V[VAD 切段]
+    V --> A[ASR 转写]
+    A --> S[下发 ASR_RESULT]
+    S --> R{会话启用 RAG?}
+    R -->|是| K[KBService 联合检索]
+    R -->|否| T[Thinker 流式回复]
+    K -->|参考知识或失败降级| T
+    T --> D[TEXT_DELTA / TEXT_END]
+    D --> U[TTS 合成并重采样]
+    U --> O[AUDIO_DELTA / RESPONSE_END]
 ```
+
+ASR 使用 16kHz 音频；Thinker 接收识别原文和本轮可选参考知识，不接收语音。TTS 在完整回复生成后开始，24kHz 输出重采样为客户端协商的采样率。检索及生成均在后台任务中执行，音频上传与下行接收可继续进行。
+
+面向调用方的独立接入文档：[实时语音 API 调用说明（V1）](docs/client-api-v1.md)，包含创建会话、RAG 参数、音频收发、打断与错误处理要点。
 
 ## 目录
 
@@ -67,10 +39,11 @@ flowchart LR
 ## 1. 功能特性
 
 - **WebSocket 单连接**：建连时声明音频格式与采样率，上下行共用；客户端只传 Base64 编码的 PCM16 音频。
-- **全链路编排**：一个有效语音段触发「VAD 切段 → ASR 转写 → Thinker 流式回复 → TTS 流式合成→ 回传音频」。
-- **流式输出**：LLM 的识别文本、增量文本和 TTS 音频都按序实时下发。
+- **全链路编排**：一个有效语音段触发「VAD 切段 → ASR 转写 → 按需检索知识 → Thinker 流式回复 → TTS 流式合成 → 回传音频」。
+- **会话级知识检索**：`rag_enabled` 默认关闭；开启后每轮在 1～3 个指定场景内检索，默认最多等待 2 秒，失败时继续普通回答。
+- **流式输出**：ASR 返回最终转写，Thinker 回复文本和 TTS 音频分别流式下发。
 - **打断能力**：新语音段可以打断上一轮未完成的回复，服务端下发 `TURN_STATE/INTERRUPTED`，旧 TTS 在后台安静排空、丢弃，不再发往客户端。
-- **并发与背压**：多会话并行；所有队列有界，提供字节/条数双重上限，慢客户端也被限制，杜绝无界任务和内存增长。
+- **并发与背压**：多会话并行；事件与音频队列有界，音频和出站队列另有字节上限；RAG 使用独立并发准入和有界等待队列。
 - **可观测性**：`/health` 聚合健康检查（含后台周期探测的下游真实状态）、`/metrics` 暴露 Prometheus 指标、结构化日志。
 - **一键启停**：`start_services.sh` 统一拉起 ASR / Thinker / TTS / 网关全栈并做就绪等待。
 - **压测工具**：内置联调客户端、链路延迟测试和多并发压测脚本（见 [第 7 节](#7-快速联调)）。
@@ -80,7 +53,7 @@ flowchart LR
 ```
 RealTimeVoiceAPI/
 ├── pyproject.toml            # 项目定义、依赖、pytest/ruff 配置
-├── .env.example              # 全部环境变量示例（RTVA_ 前缀）
+├── .env.example              # 环境变量示例（RTVA_ 前缀）
 ├── .env                      # 实际生效配置（不入库）
 ├── start_services.sh         # 全栈一键启停（asr/thinker/tts/gateway）
 ├── src/realtime_voice/       # 主要源码包
@@ -105,8 +78,9 @@ RealTimeVoiceAPI/
 │   │   ├── state.py          # 会话状态（turn、子任务、去重集合）
 │   │   ├── registry.py       # 会话注册表与活跃数限制
 │   │   └── events.py
-│   ├── clients/              # 三个下游异步客户端 + 并发控制
+│   ├── clients/              # ASR / RAG / Thinker / TTS 客户端 + 并发控制
 │   │   ├── asr.py            # ASR（POST /v1/chat/completions）
+│   │   ├── rag.py            # KBService 联合检索、超时降级
 │   │   ├── thinker.py        # Thinker/LLM（stream + interrupt + delete）
 │   │   ├── tts.py            # TTS（POST /v1/dialogue-tts/stream）
 │   │   ├── limits.py         # BoundedAdmission：有界并发准入
@@ -117,23 +91,24 @@ RealTimeVoiceAPI/
 │   ├── chain_latency_test.py # 单音频×N轮单连接端到端链路延迟测试
 │   └── load_test.py          # 多并发压测
 ├── deploy/                   # 生产部署模板（systemd / supervisord）
-├── docs/                     # 内部调用时序图等文档
+├── docs/                     # 客户端协议、验证记录等文档
 ├── logs/                     # start_services.sh 生成的服务日志（运行时产物）
 ├── .run/                     # start_services.sh 生成的 PID 文件（运行时产物）
-└── tests/                    # 单元 + 集成测试（253 个）
+└── tests/                    # 单元 + 集成测试
 ```
 
 ## 3. 前置依赖
 
-项目运行依赖三个**已部署可访问的下游服务**（仅绑定本机回环地址，不对公网暴露；地址可通过环境变量覆盖）：
+普通语音链路依赖 ASR、Thinker、TTS；启用 RAG 的会话额外访问 KBService。下表为本机部署约定，客户端只连接网关，网关通过配置的地址访问下游：
 
 | 下游 | 部署地址 | 作用 | 调用接口 |
 |------|----------|------|----------|
 | ASR（Qwen3-ASR） | `http://127.0.0.1:8001` | 语音转文本 | `POST /v1/chat/completions` |
 | Thinker（LLM） | `http://127.0.0.1:8002` | LLM 回复 + 记忆 | `/api/v1/reply`（纯文本流式）、`/api/v1/interrupt`、`DELETE /api/v1/sessions/{…}` |
 | TTS | `http://127.0.0.1:9000` | 文本合成语音 | `POST /v1/dialogue-tts/stream` |
+| KBService（可选） | `http://127.0.0.1:8004` | 指定场景的知识检索 | `POST /retrieve/joint` |
 
-> 上述接口结构均沿用现有服务，网关不做修改；只要三个服务可达，本服务即可联调。`start_services.sh` 可以在本机从零拉起这三个服务与网关。
+`start_services.sh` 管理 ASR、Thinker、TTS 和网关，**不启动、停止或探测 KBService**。本机知识服务项目位于 `/root/KBService`，由部署方独立管理。网关只检索知识，不调用 KBService `/query` 生成答案，也不提供知识管理接口。
 
 运行环境：**Python 3.11+**，推荐使用 [`uv`](https://docs.astral.sh/uv/)。GPU 要求：ASR 与 TTS 必须使用不同 GPU（启动脚本会校验）。
 
@@ -166,7 +141,7 @@ cp .env.example .env
 uv run uvicorn realtime_voice.main:app --host 0.0.0.0 --port 8000
 ```
 
-> **CWD 注意事项**：`Settings` 通过 pydantic-settings 加载 `env_file=".env"`，该路径**相对进程当前工作目录解析**，而非 config.py 所在目录。请务必从项目根目录启动（或使用绝对路径的 env 文件），否则 `.env` 会被静默跳过、配置回退到代码默认值（端口 8003、下游地址错位）。
+> **CWD 注意事项**：`Settings` 通过 pydantic-settings 加载 `env_file=".env"`，该路径**相对进程当前工作目录解析**，而非 config.py 所在目录。请务必从项目根目录启动（或使用绝对路径的 env 文件），否则 `.env` 会被跳过，未由环境变量指定的设置回退到代码默认值。直接运行 Uvicorn 时，监听地址以命令行 `--host`、`--port` 为准；`Settings.port` 不会自行修改 Uvicorn 监听端口。
 
 服务启动后检查状态：
 
@@ -175,11 +150,11 @@ curl http://127.0.0.1:8000/health    # 整体就绪状态（含下游）
 curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 ```
 
-`/health` 的 `ready` 为 `true` 表示本服务各子系统正常、三个下游可达、且有剩余会话容量，此时即可开始联调（详见 [第 8 节](#8-健康检查与监控)）。
+`/health` 的 `ready` 为 `true` 表示本服务各子系统正常、三个下游可达、且有剩余会话容量，此时即可开始联调（详见 [第 8 节](#8-健康检查与监控)）。它不代表 RAG 已就绪；开启知识检索前还需独立确认 KBService 的场景和检索接口。
 
 ## 5. 配置项
 
-所有配置通过环境变量注入，统一使用 `RTVA_` 前缀。优先级：**环境变量 > `.env` 文件 > 代码默认值**。注意 `start_services.sh` 会以启动器默认值覆盖部分 `.env` 值（下表「脚本部署值」列）。
+网关通过 `Settings` 加载配置，统一使用 `RTVA_` 前缀，优先级为 **环境变量 > 当前工作目录的 `.env` > 代码默认值**。`start_services.sh` 则先将 `.env`（不存在时用 `.env.example`）作为 shell 配置加载，再覆盖会话、CPU 和 ASR 容量参数；脚本还校验固定端口约定。下表区分代码默认和脚本部署约定。
 
 | 变量 | 代码默认 | 脚本部署值 | 说明 |
 |------|----------|------------|------|
@@ -187,308 +162,118 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_ASR_BASE_URL` | `http://127.0.0.1:8000` | `http://127.0.0.1:8001` | ASR 服务地址 |
 | `RTVA_THINKER_BASE_URL` | `http://127.0.0.1:8082` | `http://127.0.0.1:8002` | Thinker 服务地址 |
 | `RTVA_TTS_BASE_URL` | `http://127.0.0.1:8001` | `http://127.0.0.1:9000` | TTS 服务地址 |
-| `RTVA_ALLOWED_SAMPLE_RATES` | `[16000,24000,48000]` | 同左 | 允许的客户端采样率 |
+| `RTVA_ALLOWED_SAMPLE_RATES` | `[16000,24000,48000]` | 同左 | 保留设置；当前协议模型固定接受这三种采样率，不由此项动态扩展或收窄 |
 | `RTVA_MAX_SESSIONS` | `64` | `30` | 最大并发会话数 |
 | `RTVA_CPU_WORKERS` | `4` | `8` | VAD 等 CPU 任务线程池大小 |
 | `RTVA_CPU_PENDING_JOBS` | `128` | `256` | CPU 线程池待处理任务上限 |
+| `RTVA_ASR_CONCURRENCY` / `RTVA_ASR_MAX_WAITERS` | `8` / `64` | `30` / `30` | 脚本分别取 `ASR_MAX_NUM_SEQS` / `GATEWAY_MAX_SESSIONS` |
 | `RTVA_HANDSHAKE_TIMEOUT_SECONDS` | `5` | 同左 | 建连首帧超时 |
 | `RTVA_SESSION_AUDIO_QUEUE_MAX_SECONDS` | `3` | 同左 | 客户端音频积压上限（触发背压） |
 | `RTVA_DOWNSTREAM_PROBE_INTERVAL_SECONDS` | `10` | 同左 | 下游健康探测周期 |
 | `RTVA_DOWNSTREAM_PROBE_TIMEOUT_SECONDS` | `2` | 同左 | 下游健康探测超时 |
 | `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 同左 | 非空时直接作为 TTS `prompt`；为空时依次使用 Thinker `done.output.tone` 和默认值“平和” |
 
-更多队列大小、清理超时、背压相关配置见 `.env.example`。
+队列与清理配置的代码默认值如下，启动脚本不单独覆盖这些值：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `RTVA_SESSION_EVENT_QUEUE_SIZE` | `256` | 会话事件队列条数 |
+| `RTVA_SESSION_AUDIO_QUEUE_SIZE` | `64` | 上行音频队列条数 |
+| `RTVA_SESSION_ASR_QUEUE_SIZE` | `64` | 待转写语音段队列条数 |
+| `RTVA_SESSION_OUTBOUND_QUEUE_SIZE` | `256` | 下行消息队列条数 |
+| `RTVA_SESSION_OUTBOUND_QUEUE_MAX_BYTES` | `8388608` | 下行队列字节预算 |
+| `RTVA_THINKER_CLEANUP_TIMEOUT_SECONDS` | `120` | 关闭会话时等待 Thinker 的上限 |
+| `RTVA_TTS_DRAIN_TIMEOUT_SECONDS` | `120` | 关闭会话时等待 TTS 排空的上限 |
+
+### RAG 配置与调用约定
+
+客户端只指定 `rag_enabled` 和 `scenes`；服务地址、容量、召回条数和阈值由网关配置，不接受客户端覆盖。以下默认值也见 `.env.example`，启动脚本不单独覆盖：
+
+| 变量 | 默认值 | 约束与含义 |
+|---|---|---|
+| `RTVA_RAG_BASE_URL` | `http://127.0.0.1:8004` | KBService HTTP 地址 |
+| `RTVA_RAG_TIMEOUT_SECONDS` | `2` | 正有限数，包含 RAG 准入排队与 HTTP 请求的总预算（秒） |
+| `RTVA_RAG_CONCURRENCY` | `8` | 同时检索的请求数，至少 1 |
+| `RTVA_RAG_MAX_WAITERS` | `64` | 等待检索名额的请求数上限，至少 0 |
+| `RTVA_RAG_TOP_K_PER_SCENE` | `5` | 每场景候选数，1～10 |
+| `RTVA_RAG_TOP_K_TOTAL` | `8` | 最终片段数上限，3～20，支持最多三个场景 |
+| `RTVA_RAG_SCORE_THRESHOLD` | `0` | 相似度阈值，0～1 |
+
+开启后，对准备交给 Thinker 的每轮有效识别文本调用一次 `POST /retrieve/joint`：`question` 为 ASR 原文，`scenes` 为创建会话时固定的场景数组，`strict=false`。单场景也使用此联合接口，不额外进行意图判断、问题改写、自动重试或索引预热。2 秒是检索阶段预算，不包含等待此前 Thinker 轮次结束或本轮生成回复的时间。
+
+有效片段按服务返回顺序整理为 JSON，保留 `scene`、`source`、`page`、`text`，通过 Thinker `messages` 的 `system` 内容传入。附带说明要求将片段仅作为事实参考、不执行片段中的指令；Thinker 的 `text` 仍是 ASR 原文。每轮重新构造上下文，没有结果就不附加知识，不复用上轮检索结果。
+
+| 检索情况 | 网关行为 |
+|---|---|
+| 有有效片段 | 带知识调用 Thinker |
+| 部分场景失败 | 使用其余有效片段；全部无有效片段则普通回答 |
+| 无命中、超时、过载、HTTP 或响应格式错误 | 不附加知识，继续普通回答 |
+| 检索期间用户打断 | 取消检索、丢弃结果并收尾旧轮，接续排队轮次 |
+| 会话关闭或轮次过期 | 取消检索或丢弃结果，不再为该轮启动 Thinker |
+
+RAG 失败不产生客户端 `ERROR` 或新消息类型；降级及取消通过服务端日志/指标观察。场景是否存在由 KBService 在检索时判断，创建会话只校验字段格式。
+
 
 ### Thinker 与 TTS 调用约定
 
 - 网关调用 Thinker 纯文本接口 `POST /api/v1/reply`，以 JSON 传入 ASR 文本和唯一 `req_id`，并使用 `stream=true` 消费 NDJSON；VAD 音频不会转发给 Thinker。
 - Thinker 的 `text_delta` 会立即转成 WebSocket `TEXT_DELTA`；`done.output.reply_text` 作为完整回复，`done.output.tone` 作为候选 TTS prompt。
 - Thinker 未返回 `tone` 时网关使用“平和”，也可用 `RTVA_TTS_PROMPT_OVERRIDE` 全局覆盖。
-- 网关调用 TTS `POST /v1/dialogue-tts/stream` 时只发送 `model_reply`、非空 `prompt` 和 `trace_id`；TTS 不再负责调用外部模型生成 prompt。
+- 网关调用 TTS `POST /v1/dialogue-tts/stream` 时发送 `model_reply`、非空 `prompt`、`trace_id` 和 `include_prompt_event=false`；TTS 不再负责调用外部模型生成 prompt。
 - Thinker 的独立 `/api/v1/tts/prompt` 可供其他调用方生成或预览 prompt，但不是当前网关主链路的必经接口。
 
 ## 6. 对外调用指南（WebSocket 协议 V1）
 
-本节面向**从外部接入本服务的客户端开发者**，说明如何连接、上行音频的硬性要求、下行消息语义与排障方法。
+调用所需字段、消息示例与错误处理见 [客户端接入文档](docs/client-api-v1.md)。接口为 `ws://<服务地址>:8000/v1/realtime`（端口按部署调整），每帧为一个 JSON 对象。
 
-### 6.1 连接
+### 创建会话
 
-| 项目 | 值 |
-|------|-----|
-| 端点 | `ws://<服务器IP>:8000/v1/realtime` |
-| 子协议 | 无；全部消息为 **JSON 文本帧**（禁止二进制帧） |
-| 版本 | 协议 V1（`protocol_version: 1`，无协商） |
-| 认证 | V1 无鉴权，`device_id` / `session_id` 仅作路由标识 |
-
-一个 WebSocket 连接 = 一个会话。连接建立后 **5 秒内**（`RTVA_HANDSHAKE_TIMEOUT_SECONDS`）必须发送 `CREATE_SESSION` 作为首帧，否则服务端下发 `ERROR/HANDSHAKE_TIMEOUT` 并关闭连接（关闭码 1008）。
-
-### 6.2 握手：CREATE_SESSION（客户端 → 服务端首帧）
+连接后默认 5 秒内发送 `CREATE_SESSION`。以下请求开启两个场景的知识检索：
 
 ```json
-{"type":"CREATE_SESSION","protocol_version":1,"device_id":"device-01","session_id":"session-100","audio_format":"PCM16","audio_transport":"BASE64_JSON","sample_rate":16000,"channels":1}
+{
+  "type": "CREATE_SESSION",
+  "protocol_version": 1,
+  "device_id": "device-demo",
+  "session_id": "session-demo-001",
+  "audio_format": "PCM16",
+  "audio_transport": "BASE64_JSON",
+  "sample_rate": 16000,
+  "channels": 1,
+  "rag_enabled": true,
+  "scenes": ["渔猎社会", "农业社会"]
+}
 ```
 
-**校验是严格的**：字段名、取值必须与上表完全一致，**不允许任何多余字段**（`extra=forbid`），违规即被拒。要求：
+`rag_enabled` 可选，必须是 JSON 布尔值，默认 `false`。`scenes` 可选，默认 `[]`；去除名称首尾空白并按首次出现顺序去重，最多三个非空字符串，启用 RAG 时必须至少一个。即使关闭 RAG，显式传入的场景数组也需要通过格式校验。配置在会话内固定；修改时新建会话。省略两个字段即为普通语音会话。
 
-| 字段 | 要求 |
-|------|------|
-| `type` | 必须为 `"CREATE_SESSION"` |
-| `protocol_version` | 必须为 `1` |
-| `device_id` / `session_id` | 非空字符串，1–128 字符；`session_id` 进程内唯一（重复注册返回 `DUPLICATE_SESSION`） |
-| `audio_format` | 必须为 `"PCM16"`（V1 不支持 Opus 等其他编码） |
-| `audio_transport` | 必须为 `"BASE64_JSON"` |
-| `sample_rate` | 只能取 `16000` / `24000` / `48000` |
-| `channels` | 必须为 `1`（单声道） |
+协议不允许额外字段。格式错误返回 `TRANSPORT/INVALID_MESSAGE` 并关闭连接。`SESSION_CREATED` 回显会话和音频参数，**不回显 RAG 配置**，也不表示知识服务已验证成功。
 
-握手成功后服务端立即回 `SESSION_CREATED`（回显协商参数），随后即可上行音频。
+### 音频、输出与轮次
 
-### 6.3 上行音频：AUDIO_CHUNK
+- 收到 `SESSION_CREATED` 后，按真实时间发送 `AUDIO_CHUNK`：Base64 编码的裸 PCM16 小端单声道采样，不含 WAV 文件头。采样率为 16000、24000 或 48000Hz，与创建时一致；单块不超过 500ms，上行 `sequence` 从 0 开始跨轮累计。
+- VAD 默认连续静音约 500ms 切段，单段最长约 30 秒；文件联调建议发送 600ms 尾静音。空转写不创建轮次，不返回该段的 `ASR_RESULT` 或 `RESPONSE_END`。
+- 正常轮次依次返回 `ASR_RESULT`、零到多条 `TEXT_DELTA`、`TEXT_END`、`AUDIO_DELTA`、`RESPONSE_END`。开启 RAG 后，检索位于 `ASR_RESULT` 与回复生成之间，没有单独的检索事件或知识全文下发。
+- 每轮用 `turn_id` 区分，音频序号每轮从 0 开始。`turn_id=0` 用于创建会话和无轮次错误；ASR 失败没有 `RESPONSE_END`，LLM/TTS 失败则终结对应轮次。
+- 收发及播放需要并行。`TEXT_END` 只表示文本完成；`RESPONSE_END` 表示该轮服务端输出结束，不表示本地播放已完成。
 
-```json
-{"type":"AUDIO_CHUNK","session_id":"session-100","sequence":0,"timestamp_ms":0,"audio_b64":"AAAAAA=="}
-```
+### 打断与关闭
 
-| 字段 | 要求 |
-|------|------|
-| `type` | `"AUDIO_CHUNK"`；同样不允许多余字段 |
-| `session_id` | 必须与 `CREATE_SESSION` 一致，否则 `SESSION_ID_MISMATCH` |
-| `sequence` | 从 `0` 开始**严格递增**，任何跳变/回退都触发 `AUDIO_SEQUENCE_GAP` |
-| `timestamp_ms` | 可选（≥0），仅作元数据，不参与校时 |
-| `audio_b64` | 见下方音频要求 |
+新语音段识别为非空文本时，服务端先下发旧轮 `TURN_STATE/INTERRUPTED`，再下发新轮 `ASR_RESULT`。客户端应停止旧轮播放，按轮次处理交错消息。
 
-**音频内容硬性要求（最常见的接入错误集中在这里）：**
+| 旧轮所处阶段 | 旧轮处理 | 新轮处理 |
+|---|---|---|
+| RAG 检索或检索前排队 | 取消或跳过检索，不调用旧轮 Thinker；以 `RESPONSE_END/INTERRUPTED` 收尾，无 `TEXT_END` | 释放旧轮位置后接续；开启 RAG 时先检索 |
+| Thinker 流式回复 | 继续消费旧文本，后续消息带 `interrupt=true`；不进入 TTS | 等旧文本收尾，先调用 Thinker interrupt 再接续 |
+| TTS 合成 | 排空并丢弃旧音频，不再下发；旧轮终态可能较晚到达 | 可开始本轮处理，和旧 TTS 排空交错 |
 
-1. **裸 PCM16 采样流**：`audio_b64` 解码后必须是**小端有符号 16 位整数的原始采样字节**（little-endian int16 PCM）。**不是** WAV 文件字节、不是 float32、不是 Opus/MP3——不要把整个 WAV 文件（含文件头）base64 后直接发送。
-2. **采样率必须与 `CREATE_SESSION` 声明一致**：声明 16000 就必须发 16kHz 采样的音频。网关内部会统一重采样到 16kHz 供 VAD/ASR 使用；如果声明与实际不符，音频会被拉快/拉慢，VAD 大概率不触发，表现为「连上了但永远没有响应」。
-3. **单声道**：立体声请先混缩为单声道。
-4. **每块时长上限 500ms**：按块的实际字节时长校验，超限触发 `AUDIO_CHUNK_DURATION`。推荐 **40ms/块**（16kHz 时为 1280 字节，base64 后约 1708 字符）。低于 10ms 的碎片块（如尾块）无需客户端处理，服务端会自动累积进 VAD 检测帧。
-5. **字节对齐**：PCM 数据长度必须是偶数（完整 int16 采样），否则 `PCM16_BYTE_ALIGNMENT`。
-6. **Base64 必须严格合法**：标准 Base64，校验位不容忍（`INVALID_BASE64`）。
-7. **发送节奏**：按真实时间流式发送（如 40ms 音频每 40ms 一块）。网关侧音频积压上限默认 **3 秒**（`RTVA_SESSION_AUDIO_QUEUE_MAX_SECONDS`），超出触发 `CLIENT_AUDIO_BACKPRESSURE` 并关闭连接；拉取过慢则正常排队。
+整个会话结束时发送 `CLOSE_SESSION` 或断开连接。网关取消 RAG、停止音频及 ASR 工作，等待 Thinker 和 TTS 清理，再在安全条件下删除 Thinker 会话。没有 `SESSION_CLOSED` 业务回执，也不支持断线恢复。
 
-> **重要**：服务端对 `AUDIO_CHUNK` **没有 ACK**。发送后连接保持安静是**正常现象**，请勿因无回包而重连或重发。响应时机由 VAD 决定（见 6.4）。
-
-### 6.4 VAD 切段与响应时机
-
-服务端用 Silero VAD 持续检测语音，规则如下：
-
-- 连续语音后出现 **≥500ms 静音**（`min_silence_ms`）即判定一段语音结束，触发「ASR → Thinker → TTS → 下行回包」全链路。
-- 单段语音最长 **30 秒**（`max_speech_seconds`），到限强制切段。
-- **因此**：说完一段话后，客户端应继续发送 ≥500ms 的静音数据（全零字节即可）来「收尾」；只发语音不发尾静音，服务端会一直等下一段。
-
-两种「正常但无输出」的情况需要客户端开发者知悉：
-
-| 情况 | 表现 |
-|------|------|
-| 音频未被 VAD 判定为语音（编码/采样率错误、全是静音/噪声） | 无任何下行，连接保持 |
-| 语音段被识别，但 ASR 转写结果为空 | 该段被服务端**静默丢弃**，不下发任何消息 |
-
-### 6.5 下行消息（服务端 → 客户端）
-
-所有下行消息都包含 `user_id`、`session_id`、`turn_id` 与 `interrupt` 四个公共字段。
-
-```json
-{"type":"SESSION_CREATED","user_id":"device-01","session_id":"session-100","turn_id":0,"interrupt":false,"protocol_version":1,"audio_format":"PCM16","audio_transport":"BASE64_JSON","sample_rate":16000,"channels":1}
-{"type":"ASR_RESULT","user_id":"device-01","session_id":"session-100","turn_id":1,"interrupt":false,"text":"你好"}
-{"type":"TEXT_DELTA","user_id":"device-01","session_id":"session-100","turn_id":1,"interrupt":false,"delta":"你"}
-{"type":"TEXT_END","user_id":"device-01","session_id":"session-100","turn_id":1,"interrupt":false,"text":"你好！"}
-{"type":"AUDIO_DELTA","user_id":"device-01","session_id":"session-100","turn_id":1,"interrupt":false,"sequence":0,"audio_format":"PCM16","sample_rate":16000,"channels":1,"audio_b64":"AAAAAA=="}
-{"type":"TURN_STATE","user_id":"device-01","session_id":"session-100","turn_id":1,"interrupt":true,"state":"INTERRUPTED"}
-{"type":"RESPONSE_END","user_id":"device-01","session_id":"session-100","turn_id":1,"interrupt":false,"status":"COMPLETED"}
-{"type":"ERROR","user_id":"device-01","session_id":"session-100","turn_id":1,"interrupt":false,"stage":"ASR","code":"ASR_FAILED","message":"ASR transcription failed","recoverable":true}
-```
-
-语义要点：
-
-- `turn_id` 从 1 开始，每个有效语音段递增；`turn_id=0` 仅用于建连。
-- `ASR_RESULT` 是该轮用户语音的转写文本（仅非空转写才会开轮）。
-- `TEXT_DELTA` → `TEXT_END` 是 LLM 增量/完整回复；随后 `AUDIO_DELTA` 序列是 TTS 音频。
-- `AUDIO_DELTA.audio_b64` 解码后是**与建连时协商采样率一致的 PCM16 单声道数据**（TTS 内部 24kHz 产物已重采样），可直接送播放器；同一 turn 内 `sequence` 从 0 严格递增。
-- `RESPONSE_END.status` ∈ `COMPLETED` / `INTERRUPTED` / `FAILED`，标志一轮终态。
-- `ERROR.stage` ∈ `ASR` / `LLM` / `TTS` / `TRANSPORT`；`recoverable=true` 时连接仍可用，`false`（协议违规）时服务端发完即关闭连接（关闭码 1008）。
-
-### 6.6 错误处理与连接关闭
-
-**协议违规（服务端发一条 `ERROR` 并以 1008 关闭连接）：**
-
-| code | 触发原因 |
-|------|----------|
-| `INVALID_MESSAGE` | 首帧不是 `CREATE_SESSION`、字段值不匹配、含多余字段、握手后又发 `CREATE_SESSION` 等 |
-| `INVALID_JSON` | 文本帧不是合法 JSON |
-| `HANDSHAKE_TIMEOUT` | 5 秒内未收到首帧 |
-| `SESSION_ID_MISMATCH` | 消息携带的 `session_id` 与会话不符 |
-| `AUDIO_SEQUENCE_GAP` | `sequence` 未从 0 严格递增 |
-| `INVALID_BASE64` | `audio_b64` 不是合法 Base64 |
-| `PCM16_BYTE_ALIGNMENT` | PCM 字节数为奇数 |
-| `AUDIO_CHUNK_DURATION` | 单块时长超过 500ms |
-| `CLIENT_AUDIO_BACKPRESSURE` | 客户端音频积压超过上限（默认 3 秒） |
-| `SLOW_CLIENT` | 下行队列积压满（客户端收包太慢） |
-
-> 另有两种建连期拒绝**不会**产生 ERROR 消息，而是直接关闭连接（无关闭帧）：`session_id` 已被活跃会话占用（`DUPLICATE_SESSION`）、并发会话数达上限（`SESSION_CAPACITY_EXCEEDED`）。客户端应据此换用新的 `session_id` 重试。
-
-**下游链路错误（`recoverable=true`，连接保留）：** `stage=ASR, code=ASR_FAILED`；`stage=LLM, code=THINKER_STREAM_FAILED / THINKER_EMPTY_REPLY`；`stage=TTS, code=TTS_STREAM_FAILED`；各 stage 均可能出现 `SERVICE_OVERLOADED`（下游准入饱和）。下游失败会以 `RESPONSE_END/FAILED` 终结该轮，会话可继续。
-
-**正常关闭：** 客户端发送 `CLOSE_SESSION`（携带正确 `session_id`）；服务端完成清理（等待 Thinker/TTS 排空，超时上限各 120s）后关闭连接。客户端直接断开同样触发服务端清理。
-
-### 6.7 最小客户端示例（Python）
-
-```python
-import asyncio, base64, json, uuid, wave
-from websockets.asyncio.client import connect
-
-SERVER = "ws://<服务器IP>:8000/v1/realtime"
-
-async def main():
-    session_id = f"demo-{uuid.uuid4().hex[:12]}"
-    async with connect(SERVER, max_size=None) as ws:
-        # 1) 握手：字段必须精确匹配，不允许多余字段
-        await ws.send(json.dumps({
-            "type": "CREATE_SESSION", "protocol_version": 1,
-            "device_id": "demo-device", "session_id": session_id,
-            "audio_format": "PCM16", "audio_transport": "BASE64_JSON",
-            "sample_rate": 16000, "channels": 1,
-        }))
-        assert json.loads(await ws.recv())["type"] == "SESSION_CREATED"
-
-        # 2) 读取 16kHz 单声道 PCM16 WAV（注意：上行的是裸采样，不是 WAV 文件字节）
-        with wave.open("speech_16k.wav", "rb") as f:   # 必须 1 声道 / 16bit / 16000Hz
-            pcm = f.readframes(f.getnframes())
-
-        chunk_bytes = 16000 * 40 // 1000 * 2           # 40ms → 1280 字节
-        seq = 0
-        async def send_chunk(raw: bytes):
-            nonlocal seq
-            await ws.send(json.dumps({
-                "type": "AUDIO_CHUNK", "session_id": session_id,
-                "sequence": seq, "timestamp_ms": seq * 40,
-                "audio_b64": base64.b64encode(raw).decode("ascii"),
-            }))
-            seq += 1
-            await asyncio.sleep(0.04)                  # 按真实时间推流
-
-        for offset in range(0, len(pcm), chunk_bytes):
-            await send_chunk(pcm[offset:offset + chunk_bytes])
-        # 3) 发送 600ms 尾静音收尾（≥500ms 才能让 VAD 结束语音段）
-        for _ in range(600 // 40):
-            await send_chunk(b"\x00\x00" * (chunk_bytes // 2))
-
-        # 4) 收流式结果
-        while True:
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=120))
-            kind = msg["type"]
-            if kind == "ASR_RESULT":
-                print("识别:", msg["text"])
-            elif kind == "TEXT_DELTA":
-                print(msg["delta"], end="", flush=True)
-            elif kind == "TEXT_END":
-                print()
-            elif kind == "AUDIO_DELTA":
-                audio = base64.b64decode(msg["audio_b64"])  # PCM16 @16kHz，可送播放
-            elif kind == "ERROR":
-                print("ERROR:", msg["stage"], msg["code"], msg["message"])
-                if not msg["recoverable"]:
-                    break
-            elif kind == "RESPONSE_END":
-                break
-
-        # 5) 优雅关闭
-        await ws.send(json.dumps({"type": "CLOSE_SESSION", "session_id": session_id}))
-
-asyncio.run(main())
-```
-
-完整参考实现见 [scripts/realtime_client.py](scripts/realtime_client.py)（含音频序号校验、打断处理等细节；不足 10ms 的尾块可直接发送，由服务端累积合并）。
-
-### 6.8 排障速查
-
-| 症状 | 最可能原因 |
-|------|------------|
-| 未收到 `SESSION_CREATED`，收到 `ERROR` + 连接关闭 | `CREATE_SESSION` 字段名/取值错误或含多余字段，按 `code` 修正 |
-| 未收到 `SESSION_CREATED`，也无 `ERROR` | 首帧超过 5 秒未发、发的不是 JSON 文本帧，或 `session_id` 已被占用（换新 `session_id` 重试） |
-| 收到 `SESSION_CREATED`，发完语音后长时间无任何响应 | ① 音频编码不对（发了 WAV 文件字节 / float32）② 实际采样率与声明不符 ③ 尾静音不足 500ms ④ 语音太短被 VAD 判为噪声 ⑤ 转写为空被静默丢弃 |
-| 收到 `ASR_RESULT` 但没有 `TEXT_DELTA` | Thinker 下游故障，看 `ERROR/stage=LLM` 或 `/health` |
-| 收到文本但没有 `AUDIO_DELTA` | TTS 下游故障，看 `ERROR/stage=TTS` 或 `/health` |
-| 发送中被 `CLIENT_AUDIO_BACKPRESSURE` 关闭 | 推流过快（积压 >3s），改为按真实时间发送 |
-| `AUDIO_SEQUENCE_GAP` | `sequence` 必须从 0 起、严格 +1，重连后需重新建会话 |
-
-### 6.9 打断机制
-
-一段新的有效语音（ASR 返回非空文本）会打断上一轮未完成的回复。服务端先下发旧 turn 的 `TURN_STATE/INTERRUPTED`，再下发新 turn 的 `ASR_RESULT`；客户端收到打断通知后应停止播放并丢弃该 turn 后续数据。每个 turn 的音频按 `sequence` 严格递增，客户端据此判序。
-
-旧 turn 被打断后，其后续消息（如尚未流式完的 `TEXT_DELTA`、`TEXT_END`、`RESPONSE_END`）统一携带 `interrupt=true`；已被打断的 turn 不再下发任何 `AUDIO_DELTA`。
-
-#### 场景一：在 Thinker(LLM) 流式阶段被打断
-
-第 1 段语音已进入 Thinker 流式输出，第 2 段语音到达并打断它。此时旧 LLM **不会被取消**，会继续流式输出剩余文本（`interrupt=true`），但**不进入 TTS**；旧 LLM 结束后服务端内部先调用 Thinker 的 interrupt 接口，再开始新一轮。
-
-```text
-# 建连
-→ {"type":"SESSION_CREATED",...,"turn_id":0,"interrupt":false,...}
-# 第 1 轮开始
-→ {"type":"ASR_RESULT","turn_id":1,"interrupt":false,"text":"今天天气怎么样"}
-# turn1 Thinker 流式输出中…
-→ {"type":"TEXT_DELTA","turn_id":1,"interrupt":false,"delta":"今"}
-→ {"type":"TEXT_DELTA","turn_id":1,"interrupt":false,"delta":"天天气很好，"}
-# ★ 第 2 段语音 ASR 返回非空文本，打断发生 ★
-→ {"type":"TURN_STATE","turn_id":1,"interrupt":true,"state":"INTERRUPTED"}
-→ {"type":"ASR_RESULT","turn_id":2,"interrupt":false,"text":"那明天呢"}
-# turn1 的 LLM 未被取消，继续流式剩余内容（interrupt=true）
-→ {"type":"TEXT_DELTA","turn_id":1,"interrupt":true,"delta":"适合出门。"}
-→ {"type":"TEXT_END","turn_id":1,"interrupt":true,"text":"今天天气很好，适合出门。"}
-→ {"type":"RESPONSE_END","turn_id":1,"interrupt":true,"status":"INTERRUPTED"}
-# turn1 结束后，内部先调 Thinker interrupt，再启动 turn2
-→ {"type":"TEXT_DELTA","turn_id":2,"interrupt":false,"delta":"明天也有好天气。"}
-→ {"type":"TEXT_END","turn_id":2,"interrupt":false,"text":"明天也有好天气。"}
-# turn2 进入 TTS
-→ {"type":"AUDIO_DELTA","turn_id":2,"interrupt":false,"sequence":0,"audio_b64":"…"}
-→ {"type":"AUDIO_DELTA","turn_id":2,"interrupt":false,"sequence":1,"audio_b64":"…"}
-→ {"type":"RESPONSE_END","turn_id":2,"interrupt":false,"status":"COMPLETED"}
-```
-
-要点：turn1 的 LLM 已占用活跃槽位，turn2 必须等 turn1 的 LLM 流结束后才能开始；LLM 阶段打断时服务端会调用 Thinker 的 interrupt 接口。
-
-#### 场景二：在 TTS 合成阶段被打断
-
-第 1 段语音已完成 ASR + Thinker + `TEXT_END`，正在 TTS 合成（`AUDIO_DELTA` 持续下发），第 2 段语音到达并打断它。此时旧 TTS 流**不立即关闭**，而是进入排空宽限：剩余音频在内部消费并丢弃，**不再下发任何 `AUDIO_DELTA`**；新轮因 LLM 槽已空闲而**立即启动**，无需等待旧 TTS。
-
-```text
-# 建连
-→ {"type":"SESSION_CREATED",...,"turn_id":0,"interrupt":false,...}
-# 第 1 轮：ASR + Thinker + 进入 TTS
-→ {"type":"ASR_RESULT","turn_id":1,"interrupt":false,"text":"今天天气怎么样"}
-→ {"type":"TEXT_DELTA","turn_id":1,"interrupt":false,"delta":"今天天气很好，适合出门。"}
-→ {"type":"TEXT_END","turn_id":1,"interrupt":false,"text":"今天天气很好，适合出门。"}
-→ {"type":"AUDIO_DELTA","turn_id":1,"interrupt":false,"sequence":0,"audio_b64":"…"}
-→ {"type":"AUDIO_DELTA","turn_id":1,"interrupt":false,"sequence":1,"audio_b64":"…"}
-# ★ 第 2 段语音 ASR 返回，打断 turn1（正处于 TTS 阶段）★
-→ {"type":"TURN_STATE","turn_id":1,"interrupt":true,"state":"INTERRUPTED"}
-→ {"type":"ASR_RESULT","turn_id":2,"interrupt":false,"text":"那明天呢"}
-# turn1 的 TTS 排空丢弃，不再下发；turn2 立即进入 Thinker
-→ {"type":"TEXT_DELTA","turn_id":2,"interrupt":false,"delta":"明天也有好天气。"}
-→ {"type":"TEXT_END","turn_id":2,"interrupt":false,"text":"明天也有好天气。"}
-# turn2 进入 TTS
-→ {"type":"AUDIO_DELTA","turn_id":2,"interrupt":false,"sequence":0,"audio_b64":"…"}
-→ {"type":"AUDIO_DELTA","turn_id":2,"interrupt":false,"sequence":1,"audio_b64":"…"}
-→ {"type":"RESPONSE_END","turn_id":2,"interrupt":false,"status":"COMPLETED"}
-# turn1 的 TTS 排空结束（到达位置不固定，可能与其他消息交错）
-→ {"type":"RESPONSE_END","turn_id":1,"interrupt":true,"status":"INTERRUPTED"}
-```
-
-要点：TTS 阶段打断时 LLM 早已完成，服务端**不会**调用 Thinker 的 interrupt 接口；旧 turn 的 `RESPONSE_END/INTERRUPTED` 由 TTS 排空结束时触发，实际到达时间取决于旧流何时排空完毕，可能与新轮消息交错。
-
-#### 两种打断场景对比
-
-| 维度 | LLM 阶段打断 | TTS 阶段打断 |
-|------|--------------|--------------|
-| 旧 turn 文本 | 继续流式完（`interrupt=true`） | 早已结束 |
-| 旧 turn 音频 | 不进入 TTS，无音频下发 | TTS 排空丢弃，不再下发 |
-| Thinker interrupt 接口 | 调用 | 不调用（LLM 已完成） |
-| 新 turn 启动 | 等旧 LLM 流结束后接续 | 立即启动 |
-| 旧 turn 结束 | `RESPONSE_END/INTERRUPTED`（紧随旧文本流） | `RESPONSE_END/INTERRUPTED`（位置不固定） |
+重复会话 ID 或容量已满时，当前实现不保证结构化错误或特定关闭码；应使用新 ID、检查容量并退避重连。详细错误处理见客户端文档第 7 节。
 
 ## 7. 快速联调
 
-仓库内置了联调客户端与压测脚本，无需自己写协议代码即可串通链路。
+仓库脚本可验证普通语音链路。当前 `realtime_client.py`、`chain_latency_test.py` 和 `load_test.py` 不提供 RAG 参数，因此下列命令默认不检索知识；验证 RAG 时，请按[客户端文档的创建会话示例](docs/client-api-v1.md#1-创建会话)发送包含 `rag_enabled` 和 `scenes` 的请求。
 
 ### 用一段 WAV 联调
 
@@ -547,13 +332,25 @@ uv run python scripts/load_test.py --url ws://127.0.0.1:8000/v1/realtime \
   - `unhealthy`：下游返回非 200 或自报异常。
   - `unreachable`：连接失败/超时（附 `error_type`）。
   - 其他值（如 `degraded`）：下游自报状态词直接透传。
+- RAG 不在后台探测列表、`downstream` 或 `limiters` 快照中，不参与 `ready` 判定。排查知识检索需查看 RAG 指标，或从网关主机访问 KBService `/health`、`/scenes` 和 `/retrieve/joint`。
 - 其余字段：`activity`（会话与各队列水位）、`limiters`（下游并发准入）、`executor`（VAD 线程池）、`process`（线程/内存）。
 
-> 监控告警建议盯 `ready` 与 `downstream.*.status`；`degraded` 即代表真实故障（下游不可达/过载/本进程异常），并可通过 `downstream` 字段直接定位组件。
+`/health` 返回 HTTP 200 不等于就绪，应读取 `ready`。启动初期的 `unknown`、容量已满或本进程快照异常也会导致 `degraded`，需结合各字段定位。
 
 ### GET /metrics
 
-Prometheus 格式，包含会话数、各队列水位、限流器占用、执行器状态、事件循环延迟、各阶段（vad/asr/thinker/tts）延迟直方图与错误计数。
+Prometheus 格式，包含会话数、各队列水位、限流器占用、执行器状态、事件循环延迟、各阶段（vad/asr/rag/thinker/tts）延迟直方图与错误计数。RAG 使用以下指标：
+
+| 指标 | 含义 |
+|---|---|
+| `realtime_voice_stage_latency_seconds{stage="rag"}` | 检索耗时，含 RAG 准入排队 |
+| `realtime_voice_rag_requests_total{status="..."}` | 检索结果计数 |
+| `realtime_voice_rag_snippets` | 返回有效片段数量的直方图 |
+| `realtime_voice_limiter_active{service="rag"}` / `realtime_voice_limiter_waiting{service="rag"}` | 检索并发与等待数量 |
+
+`status` 为 `success`、`partial_failure`、`no_match`、`timeout`、`overloaded`、`failed` 或 `cancelled`。响应 `errors` 非空即记为 `partial_failure`，即使没有有效片段；只有 `errors` 为空且无有效片段时才记为 `no_match`。关闭 RAG 的轮次不产生检索计数。
+
+结构化日志 `rag_retrieved` 记录会话、轮次、耗时、状态和片段数量，不记录问题及知识正文。取消检索计入 `cancelled` 指标，不生成 `rag_retrieved` 日志。Thinker 生成耗时不包含 RAG，但“语音结束到首段回复”的端到端指标包含检索等待。
 
 ## 9. 运行验证
 
@@ -563,10 +360,13 @@ uv run pytest -q tests/integration   # 集成测试（含假下游）
 uv run ruff check .                  # 静态检查
 ```
 
+RAG 专项验证覆盖参数、降级、上下文分离、打断、关闭和会话隔离；真实服务验证记录见 [docs/rag-validation.md](docs/rag-validation.md)。
+
 ## 10. 部署与运维
 
 - **本机全栈**：使用 `./start_services.sh start|stop|status|restart`（见 [第 4 节](#4-快速开始)）。脚本会校验 `.env` 中的端口约定（网关 8000、ASR 8001、Thinker 8002、TTS 9000）并做 GPU 隔离校验。
-- **单独重启网关**（不动 GPU 服务，秒级完成）：`restart` 会连 ASR/Thinker/TTS 一起重启（模型重新加载耗时数分钟）。只需重启网关时，kill 网关进程后在**项目根目录**用原有 `RTVA_*` 环境变量重启：
+- **KBService**：单独管理 `/root/KBService` 服务，网关启动器不会管理它。发布网关代码或修改 RAG 服务端配置后需要重启网关；每个新会话再通过客户端参数选择是否检索。
+- **单独重启网关**（不动 GPU 服务）：`restart` 会连 ASR/Thinker/TTS 一起重启（模型重新加载耗时数分钟）。只需重启网关时，kill 网关进程后在**项目根目录**用原有 `RTVA_*` 环境变量重启：
   ```bash
   kill "$(cat .run/gateway.pid)"
   cd /root/RealTimeVoiceApi && \
@@ -581,6 +381,7 @@ uv run ruff check .                  # 静态检查
 - 不提供跨进程或服务重启后的 Session 恢复 / 重连（状态仅在本进程内）；客户端断线需重新握手建会话。
 - 空转写（ASR 返回空文本）的语音段会被静默丢弃，不下发任何消息（V1 无通知机制）。
 - 建连期拒绝（重复 `session_id`、会话容量满）目前直接关闭连接且无 ERROR 消息，后续版本应补上结构化错误下发。
-- 需要上述能力时应在后续协议版本中增加能力协商与外部状态存储。
+- RAG 配置不能在会话中修改；没有自动选场景、问题改写、重试、预热或客户端检索状态事件。
+- KBService 首次加载模型或场景索引可能超过检索预算，网关会降级；启用 RAG 不保证每轮都有知识，也不强制回答仅来自知识库。
 
-如需了解服务内部从 WebSocket 握手到 TTS 回传的完整调用时序，参见 [docs/realtime-voice-sequence-diagram.md](docs/realtime-voice-sequence-diagram.md)。
+基础语音链路的详细时序见 [docs/realtime-voice-sequence-diagram.md](docs/realtime-voice-sequence-diagram.md)；该图尚未包含可选 RAG 分支，当前检索与打断行为以本文为准。

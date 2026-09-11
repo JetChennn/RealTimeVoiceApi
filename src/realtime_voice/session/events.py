@@ -50,6 +50,13 @@ class ThinkerCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class ThinkerSkipped:
+    session_id: str
+    turn_id: int
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class ThinkerFailed:
     session_id: str
     turn_id: int
@@ -95,6 +102,7 @@ SessionEvent: TypeAlias = (
     | AsrFailed
     | ThinkerDeltaReceived
     | ThinkerCompleted
+    | ThinkerSkipped
     | ThinkerFailed
     | TtsChunkReceived
     | TtsCompleted

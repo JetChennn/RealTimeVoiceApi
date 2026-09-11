@@ -28,6 +28,7 @@ from realtime_voice.session.events import (
     ThinkerCompleted,
     ThinkerDeltaReceived,
     ThinkerFailed,
+    ThinkerSkipped,
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
@@ -154,6 +155,18 @@ class SessionActor:
             return self._thinker_delta(event)
         if isinstance(event, ThinkerCompleted):
             return self._thinker_completed(event)
+        if isinstance(event, ThinkerSkipped):
+            turn = self._thinker_turn(event, event.turn_id, event.generation)
+            if not isinstance(turn, TurnContext):
+                return [turn]
+            if not turn.interrupted:
+                return [self._stale(event, "not_interrupted", event.turn_id)]
+            self.state.active_llm_turn_id = None
+            turn.stage = TurnStage.INTERRUPTED
+            effects = [self._response_end(turn, "INTERRUPTED")]
+            if self.state.llm_queue:
+                effects.append(self._start_thinker(interrupt_first=False))
+            return effects
         if isinstance(event, ThinkerFailed):
             return self._thinker_failed(event)
         if isinstance(event, TtsChunkReceived):

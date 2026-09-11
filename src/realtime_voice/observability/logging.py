@@ -25,6 +25,8 @@ _SAFE = frozenset(
         "byte_count",
         "event_type",
         "reason",
+        "status",
+        "snippet_count",
         "error_type",
     }
 )

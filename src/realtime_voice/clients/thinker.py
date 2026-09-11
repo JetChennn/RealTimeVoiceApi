@@ -35,6 +35,7 @@ class ThinkerReplyRequest:
     user_id: str
     session_id: str
     text: str
+    knowledge_context: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,9 @@ class ThinkerClient:
             "stream": True,
             "reply_mode": "dialogue",
         }
+
+        if request.knowledge_context:
+            payload["messages"] = [{"role": "system", "content": request.knowledge_context}]
 
         async with self.admission.slot():
             try:

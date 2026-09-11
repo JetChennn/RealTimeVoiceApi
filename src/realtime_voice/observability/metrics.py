@@ -24,6 +24,12 @@ class Metrics:
         self.executor_workers = Gauge(
             "realtime_voice_executor_workers", "CPU executor workers", registry=r
         )
+        self.rag_requests = Counter(
+            "realtime_voice_rag_requests", "RAG outcomes", ["status"], registry=r
+        )
+        self.rag_snippets = Histogram(
+            "realtime_voice_rag_snippets", "RAG snippet count", registry=r
+        )
         self.stage_latency = Histogram(
             "realtime_voice_stage_latency_seconds", "Stage duration", ["stage"], registry=r
         )

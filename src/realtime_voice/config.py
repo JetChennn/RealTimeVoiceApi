@@ -12,6 +12,13 @@ class Settings(BaseSettings):
     asr_base_url: AnyHttpUrl = "http://127.0.0.1:8000"
     thinker_base_url: AnyHttpUrl = "http://127.0.0.1:8082"
     tts_base_url: AnyHttpUrl = "http://127.0.0.1:8001"
+    rag_base_url: AnyHttpUrl = "http://127.0.0.1:8004"
+    rag_timeout_seconds: float = Field(default=2.0, gt=0, allow_inf_nan=False)
+    rag_concurrency: int = Field(default=8, ge=1)
+    rag_max_waiters: int = Field(default=64, ge=0)
+    rag_top_k_per_scene: int = Field(default=5, ge=1, le=10)
+    rag_top_k_total: int = Field(default=8, ge=3, le=20)
+    rag_score_threshold: float = Field(default=0.0, ge=0, le=1)
     allowed_sample_rates: tuple[int, ...] = (16000, 24000, 48000)
     max_sessions: int = Field(default=64, ge=1)
     cpu_workers: int = Field(default=4, ge=1)
