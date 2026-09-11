@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>实时语音 · 网关测试台</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+<main>
+  <header><div><p class="eyebrow">REALTIME VOICE / TEST CONSOLE</p><h1>实时语音测试台</h1></div><span id="status" class="badge">未连接</span></header>
+  <section class="panel controls" aria-label="连接与录音设置">
+    <div class="fields">
+      <label>设备标识<input id="device" value="browser-test" maxlength="128" autocomplete="off"></label>
+      <label class="scene-field">知识场景 <span>逗号分隔，最多 3 个</span><input id="scenes" placeholder="例如：农业社会，渔猎社会" disabled></label>
+      <label class="toggle"><input id="rag" type="checkbox">开启 RAG</label>
+    </div>
+    <div class="actions"><button id="start" class="primary">开始对话</button><button id="cancel" disabled>取消</button><div class="mic"><span id="mic-label">麦克风未开启</span><meter id="level" min="0" max="1" value="0" aria-label="麦克风音量"></meter></div><span id="connection" class="connection"></span></div>
+    <p id="notice" role="status">开始后持续录音并自动播放回复，推荐佩戴耳机。取消将停止录音、播放并关闭连接。</p>
+    <details><summary>连接信息</summary><p id="endpoint"></p><p id="session-label">会话尚未创建</p></details>
+  </section>
+  <section aria-label="阶段耗时" class="timing-section">
+    <div class="section-heading"><h2>阶段耗时</h2><span id="metrics-status">开始对话后采样</span></div>
+    <div id="metrics" class="metrics"></div>
+    <p class="footnote">来自 /metrics 每秒采样的增量平均值；包含网关到下游的等待与通信。全网关统计，不能归属到某一轮或某个用户。RAG 关闭或无新增样本时不会产生新的采样值。</p>
+  </section>
+  <section class="conversation-section" aria-label="对话记录">
+    <div class="section-heading"><h2>对话记录</h2><span id="turn-count">0 轮</span></div>
+    <div id="empty" class="empty"><div class="sound-icon" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><h3>准备好，就开始说话</h3><p>识别内容、流式回复与可重播音频将按轮次显示在这里。</p></div>
+    <div id="turns"></div>
+  </section>
+</main>
+</body>
+</html>

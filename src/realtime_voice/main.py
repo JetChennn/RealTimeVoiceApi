@@ -9,6 +9,7 @@ from time import monotonic
 
 import httpx
 from fastapi import FastAPI, Response, WebSocket
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST
 
 from realtime_voice.config import Settings
@@ -171,6 +172,7 @@ def create_app(
             await services.rag_client.http.aclose()
 
     app = FastAPI(title="RealTimeVoiceAPI", version="1.0.0", lifespan=lifespan)
+    app.mount("/test", StaticFiles(directory=Path(__file__).parent / "web", html=True), name="test-ui")
     app.state.settings = resolved
     app.state.services = services
 
