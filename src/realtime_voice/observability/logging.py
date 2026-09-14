@@ -28,6 +28,8 @@ _SAFE = frozenset(
         "status",
         "snippet_count",
         "error_type",
+        "probability",
+        "segment_count",
     }
 )
 

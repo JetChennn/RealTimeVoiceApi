@@ -32,6 +32,8 @@ from realtime_voice.session.events import (
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
+    UserInputCommitted,
+    UserInputFailed,
 )
 from realtime_voice.session.state import (
     TERMINAL_TURN_STAGES,
@@ -147,6 +149,10 @@ class SessionActor:
             self.state.registered_asr_segment_ids.add(segment_id)
             self.state.pending_asr_segment_ids.add(segment_id)
             return [QueueAsr(self.state.session_id, event.segment)]
+        if isinstance(event, UserInputCommitted):
+            return self._commit_user_input(event)
+        if isinstance(event, UserInputFailed):
+            return [self._error(0, False, "ASR", event.code, event.message)]
         if isinstance(event, AsrSucceeded):
             return self._asr_succeeded(event)
         if isinstance(event, AsrFailed):
@@ -193,6 +199,9 @@ class SessionActor:
         if not event.text:
             return []
 
+        return self._commit_user_input(event)
+
+    def _commit_user_input(self, event: AsrSucceeded | UserInputCommitted) -> list[SessionEffect]:
         # 新一轮用户输入到达：打断所有未完成轮次，开新轮并入 LLM 队列
         effects = self._interrupt_unfinished_turns()
         turn_id = self.state.next_turn_id

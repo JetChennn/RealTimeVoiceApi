@@ -17,6 +17,8 @@ dependencies = [
   "torch>=2,<3",
   "silero-vad>=6,<7",
   "prometheus-client>=0.21,<1",
+  "onnxruntime>=1.23,<2",
+  "tokenizers>=0.22,<1",
 ]
 
 [project.optional-dependencies]

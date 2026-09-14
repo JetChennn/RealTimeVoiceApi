@@ -137,7 +137,13 @@ async def _receive_response(websocket: Any, writer: TurnAudioWriter, timeout: fl
 
 
 async def run_client(
-    *, url: str, wav_path: Path, sample_rate: int, output: Path, timeout: float = 180.0
+    *,
+    url: str,
+    wav_path: Path,
+    sample_rate: int,
+    output: Path,
+    timeout: float = 180.0,
+    trailing_silence_ms: int = 2200,
 ) -> None:
     pcm16 = read_pcm16_wav(wav_path, sample_rate)
     session_id = f"client-{uuid.uuid4().hex}"
@@ -164,8 +170,8 @@ async def run_client(
             sequence += 1
             await asyncio.sleep(0.04)
 
-        # Give the VAD enough trailing silence to close the spoken segment.
-        silence = b"\x00\x00" * (sample_rate * 600 // 1000)
+        # Silence advances the server-side semantic/min/max end-of-turn windows.
+        silence = b"\x00\x00" * (sample_rate * trailing_silence_ms // 1000)
         for chunk in iter_pcm_chunks(silence, sample_rate):
             await websocket.send(
                 json.dumps(
@@ -195,7 +201,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sample-rate", type=int, default=16000, choices=(16000, 24000, 48000))
     parser.add_argument("--output", required=True, type=Path, help="Output WAV path")
     parser.add_argument("--timeout", type=float, default=180.0)
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--trailing-silence-ms",
+        type=int,
+        default=2200,
+        help="silence sent after the WAV; must cover the gateway maximum turn-end wait",
+    )
+    args = parser.parse_args(argv)
+    if args.trailing_silence_ms <= 0:
+        parser.error("--trailing-silence-ms must be positive")
+    return args
 
 
 def main() -> None:
@@ -207,6 +222,7 @@ def main() -> None:
             sample_rate=args.sample_rate,
             output=args.output,
             timeout=args.timeout,
+            trailing_silence_ms=args.trailing_silence_ms,
         )
     )
 

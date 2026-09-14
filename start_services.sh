@@ -17,6 +17,9 @@
 #   GATEWAY_CPU_WORKERS            VAD worker threads (default: 8).
 #   THINKER_CUDA_VISIBLE_DEVICES   GPU(s) available to Thinker.
 #   STARTUP_TIMEOUT_SECONDS        Per-service readiness timeout (default: 900).
+#
+# When semantic turn-end detection is enabled, `start`/`restart` validates the
+# pinned local model and downloads missing or corrupt assets before any service starts.
 
 set -Eeuo pipefail
 
@@ -132,6 +135,39 @@ validate_runtime() {
     [[ -x "$GATEWAY_PYTHON" ]] || die "Gateway Python interpreter not found: $GATEWAY_PYTHON"
     [[ -f "$TTS_MODEL_PATH/flow.pt" ]] || die "TTS model is invalid (flow.pt missing): $TTS_MODEL_PATH"
     [[ "$ASR_CUDA_VISIBLE_DEVICES" != "$TTS_CUDA_VISIBLE_DEVICES" ]] || die "ASR and TTS must use different GPUs"
+}
+
+ensure_turn_end_model() {
+    local enabled="${RTVA_TURN_END_SEMANTIC_ENABLED:-true}"
+    local configured_path="${RTVA_TURN_END_MODEL_PATH:-models/turn-end-livekit}"
+    local model_path
+    enabled="${enabled,,}"
+
+    case "$enabled" in
+        false|0|no|off)
+            echo "Semantic turn-end detection is disabled; skipping model check."
+            return
+            ;;
+        true|1|yes|on) ;;
+        *) die "RTVA_TURN_END_SEMANTIC_ENABLED must be a boolean value" ;;
+    esac
+
+    if [[ "$configured_path" == /* ]]; then
+        model_path="$configured_path"
+    else
+        model_path="$SCRIPT_DIR/$configured_path"
+    fi
+
+    if "$GATEWAY_PYTHON" "$SCRIPT_DIR/scripts/download_turn_end_model.py" \
+        --output "$model_path" --check >/dev/null 2>&1; then
+        echo "Semantic turn-end model is ready: $model_path"
+        return
+    fi
+
+    echo "Semantic turn-end model is missing or invalid; downloading pinned assets."
+    "$GATEWAY_PYTHON" "$SCRIPT_DIR/scripts/download_turn_end_model.py" --output "$model_path"
+    "$GATEWAY_PYTHON" "$SCRIPT_DIR/scripts/download_turn_end_model.py" \
+        --output "$model_path" --check
 }
 
 start_process() {
@@ -329,6 +365,7 @@ start_gateway() {
 start_all() {
     load_gateway_config
     validate_runtime
+    ensure_turn_end_model
     mkdir -p "$RUN_DIR" "$LOG_DIR"
 
     trap cleanup_failed_start ERR

@@ -7,6 +7,15 @@ class Metrics:
     def __init__(self, *, registry: CollectorRegistry | None = None) -> None:
         self.registry = registry or CollectorRegistry()
         r = self.registry
+        self.semantic_jobs = Gauge(
+            "realtime_voice_semantic_jobs", "Queued and running semantic jobs", registry=r
+        )
+        self.semantic_results = Counter(
+            "realtime_voice_semantic_results", "Semantic outcomes", ["status"], registry=r
+        )
+        self.turn_end_commits = Counter(
+            "realtime_voice_turn_end_commits", "Turn commit reasons", ["reason"], registry=r
+        )
         self.active_sessions = Gauge(
             "realtime_voice_active_sessions", "Admitted realtime sessions", registry=r
         )
@@ -46,7 +55,9 @@ class Metrics:
             "realtime_voice_thinker_full_seconds", "Thinker request start to reply done", registry=r
         )
         self.thinker_generate = Histogram(
-            "realtime_voice_thinker_generate_seconds", "Thinker first token to reply done", registry=r
+            "realtime_voice_thinker_generate_seconds",
+            "Thinker first token to reply done",
+            registry=r,
         )
         self.interruptions = Counter(
             "realtime_voice_turn_interruptions", "Interrupted turns", registry=r

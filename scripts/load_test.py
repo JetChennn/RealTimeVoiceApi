@@ -54,7 +54,9 @@ def _latency_summary(results: Sequence[ClientResult], field: str) -> dict[str, f
     }
 
 
-def summarize_results(results: Sequence[ClientResult], duration_seconds: float) -> dict[str, object]:
+def summarize_results(
+    results: Sequence[ClientResult], duration_seconds: float
+) -> dict[str, object]:
     errors = Counter(item.error_code for item in results if item.error_code)
     return {
         "clients": len(results),
@@ -79,7 +81,13 @@ async def run_load(
 
 
 async def measure_client(
-    index: int, *, url: str, pcm16: bytes, sample_rate: int, timeout: float
+    index: int,
+    *,
+    url: str,
+    pcm16: bytes,
+    sample_rate: int,
+    timeout: float,
+    trailing_silence_ms: int = 2200,
 ) -> ClientResult:
     session_id = f"load-{index}-{uuid.uuid4().hex}"
     connected = False
@@ -108,7 +116,7 @@ async def measure_client(
                 await asyncio.sleep(0.04)
             speech_ended_at = time.monotonic()
 
-            silence = b"\x00\x00" * (sample_rate * 600 // 1000)
+            silence = b"\x00\x00" * (sample_rate * trailing_silence_ms // 1000)
             for chunk in iter_pcm_chunks(silence, sample_rate):
                 await websocket.send(
                     json.dumps(
@@ -174,7 +182,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--report", default=Path("report.json"), type=Path)
     parser.add_argument("--sample-rate", default=16000, type=int, choices=(16000, 24000, 48000))
     parser.add_argument("--timeout", default=180.0, type=float)
-    return parser.parse_args(argv)
+    parser.add_argument("--trailing-silence-ms", default=2200, type=int)
+    args = parser.parse_args(argv)
+    if args.trailing_silence_ms <= 0:
+        parser.error("--trailing-silence-ms must be positive")
+    return args
 
 
 async def async_main(args: argparse.Namespace) -> dict[str, object]:
@@ -187,6 +199,7 @@ async def async_main(args: argparse.Namespace) -> dict[str, object]:
             pcm16=pcm16,
             sample_rate=args.sample_rate,
             timeout=args.timeout,
+            trailing_silence_ms=args.trailing_silence_ms,
         )
 
     results, duration = await run_load(args.clients, runner)
@@ -197,7 +210,9 @@ def main() -> None:
     args = parse_args()
     report = asyncio.run(async_main(args))
     args.report.parent.mkdir(parents=True, exist_ok=True)
-    args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    args.report.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     print(json.dumps(report, indent=2, ensure_ascii=False))
 
 

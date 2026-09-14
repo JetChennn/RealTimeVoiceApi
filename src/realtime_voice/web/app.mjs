@@ -6,6 +6,9 @@ url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 $('endpoint').textContent = `WebSocket：${url.href} · 指标：${location.origin}/metrics`;
 $('connection').textContent = location.host;
 const descriptions = {
+  semantic: ['语义判断总耗时', '排队 → 判断返回（含超时）'],
+  semantic_inference: ['语义模型执行', '实际预处理与推理耗时'],
+  semantic_queue: ['语义排队', '提交 → 开始执行'],
   asr: ['ASR 识别', '转写调用 → 识别完成'], rag: ['RAG 检索', '检索排队 → 返回结果'],
   thinker: ['LLM 首包', '回复调用 → 首段文本'], tts: ['TTS 首音频', '合成调用 → 首块可发送音频'],
 };

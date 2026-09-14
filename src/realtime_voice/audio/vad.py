@@ -285,7 +285,9 @@ class VadWorker:
         input_sample_rate: int = 16000,
         metrics: Metrics | None = None,
         clock: Callable[[], float] = monotonic,
+        turn_end_audio=None,
     ):
+        self.turn_end_audio = turn_end_audio
         self._session_id = session_id
         self._audio_queue = audio_queue
         self._event_queue = event_queue
@@ -298,9 +300,7 @@ class VadWorker:
         self._clock = clock
 
     def _speech_end_at(self, segment: SpeechSegment) -> float:
-        trailing_seconds = (
-            segment.trailing_silence_samples / self._segmenter.config.sample_rate
-        )
+        trailing_seconds = segment.trailing_silence_samples / self._segmenter.config.sample_rate
         return self._clock() - trailing_seconds  # 分段刚发出，故语音结束于 trailing_seconds 之前
 
     async def run(self) -> None:
@@ -322,9 +322,15 @@ class VadWorker:
             return
         remainder = bytes(self._detector_remainder)
         self._detector_remainder.clear()
-        detector_frame = remainder.ljust(self._DETECTOR_FRAME_BYTES, b"\x00")  # 不足一帧则用零样本补齐，满足 Silero 512 采样要求
+        detector_frame = remainder.ljust(
+            self._DETECTOR_FRAME_BYTES, b"\x00"
+        )  # 不足一帧则用零样本补齐，满足 Silero 512 采样要求
         samples = pcm16_bytes_to_float32(detector_frame)
         has_speech = await self._detector_offload.run(partial(self._detector.has_speech, samples))
+        if self.turn_end_audio is not None:
+            for event in self.turn_end_audio.push(remainder, has_speech):
+                await self._event_queue.put(event)
+            return
         segment = self._segmenter.push(remainder, has_speech)
         if segment is not None:
             await self._event_queue.put(
@@ -344,6 +350,10 @@ class VadWorker:
             has_speech = await self._detector_offload.run(
                 partial(self._detector.has_speech, samples)
             )
+            if self.turn_end_audio is not None:
+                for event in self.turn_end_audio.push(frame, has_speech):
+                    await self._event_queue.put(event)
+                continue
             segment = self._segmenter.push(frame, has_speech)
             if segment is not None:
                 await self._event_queue.put(

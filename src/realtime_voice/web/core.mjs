@@ -1,4 +1,4 @@
-export const STAGES = ['asr', 'rag', 'thinker', 'tts'];
+export const STAGES = ['asr', 'semantic', 'semantic_inference', 'semantic_queue', 'rag', 'thinker', 'tts'];
 export function parseMetrics(text) {
   const values = Object.fromEntries(STAGES.map(stage => [stage, {sum: 0, count: 0}]));
   let found = false;

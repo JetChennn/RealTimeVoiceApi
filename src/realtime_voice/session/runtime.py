@@ -51,6 +51,7 @@ from realtime_voice.session.events import (
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
+    UserInputCommitted,
 )
 from realtime_voice.session.registry import SessionRegistry
 from realtime_voice.session.state import TERMINAL_TURN_STAGES, SessionState, TurnStage
@@ -242,6 +243,8 @@ class SessionRuntime:
         tts_prompt_override: str = "",
         logger: logging.Logger | None = None,
         clock: Callable[[], float] = monotonic,
+        turn_end_settings=None,
+        semantic_detector=None,
     ) -> None:
         if min(event_queue_size, audio_queue_size, asr_queue_size, outbound_queue_size) < 1:
             raise ValueError("session queue sizes must be at least 1")
@@ -323,6 +326,19 @@ class SessionRuntime:
         self._cleanup_lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
         self._cleaned = False
+        self.turn_end = None
+        if semantic_detector is not None:
+            from realtime_voice.turn_end.coordinator import TurnEndCoordinator
+
+            self.turn_end = TurnEndCoordinator(
+                state.session_id,
+                turn_end_settings,
+                semantic_detector,
+                vad_worker.turn_end_audio,
+                self.events,
+                metrics,
+                self._semantic_context,
+            )
 
     @property
     def session_id(self) -> str:
@@ -486,33 +502,57 @@ class SessionRuntime:
         await worker.run()
         self.request_close()
 
+    def _semantic_context(self):
+        context = []
+        for turn in list(self.actor.state.turns.values())[-3:]:
+            context.append({"role": "user", "content": turn.asr_text})
+            if turn.stage == TurnStage.COMPLETED and turn.reply_text:
+                context.append({"role": "assistant", "content": turn.reply_text})
+        return context
+
     async def _actor_loop(self) -> None:
         while True:
             event = await self.events.get()
-            if isinstance(event, SpeechSegmentReady):
-                self._speech_ends.setdefault(
-                    event.segment.segment_id,
-                    event.speech_end_at if event.speech_end_at is not None else self._clock(),
-                )
-                self._observe("vad_segment_ready", segment_id=event.segment.segment_id)
-            next_turn_id = self.actor.state.next_turn_id
-            effects = self.actor.handle(event)
-            if isinstance(event, AsrSucceeded):
-                speech_end = self._speech_ends.pop(event.segment_id, None)
-                if speech_end is not None and self._metrics is not None:
-                    self._metrics.observe_speech_end_to_asr(self._clock() - speech_end)
-                if speech_end is not None and self.actor.state.next_turn_id == next_turn_id + 1:
-                    self._turn_speech_ends[next_turn_id] = speech_end
-            elif isinstance(event, AsrFailed):
-                # ASR 失败不产生 turn，也不再需要这段的结束时间，及时清理避免字典随段数无限增长
-                self._speech_ends.pop(event.segment_id, None)
-            if isinstance(event, (ThinkerCompleted, ThinkerFailed, TtsCompleted, TtsFailed)):
-                turn = self.actor.state.turns.get(event.turn_id)
-                if turn is not None and turn.stage in TERMINAL_TURN_STAGES:
-                    self._turn_speech_ends.pop(event.turn_id, None)
-                    self._llm_milestones.discard(event.turn_id)
-            for effect in effects:
-                await self.execute_effect(effect)
+            if self.turn_end is not None:
+                if isinstance(event, SpeechSegmentReady):
+                    self._speech_ends[event.segment.segment_id] = event.speech_end_at
+                    await self._asr_queue.put(event.segment)
+                elif isinstance(event, (AsrSucceeded, AsrFailed)):
+                    speech_end = self._speech_ends.pop(event.segment_id, None)
+                    if speech_end is not None and self._metrics is not None:
+                        self._metrics.observe_speech_end_to_asr(self._clock() - speech_end)
+                for ready in self.turn_end.process(event):
+                    await self._handle_actor_event(ready)
+            else:
+                await self._handle_actor_event(event)
+
+    async def _handle_actor_event(self, event):
+        if isinstance(event, SpeechSegmentReady):
+            self._speech_ends.setdefault(
+                event.segment.segment_id,
+                event.speech_end_at if event.speech_end_at is not None else self._clock(),
+            )
+            self._observe("vad_segment_ready", segment_id=event.segment.segment_id)
+        next_turn_id = self.actor.state.next_turn_id
+        effects = self.actor.handle(event)
+        if isinstance(event, UserInputCommitted):
+            self._turn_speech_ends[next_turn_id] = event.speech_end_at
+        elif isinstance(event, AsrSucceeded):
+            speech_end = self._speech_ends.pop(event.segment_id, None)
+            if speech_end is not None and self._metrics is not None:
+                self._metrics.observe_speech_end_to_asr(self._clock() - speech_end)
+            if speech_end is not None and self.actor.state.next_turn_id == next_turn_id + 1:
+                self._turn_speech_ends[next_turn_id] = speech_end
+        elif isinstance(event, AsrFailed):
+            # ASR 失败不产生 turn，也不再需要这段的结束时间，及时清理避免字典随段数无限增长
+            self._speech_ends.pop(event.segment_id, None)
+        if isinstance(event, (ThinkerCompleted, ThinkerFailed, TtsCompleted, TtsFailed)):
+            turn = self.actor.state.turns.get(event.turn_id)
+            if turn is not None and turn.stage in TERMINAL_TURN_STAGES:
+                self._turn_speech_ends.pop(event.turn_id, None)
+                self._llm_milestones.discard(event.turn_id)
+        for effect in effects:
+            await self.execute_effect(effect)
 
     async def _asr_loop(self) -> None:
         while True:
@@ -871,6 +911,8 @@ class SessionRuntime:
             if self._cleaned:
                 return
             self._closing = True
+            if self.turn_end is not None:
+                await self.turn_end.aclose()
             for task in self._rag_tasks.values():
                 task.cancel()
             try:

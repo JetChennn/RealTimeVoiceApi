@@ -118,6 +118,7 @@ class AppServices:
     settings: Settings
     runtime_factory: RuntimeFactory | None = None
     metrics: Metrics | None = None
+    semantic_detector: object | None = None
     downstream_health: dict[str, dict[str, str]] = field(default_factory=dict)
 
     process_snapshot: Callable[[], ProcessSnapshot] = local_process_snapshot
@@ -145,6 +146,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        if resolved.turn_end_semantic_enabled:
+            from realtime_voice.turn_end.model import SemanticDetector
+
+            services.semantic_detector = SemanticDetector(resolved, services.metrics)
+            await services.semantic_detector.start()
         sampler = asyncio.create_task(
             run_event_loop_lag_sampler(
                 services.metrics,
@@ -168,11 +174,15 @@ def create_app(
             sampler.cancel()
             prober.cancel()
             await asyncio.gather(sampler, prober, return_exceptions=True)
+            if services.semantic_detector is not None:
+                await services.semantic_detector.aclose()
             await services.detector_offload.aclose()
             await services.rag_client.http.aclose()
 
     app = FastAPI(title="RealTimeVoiceAPI", version="1.0.0", lifespan=lifespan)
-    app.mount("/test", StaticFiles(directory=Path(__file__).parent / "web", html=True), name="test-ui")
+    app.mount(
+        "/test", StaticFiles(directory=Path(__file__).parent / "web", html=True), name="test-ui"
+    )
     app.state.settings = resolved
     app.state.services = services
 
@@ -295,6 +305,16 @@ def create_app(
             "executor": executor,
             "process": process,
             "downstream": services.downstream_health,
+            "semantic": {
+                "enabled": resolved.turn_end_semantic_enabled,
+                "ready": services.semantic_detector is not None
+                and services.semantic_detector.model is not None,
+                "concurrency": resolved.turn_end_concurrency,
+                "max_pending_jobs": resolved.turn_end_max_pending_jobs,
+                "pending_jobs": services.semantic_detector.pending
+                if services.semantic_detector
+                else 0,
+            },
         }
 
     @app.get("/health")

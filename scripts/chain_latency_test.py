@@ -36,7 +36,7 @@ else:
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 WORKSPACE_DIR = PROJECT_DIR.parent
 DEFAULT_AUDIO = WORKSPACE_DIR / "asr" / "asr_zh.wav"
-SILENCE_MS = 600
+DEFAULT_TRAILING_SILENCE_MS = 2200
 
 # 每个延迟指标的中文名称与说明，顺序即报告中的展示顺序。
 METRIC_LABELS: dict[str, tuple[str, str]] = {
@@ -204,6 +204,7 @@ async def send_turn(
     sample_rate: int,
     sequence: int,
     timeout: float,
+    trailing_silence_ms: int,
 ) -> tuple[TurnResult, int]:
     result = TurnResult(turn_index, audio.path, audio.duration_ms)
     first_speech_sent_at: float | None = None
@@ -214,9 +215,9 @@ async def send_turn(
             first_speech_sent_at = time.monotonic()
         await websocket.send(
             json.dumps(
-                    {
-                        "type": "AUDIO_CHUNK",
-                        "session_id": session_id,
+                {
+                    "type": "AUDIO_CHUNK",
+                    "session_id": session_id,
                     "sequence": sequence,
                     "timestamp_ms": sequence * 40,
                     "audio_b64": base64.b64encode(chunk.pcm).decode("ascii"),
@@ -227,13 +228,13 @@ async def send_turn(
         await asyncio.sleep(0.04)
     speech_ended_at = time.monotonic()
 
-    silence = b"\x00\x00" * (sample_rate * SILENCE_MS // 1000)
+    silence = b"\x00\x00" * (sample_rate * trailing_silence_ms // 1000)
     for chunk in iter_pcm_chunks(silence, sample_rate):
         await websocket.send(
             json.dumps(
-                    {
-                        "type": "AUDIO_CHUNK",
-                        "session_id": session_id,
+                {
+                    "type": "AUDIO_CHUNK",
+                    "session_id": session_id,
                     "sequence": sequence,
                     "timestamp_ms": sequence * 40,
                     "audio_b64": base64.b64encode(chunk.pcm).decode("ascii"),
@@ -304,6 +305,7 @@ async def run_session(
     turns: int,
     sample_rate: int,
     timeout: float,
+    trailing_silence_ms: int,
 ) -> list[TurnResult]:
     session_id = f"chain-latency-{uuid.uuid4().hex}"
     results: list[TurnResult] = []
@@ -324,6 +326,7 @@ async def run_session(
                 sample_rate=sample_rate,
                 sequence=sequence,
                 timeout=timeout,
+                trailing_silence_ms=trailing_silence_ms,
             )
             after = await asyncio.to_thread(metrics_snapshot, metrics_url)
             result.gateway_metrics_delta = metrics_delta(before, after)
@@ -337,14 +340,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ws-url", default="ws://127.0.0.1:8000/v1/realtime")
     parser.add_argument("--metrics-url", default="http://127.0.0.1:8000/metrics")
-    parser.add_argument("--turns", type=int, default=5, help="number of times to send the audio within one connection")
+    parser.add_argument(
+        "--turns",
+        type=int,
+        default=5,
+        help="number of times to send the audio within one connection",
+    )
     parser.add_argument("--sample-rate", type=int, default=16000, choices=(16000, 24000, 48000))
     parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument("--trailing-silence-ms", type=int, default=DEFAULT_TRAILING_SILENCE_MS)
     parser.add_argument("--audio", type=Path, default=DEFAULT_AUDIO, metavar="AUDIO")
-    parser.add_argument("--report", type=Path, help="Markdown report path; defaults to reports/chain_latency_<UTC>.md")
+    parser.add_argument(
+        "--report",
+        type=Path,
+        help="Markdown report path; defaults to reports/chain_latency_<UTC>.md",
+    )
     args = parser.parse_args(argv)
     if args.turns < 1:
         parser.error("--turns must be positive")
+    if args.trailing_silence_ms <= 0:
+        parser.error("--trailing-silence-ms must be positive")
     return args
 
 
@@ -359,6 +374,7 @@ async def async_main(args: argparse.Namespace) -> dict[str, object]:
         turns=args.turns,
         sample_rate=args.sample_rate,
         timeout=args.timeout,
+        trailing_silence_ms=args.trailing_silence_ms,
     )
 
     return {
@@ -369,6 +385,7 @@ async def async_main(args: argparse.Namespace) -> dict[str, object]:
             "metrics_url": args.metrics_url,
             "turns": args.turns,
             "sample_rate": args.sample_rate,
+            "trailing_silence_ms": args.trailing_silence_ms,
             "audio": {"path": audio.path, "duration_ms": audio.duration_ms},
         },
         "summary": {

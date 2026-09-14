@@ -94,7 +94,15 @@ def build_runtime(
         websocket, create.session_id, create.sample_rate, audio, lambda: runtime.request_close()
     )
     sender = WebSocketSender(websocket, outbound)
+    turn_end_audio = None
+    if settings.turn_end_semantic_enabled:
+        from realtime_voice.turn_end.audio import TurnEndAudio
+
+        if services.semantic_detector is None:
+            raise RuntimeError("semantic model has not completed startup")
+        turn_end_audio = TurnEndAudio(create.session_id, settings)
     vad = VadWorker(
+        turn_end_audio=turn_end_audio,
         session_id=create.session_id,
         audio_queue=audio,
         event_queue=events,
@@ -105,6 +113,8 @@ def build_runtime(
         metrics=services.metrics,
     )
     runtime = SessionRuntime(
+        turn_end_settings=settings,
+        semantic_detector=services.semantic_detector,
         state=state,
         asr_client=services.asr_client,
         rag_client=services.rag_client,

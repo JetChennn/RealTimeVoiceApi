@@ -1,12 +1,19 @@
 # RealTimeVoiceAPI
 
-基于异步 WebSocket 的实时语音网关，统一编排 **VAD → ASR → 可选 RAG → Thinker → TTS**。客户端在创建会话时决定是否使用知识检索、指定检索场景，随后持续上传语音并接收识别文本、回复文本和音频。
+基于异步 WebSocket 的实时语音网关，统一编排 **VAD → ASR → 语义结束判断 → 可选 RAG → Thinker → TTS**。客户端在创建会话时决定是否使用知识检索、指定检索场景，随后持续上传语音并接收识别文本、回复文本和音频。
 
 ```mermaid
 flowchart LR
-    C[客户端 PCM16 音频] --> V[VAD 切段]
-    V --> A[ASR 转写]
-    A --> S[下发 ASR_RESULT]
+    C[客户端持续发送 PCM16 音频] --> V[VAD: 500ms 静音生成候选片段]
+    V --> A[候选片段调用一次 ASR]
+    A --> M[合并本轮已有 ASR 文本]
+    M --> B{用户恢复说话?}
+    B -->|是| V
+    B -->|否| E{语义完整且静音达到 1000ms?}
+    E -->|是| S[提交整段并下发一次 ASR_RESULT]
+    E -->|否| F{静音达到 2000ms 或输入达到 30s?}
+    F -->|否，继续收音| C
+    F -->|是，保底提交| S
     S --> R{会话启用 RAG?}
     R -->|是| K[KBService 联合检索]
     R -->|否| T[Thinker 流式回复]
@@ -16,7 +23,7 @@ flowchart LR
     U --> O[AUDIO_DELTA / RESPONSE_END]
 ```
 
-ASR 使用 16kHz 音频；Thinker 接收识别原文和本轮可选参考知识，不接收语音。TTS 在完整回复生成后开始，24kHz 输出重采样为客户端协商的采样率。检索及生成均在后台任务中执行，音频上传与下行接收可继续进行。
+ASR 使用 16kHz 音频；候选片段只识别一次，同一段用户输入的多次 ASR 文本会合并后交给本地语义模型判断。候选识别结果不会直接下发，整段输入提交时客户端只收到一条合并后的 `ASR_RESULT`。Thinker 接收合并后的识别原文和本轮可选参考知识，不接收语音。TTS 在完整回复生成后开始，24kHz 输出重采样为客户端协商的采样率。检索及生成均在后台任务中执行，音频上传与下行接收可继续进行。
 
 面向调用方的独立接入文档：[实时语音 API 调用说明（V1）](docs/client-api-v1.md)，包含创建会话、RAG 参数、音频收发、打断与错误处理要点。
 
@@ -39,11 +46,12 @@ ASR 使用 16kHz 音频；Thinker 接收识别原文和本轮可选参考知识�
 ## 1. 功能特性
 
 - **WebSocket 单连接**：建连时声明音频格式与采样率，上下行共用；客户端只传 Base64 编码的 PCM16 音频。
-- **全链路编排**：一个有效语音段触发「VAD 切段 → ASR 转写 → 按需检索知识 → Thinker 流式回复 → TTS 流式合成 → 回传音频」。
+- **全链路编排**：VAD 静音形成候选片段，ASR 转写后由本地模型结合上下文判断用户是否说完，再按需检索知识、生成回复和语音。
+- **语义结束判断**：短停顿先等待；达到最短静音且语义完整时提交，模型判断继续等待、超时、失败或过载时由最长静音兜底，输入达到最大时长时强制提交。
 - **会话级知识检索**：`rag_enabled` 默认关闭；开启后每轮在 1～3 个指定场景内检索，默认最多等待 2 秒，失败时继续普通回答。
 - **流式输出**：ASR 返回最终转写，Thinker 回复文本和 TTS 音频分别流式下发。
-- **打断能力**：新语音段可以打断上一轮未完成的回复，服务端下发 `TURN_STATE/INTERRUPTED`，旧 TTS 在后台安静排空、丢弃，不再发往客户端。
-- **并发与背压**：多会话并行；事件与音频队列有界，音频和出站队列另有字节上限；RAG 使用独立并发准入和有界等待队列。
+- **打断能力**：新的完整用户输入提交后可以打断上一轮未完成的回复；同一输入中的短停顿和续说不会触发打断。服务端下发 `TURN_STATE/INTERRUPTED`，旧 TTS 在后台排空并丢弃。
+- **并发与背压**：多会话并行；语义模型默认 4 路并行并有有界等待队列；事件与音频队列有界，音频和出站队列另有字节上限；RAG 使用独立并发准入和有界等待队列。
 - **可观测性**：`/health` 聚合健康检查（含后台周期探测的下游真实状态）、`/metrics` 暴露 Prometheus 指标、结构化日志。
 - **一键启停**：`start_services.sh` 统一拉起 ASR / Thinker / TTS / 网关全栈并做就绪等待。
 - **压测工具**：内置联调客户端、链路延迟测试和多并发压测脚本（见 [第 7 节](#7-快速联调)）。
@@ -72,6 +80,7 @@ RealTimeVoiceAPI/
 │   │   ├── vad.py            # Silero VAD + 流式切段 + 有界线程池卸载
 │   │   ├── pcm.py            # PCM16 Base64 编解码与 WAV 封装
 │   │   └── resampler.py      # 采样率转换
+│   ├── turn_end/             # 候选片段累积 + 本地 ONNX 语义结束判断
 │   ├── session/              # 每会话的编排核心（Actor 状态机 + Runtime）
 │   │   ├── runtime.py        # 异步运行时：5 个长任务、队列、清理
 │   │   ├── actor.py          # 纯同步状态机，把事件翻译为 Effect
@@ -89,7 +98,8 @@ RealTimeVoiceAPI/
 ├── scripts/                  # 联调与压测工具
 │   ├── realtime_client.py    # 单段 WAV 联调客户端（协议参考实现）
 │   ├── chain_latency_test.py # 单音频×N轮单连接端到端链路延迟测试
-│   └── load_test.py          # 多并发压测
+│   ├── load_test.py          # 多并发压测
+│   └── download_turn_end_model.py # 固定版本语义模型下载与完整性检查
 ├── deploy/                   # 生产部署模板（systemd / supervisord）
 ├── docs/                     # 客户端协议、验证记录等文档
 ├── logs/                     # start_services.sh 生成的服务日志（运行时产物）
@@ -110,6 +120,8 @@ RealTimeVoiceAPI/
 
 `start_services.sh` 管理 ASR、Thinker、TTS 和网关，**不启动、停止或探测 KBService**。本机知识服务项目位于 `/root/KBService`，由部署方独立管理。网关只检索知识，不调用 KBService `/query` 生成答案，也不提供知识管理接口。
 
+语义结束模型不是独立服务。网关通过 ONNX Runtime 在本进程内加载一份固定的 `livekit/turn-detector v0.4.1-intl` 量化模型，所有会话共享该模型。模型文件约 389MB，不需要 GPU；默认 4 路推理、每路最多使用 2 个 CPU 线程。模型目录 `models/` 被 Git 忽略，不随提交或推送上传。
+
 运行环境：**Python 3.11+**，推荐使用 [`uv`](https://docs.astral.sh/uv/)。GPU 要求：ASR 与 TTS 必须使用不同 GPU（启动脚本会校验）。
 
 ## 4. 快速开始
@@ -124,6 +136,7 @@ cd /root/RealTimeVoiceApi
 ```
 
 - 网关监听 `0.0.0.0:8000`，对外提供 WebSocket 与 HTTP 接口。
+- 启动脚本会检查固定版本的语义结束模型；新部署缺失或文件损坏时自动下载，已有正确模型时直接复用。
 - GPU 模型加载耗时较长（默认就绪等待上限 900s，可用 `STARTUP_TIMEOUT_SECONDS` 覆盖）。
 - PID 文件在 `.run/`，日志在 `logs/`。
 - 并发规格可用环境变量覆盖：`GATEWAY_MAX_SESSIONS`（默认 30）、`GATEWAY_CPU_WORKERS`（默认 8）、`ASR_MAX_NUM_SEQS`（默认 30，同时决定 ASR 准入并发）等，详见脚本头部注释。
@@ -134,12 +147,17 @@ cd /root/RealTimeVoiceApi
 # 1. 安装依赖（项目使用 uv + uv.lock）
 uv sync --extra dev
 
-# 2. 准备配置
+# 2. 下载固定版本的本地语义结束模型（约 389 MB）
+uv run python scripts/download_turn_end_model.py
+
+# 3. 准备配置
 cp .env.example .env
 
-# 3. 启动网关（从项目根目录启动，见下方 CWD 注意事项）
+# 4. 启动网关（从项目根目录启动，见下方 CWD 注意事项）
 uv run uvicorn realtime_voice.main:app --host 0.0.0.0 --port 8000
 ```
+
+下载脚本只获取 `livekit/turn-detector` 的固定 `v0.4.1-intl` 修订文件。使用 `start_services.sh start|restart` 时会自动检查并按需下载，无需单独执行；直接运行 Uvicorn 时仍需先执行上述模型下载命令。网关启动期间不会下载，模型缺失、版本不匹配或加载失败时会明确报错并拒绝启动。需要临时回退旧 VAD 直接切句流程时设置 `RTVA_TURN_END_SEMANTIC_ENABLED=false`，启动脚本也会跳过模型检查。
 
 > **CWD 注意事项**：`Settings` 通过 pydantic-settings 加载 `env_file=".env"`，该路径**相对进程当前工作目录解析**，而非 config.py 所在目录。请务必从项目根目录启动（或使用绝对路径的 env 文件），否则 `.env` 会被跳过，未由环境变量指定的设置回退到代码默认值。直接运行 Uvicorn 时，监听地址以命令行 `--host`、`--port` 为准；`Settings.port` 不会自行修改 Uvicorn 监听端口。
 
@@ -172,6 +190,25 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_DOWNSTREAM_PROBE_INTERVAL_SECONDS` | `10` | 同左 | 下游健康探测周期 |
 | `RTVA_DOWNSTREAM_PROBE_TIMEOUT_SECONDS` | `2` | 同左 | 下游健康探测超时 |
 | `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 同左 | 非空时直接作为 TTS `prompt`；为空时依次使用 Thinker `done.output.tone` 和默认值“平和” |
+
+语义结束判断的配置如下。三个静音窗口必须满足 `候选 <= 最短 <= 最长`；这些时间由客户端持续上传的音频帧推进，停止发帧不算静音。模型输入为当前用户输入已经合并的候选 ASR 文本，并附带会话最近三个轮次的用户文本和已完成助手回复。用户恢复说话时，旧语义结果失效；新候选识别完成后再基于合并文本判断。
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `RTVA_TURN_END_SEMANTIC_ENABLED` | `true` | 启用本地语义结束判断；关闭后恢复 VAD 直接切句 |
+| `RTVA_TURN_END_CANDIDATE_SILENCE_MS` | `500` | 静音达到该时间后切出候选片段并调用一次 ASR |
+| `RTVA_TURN_END_MIN_SILENCE_MS` | `1000` | 即使模型判断完整，也要达到该静音时间才提交整段输入 |
+| `RTVA_TURN_END_MAX_SILENCE_MS` | `2000` | 最长等待；模型判断等待、失败或超时时仍会提交 |
+| `RTVA_TURN_END_INFERENCE_TIMEOUT_MS` | `300` | 单次语义任务的排队加推理总预算；超时后走最长静音兜底 |
+| `RTVA_TURN_END_MODEL_PATH` | `models/turn-end-livekit` | 下载脚本生成的本地模型目录 |
+| `RTVA_TURN_END_LANGUAGE` | `zh` | 模型语言及其默认判断阈值 |
+| `RTVA_TURN_END_COMPLETE_THRESHOLD` | 未设置 | 完整概率阈值；未设置时使用模型内语言阈值（中文为 `0.0066`） |
+| `RTVA_TURN_END_CONCURRENCY` | `4` | 可同时执行的语义推理数；所有工作线程共享同一个 ONNX 模型实例 |
+| `RTVA_TURN_END_MAX_PENDING_JOBS` | `32` | 所有运行槽位之外允许排队的任务数；超限时走最长静音兜底 |
+| `RTVA_TURN_END_MAX_UTTERANCE_SECONDS` | `30` | 单次输入的强制提交时长上限 |
+| `RTVA_TURN_END_CPU_THREADS` | `2` | ONNX Runtime 单次推理使用的 CPU 线程数 |
+
+一次判断的 300ms 超时包含排队和实际推理。最多可同时存在 `RTVA_TURN_END_CONCURRENCY + RTVA_TURN_END_MAX_PENDING_JOBS` 个运行或等待任务；默认即 4 个运行任务和 32 个等待任务。超时、过载或推理异常不会向客户端发送语义错误，也不会提前提交，而是继续接收音频并在最长静音处兜底。模型文件缺失、版本不匹配或校验失败属于启动错误，启用该功能时网关不会带病启动。
 
 队列与清理配置的代码默认值如下，启动脚本不单独覆盖这些值：
 
@@ -252,14 +289,14 @@ RAG 失败不产生客户端 `ERROR` 或新消息类型；降级及取消通过�
 ### 音频、输出与轮次
 
 - 收到 `SESSION_CREATED` 后，按真实时间发送 `AUDIO_CHUNK`：Base64 编码的裸 PCM16 小端单声道采样，不含 WAV 文件头。采样率为 16000、24000 或 48000Hz，与创建时一致；单块不超过 500ms，上行 `sequence` 从 0 开始跨轮累计。
-- VAD 默认连续静音约 500ms 切段，单段最长约 30 秒；文件联调建议发送 600ms 尾静音。空转写不创建轮次，不返回该段的 `ASR_RESULT` 或 `RESPONSE_END`。
+- VAD 默认在连续静音 500ms 时生成候选片段，每个候选只调用一次 ASR；候选结果保留在服务端。最早在静音 1000ms 且语义完整时提交，静音 2000ms 或输入达到 30 秒时强制提交。中途继续说话会把后续候选结果合并进同一输入，不创建新轮次，也不触发打断。提交时只下发一条合并后的 `ASR_RESULT`。文件联调默认发送 2200ms 尾静音。整段均为空转写时不创建轮次，也不返回 `ASR_RESULT` 或 `RESPONSE_END`。
 - 正常轮次依次返回 `ASR_RESULT`、零到多条 `TEXT_DELTA`、`TEXT_END`、`AUDIO_DELTA`、`RESPONSE_END`。开启 RAG 后，检索位于 `ASR_RESULT` 与回复生成之间，没有单独的检索事件或知识全文下发。
 - 每轮用 `turn_id` 区分，音频序号每轮从 0 开始。`turn_id=0` 用于创建会话和无轮次错误；ASR 失败没有 `RESPONSE_END`，LLM/TTS 失败则终结对应轮次。
 - 收发及播放需要并行。`TEXT_END` 只表示文本完成；`RESPONSE_END` 表示该轮服务端输出结束，不表示本地播放已完成。
 
 ### 打断与关闭
 
-新语音段识别为非空文本时，服务端先下发旧轮 `TURN_STATE/INTERRUPTED`，再下发新轮 `ASR_RESULT`。客户端应停止旧轮播放，按轮次处理交错消息。
+新的用户输入经过语义判断或静音/时长兜底正式提交后，如果旧轮仍未完成，服务端先下发旧轮 `TURN_STATE/INTERRUPTED`，再下发新轮合并后的 `ASR_RESULT`。候选片段识别成功但尚未提交时不会打断旧轮。客户端应停止旧轮播放，按轮次处理交错消息。
 
 | 旧轮所处阶段 | 旧轮处理 | 新轮处理 |
 |---|---|---|
@@ -269,7 +306,7 @@ RAG 失败不产生客户端 `ERROR` 或新消息类型；降级及取消通过�
 
 整个会话结束时发送 `CLOSE_SESSION` 或断开连接。网关取消 RAG、停止音频及 ASR 工作，等待 Thinker 和 TTS 清理，再在安全条件下删除 Thinker 会话。没有 `SESSION_CLOSED` 业务回执，也不支持断线恢复。
 
-重复会话 ID 或容量已满时，当前实现不保证结构化错误或特定关闭码；应使用新 ID、检查容量并退避重连。详细错误处理见客户端文档第 7 节。
+重复会话 ID、容量已满、创建超时或会话初始化失败时，WebSocket 已建立的情况下会先返回结构化 `ERROR`，再发送关闭帧；关闭原因携带错误码。详细错误码和客户端处理方式见客户端文档第 5 节。
 
 ## 7. 快速联调
 
@@ -293,7 +330,7 @@ ssh -N -L 8005:127.0.0.1:8005 用户名@服务器地址
 .venv/bin/python -m uvicorn realtime_voice.main:app --app-dir src --host 127.0.0.1 --port 8005
 ```
 
-页面显示 ASR、RAG、LLM 首段文本、TTS 首块音频四项耗时。对 `/metrics` 的阶段直方图累计值做差，按 `增量 sum / 增量 count × 1000` 得到新增样本的平均毫秒数；首次采样只建立基线，计数回退后重新建立基线。无新增样本保留上次值及其时间，指标请求失败单独提示并重试，不中断对话。
+页面显示 ASR、语义判断总耗时、语义排队、语义实际推理、RAG、LLM 首段文本和 TTS 首块音频耗时。对 `/metrics` 的阶段直方图累计值做差，按 `增量 sum / 增量 count × 1000` 得到新增样本的平均毫秒数；首次采样只建立基线，计数回退后重新建立基线。无新增样本保留上次值及其时间，指标请求失败单独提示并重试，不中断对话。
 
 这些是**全网关采样值，不是本会话或每轮的精确耗时**；并发调用会混入其他用户数据。每次开始清空页面记录，最多保留最近 50 个已收尾轮次；取消后可以重播已收到的音频。网页关闭后不保存录音或对话。页面保护上限为单轮音频 120 秒、待播放积压 60 秒，超出会停止本次测试。
 
@@ -308,7 +345,8 @@ uv run python scripts/realtime_client.py \
   --url ws://127.0.0.1:8000/v1/realtime \
   --wav tests/asr_zh.wav \
   --sample-rate 16000 \
-  --output reply.wav
+  --output reply.wav \
+  --trailing-silence-ms 2200
 ```
 
 终端会打印 `ASR_RESULT`、`TEXT_DELTA` 等流式消息；结束时生成 `reply.wav`（若全程被打断则输出 `turn none`）。该脚本同时是协议 V1 的参考实现。
@@ -341,6 +379,13 @@ uv run python scripts/load_test.py --url ws://127.0.0.1:8000/v1/realtime \
   "ready": true,
   "active_sessions": 0,
   "max_sessions": 30,
+  "semantic": {
+    "enabled": true,
+    "ready": true,
+    "concurrency": 4,
+    "max_pending_jobs": 32,
+    "pending_jobs": 0
+  },
   "downstream": {
     "asr":     {"status": "ok"},
     "thinker": {"status": "ok"},
@@ -357,13 +402,24 @@ uv run python scripts/load_test.py --url ws://127.0.0.1:8000/v1/realtime \
   - `unreachable`：连接失败/超时（附 `error_type`）。
   - 其他值（如 `degraded`）：下游自报状态词直接透传。
 - RAG 不在后台探测列表、`downstream` 或 `limiters` 快照中，不参与 `ready` 判定。排查知识检索需查看 RAG 指标，或从网关主机访问 KBService `/health`、`/scenes` 和 `/retrieve/joint`。
-- 其余字段：`activity`（会话与各队列水位）、`limiters`（下游并发准入）、`executor`（VAD 线程池）、`process`（线程/内存）。
+- 其余字段：`semantic`（语义模型开关、加载状态、并行度和任务数）、`activity`（会话与各队列水位）、`limiters`（下游并发准入）、`executor`（VAD 线程池）、`process`（线程/内存）。
 
 `/health` 返回 HTTP 200 不等于就绪，应读取 `ready`。启动初期的 `unknown`、容量已满或本进程快照异常也会导致 `degraded`，需结合各字段定位。
 
 ### GET /metrics
 
-Prometheus 格式，包含会话数、各队列水位、限流器占用、执行器状态、事件循环延迟、各阶段（vad/asr/rag/thinker/tts）延迟直方图与错误计数。RAG 使用以下指标：
+Prometheus 格式，包含会话数、各队列水位、限流器占用、执行器状态、事件循环延迟、各阶段（vad/asr/semantic/semantic_queue/semantic_inference/rag/thinker/tts）延迟直方图与错误计数。语义结束判断新增以下指标：
+
+| 指标 | 含义 |
+|---|---|
+| `realtime_voice_stage_latency_seconds{stage="semantic"}` | 一次语义判断总耗时，包含排队和超时 |
+| `realtime_voice_stage_latency_seconds{stage="semantic_queue"}` | 从提交到实际开始推理的排队时间 |
+| `realtime_voice_stage_latency_seconds{stage="semantic_inference"}` | ONNX 实际推理时间 |
+| `realtime_voice_semantic_jobs` | 正在运行和排队的语义任务数 |
+| `realtime_voice_semantic_results_total{status="..."}` | `end`、`wait`、`timeout`、`overloaded`、`failed`、`cancelled` 结果数 |
+| `realtime_voice_turn_end_commits_total{reason="..."}` | 按 `semantic_end`、`max_silence`、`max_utterance` 统计提交原因 |
+
+RAG 使用以下指标：
 
 | 指标 | 含义 |
 |---|---|
@@ -372,7 +428,9 @@ Prometheus 格式，包含会话数、各队列水位、限流器占用、执行
 | `realtime_voice_rag_snippets` | 返回有效片段数量的直方图 |
 | `realtime_voice_limiter_active{service="rag"}` / `realtime_voice_limiter_waiting{service="rag"}` | 检索并发与等待数量 |
 
-`status` 为 `success`、`partial_failure`、`no_match`、`timeout`、`overloaded`、`failed` 或 `cancelled`。响应 `errors` 非空即记为 `partial_failure`，即使没有有效片段；只有 `errors` 为空且无有效片段时才记为 `no_match`。关闭 RAG 的轮次不产生检索计数。
+RAG 的 `status` 为 `success`、`partial_failure`、`no_match`、`timeout`、`overloaded`、`failed` 或 `cancelled`。响应 `errors` 非空即记为 `partial_failure`，即使没有有效片段；只有 `errors` 为空且无有效片段时才记为 `no_match`。关闭 RAG 的轮次不产生检索计数。
+
+语义结果的 `status` 为 `end`、`wait`、`timeout`、`overloaded`、`failed` 或 `cancelled`。`semantic` 统计调用方看到的总等待，`semantic_queue` 统计进入工作线程前的等待，`semantic_inference` 只统计实际执行。结构化日志 `semantic_evaluated` 记录耗时、状态和概率；`user_input_committed` 记录提交原因和候选片段数量，不记录识别正文。
 
 结构化日志 `rag_retrieved` 记录会话、轮次、耗时、状态和片段数量，不记录问题及知识正文。取消检索计入 `cancelled` 指标，不生成 `rag_retrieved` 日志。Thinker 生成耗时不包含 RAG，但“语音结束到首段回复”的端到端指标包含检索等待。
 
@@ -386,15 +444,17 @@ uv run ruff check .                  # 静态检查
 
 RAG 专项验证覆盖参数、降级、上下文分离、打断、关闭和会话隔离；真实服务验证记录见 [docs/rag-validation.md](docs/rag-validation.md)。
 
+语义结束判断专项验证覆盖候选文本合并、恢复说话后的旧结果失效、最短/最长静音、30 秒强制提交、ASR 失败清理、推理超时与过载、4 路真实并行、模型版本和文件哈希校验；集成测试确认一个用户输入只下发一次合并后的 `ASR_RESULT`。
+
 ## 10. 部署与运维
 
-- **本机全栈**：使用 `./start_services.sh start|stop|status|restart`（见 [第 4 节](#4-快速开始)）。脚本会校验 `.env` 中的端口约定（网关 8000、ASR 8001、Thinker 8002、TTS 9000）并做 GPU 隔离校验。
+- **本机全栈**：使用 `./start_services.sh start|stop|status|restart`（见 [第 4 节](#4-快速开始)）。脚本会校验 `.env` 中的端口约定（网关 8000、ASR 8001、Thinker 8002、TTS 9000），做 GPU 隔离校验，并在启用语义结束判断时校验或自动下载固定版本模型。
 - **KBService**：单独管理 `/root/KBService` 服务，网关启动器不会管理它。发布网关代码或修改 RAG 服务端配置后需要重启网关；每个新会话再通过客户端参数选择是否检索。
-- **单独重启网关**（不动 GPU 服务）：`restart` 会连 ASR/Thinker/TTS 一起重启（模型重新加载耗时数分钟）。只需重启网关时，kill 网关进程后在**项目根目录**用原有 `RTVA_*` 环境变量重启：
+- **单独重启网关**（不动 GPU 服务）：`restart` 会连 ASR/Thinker/TTS 一起重启（模型重新加载耗时数分钟）。只需重启网关时，先停止网关 PID，再执行 `start`；脚本会复用健康的 ASR、Thinker 和 TTS，只重新启动网关：
   ```bash
   kill "$(cat .run/gateway.pid)"
-  cd /root/RealTimeVoiceApi && \
-  .venv/bin/python -m uvicorn realtime_voice.main:app --app-dir src --host 0.0.0.0 --port 8000
+  cd /root/RealTimeVoiceApi
+  ./start_services.sh start
   ```
 - **其他环境**：生产可用 systemd 或 supervisord 守护单进程异步服务，模板见
   [deploy/realtime-voice-api.service](deploy/realtime-voice-api.service) 与 [deploy/supervisord.conf](deploy/supervisord.conf)，使用前请替换其中的用户、目录与虚拟环境路径。ASR / TTS 的多实例负载均衡由各自 Nginx 负责，网关不感知实例列表。
@@ -403,9 +463,8 @@ RAG 专项验证覆盖参数、降级、上下文分离、打断、关闭和会�
 
 - V1 **不支持 Opus**，只支持 PCM16。
 - 不提供跨进程或服务重启后的 Session 恢复 / 重连（状态仅在本进程内）；客户端断线需重新握手建会话。
-- 空转写（ASR 返回空文本）的语音段会被静默丢弃，不下发任何消息（V1 无通知机制）。
-- 建连期拒绝（重复 `session_id`、会话容量满）目前直接关闭连接且无 ERROR 消息，后续版本应补上结构化错误下发。
+- 整段用户输入的候选 ASR 结果均为空时会被静默丢弃，不下发任何消息（V1 无通知机制）。
 - RAG 配置不能在会话中修改；没有自动选场景、问题改写、重试、预热或客户端检索状态事件。
 - KBService 首次加载模型或场景索引可能超过检索预算，网关会降级；启用 RAG 不保证每轮都有知识，也不强制回答仅来自知识库。
 
-基础语音链路的详细时序见 [docs/realtime-voice-sequence-diagram.md](docs/realtime-voice-sequence-diagram.md)；该图尚未包含可选 RAG 分支，当前检索与打断行为以本文为准。
+旧版基础语音链路时序见 [docs/realtime-voice-sequence-diagram.md](docs/realtime-voice-sequence-diagram.md)；该图尚未包含当前语义结束判断和可选 RAG 分支，当前输入提交、检索与打断行为以本文和客户端接入文档为准。

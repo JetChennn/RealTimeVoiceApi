@@ -72,7 +72,7 @@ async def test_three_clients_complete_against_fake_websocket_server() -> None:
         try:
             await websocket.recv()
             await websocket.send(json.dumps({"type": "SESSION_CREATED"}))
-            for _ in range(16):  # one speech chunk plus 600 ms of silence
+            for _ in range(16):  # one speech chunk plus the explicit 600 ms test silence
                 await websocket.recv()
             for message in (
                 {"type": "ASR_RESULT"},
@@ -95,6 +95,7 @@ async def test_three_clients_complete_against_fake_websocket_server() -> None:
                 pcm16=b"\x01\x00" * 640,
                 sample_rate=16000,
                 timeout=2,
+                trailing_silence_ms=600,
             )
 
         results, _ = await run_load(3, runner)

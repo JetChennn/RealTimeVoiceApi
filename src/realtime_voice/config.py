@@ -1,4 +1,4 @@
-from pydantic import AnyHttpUrl, Field
+from pydantic import AnyHttpUrl, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,3 +39,28 @@ class Settings(BaseSettings):
     downstream_probe_timeout_seconds: float = Field(default=2.0, gt=0)
     # 非空时透传给 TTS，跳过其内部 qwen-flash prompt 生成（可消除 ~18s 网络延迟）
     tts_prompt_override: str = ""
+
+    turn_end_semantic_enabled: bool = True
+    turn_end_candidate_silence_ms: int = Field(default=500, gt=0)
+    turn_end_min_silence_ms: int = Field(default=1000, gt=0)
+    turn_end_max_silence_ms: int = Field(default=2000, gt=0)
+    turn_end_inference_timeout_ms: int = Field(default=300, gt=0)
+    turn_end_model_path: str = "models/turn-end-livekit"
+    turn_end_language: str = "zh"
+    turn_end_complete_threshold: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    turn_end_concurrency: int = Field(default=4, ge=1, le=16)
+    turn_end_max_pending_jobs: int = Field(default=32, ge=0)
+    turn_end_max_utterance_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    turn_end_cpu_threads: int = Field(default=2, ge=1, le=16)
+
+    @model_validator(mode="after")
+    def validate_turn_end(self):
+        if (
+            not self.turn_end_candidate_silence_ms
+            <= self.turn_end_min_silence_ms
+            <= self.turn_end_max_silence_ms
+        ):
+            raise ValueError("turn-end silence must satisfy candidate <= min <= max")
+        if self.turn_end_max_utterance_seconds * 1000 < self.turn_end_max_silence_ms:
+            raise ValueError("max utterance duration must be at least max silence")
+        return self
