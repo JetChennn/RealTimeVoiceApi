@@ -57,7 +57,7 @@ class ErrorWriteRaceSocket:
     async def send_text(self, _: str) -> None:
         raise RuntimeError("Cannot call send once a close message has been sent")
 
-    async def close(self, code: int) -> None:
+    async def close(self, code: int, reason: str = "") -> None:
         raise RuntimeError(f"socket already closed before {code}")
 
 

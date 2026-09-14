@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -11,6 +12,7 @@ from realtime_voice.protocol.client_messages import CreateSession
 from realtime_voice.protocol.decoder import decode_client_message
 from realtime_voice.protocol.errors import ProtocolViolation
 from realtime_voice.protocol.server_messages import ErrorMessage
+from realtime_voice.session.registry import DuplicateSession, SessionCapacityExceeded
 from realtime_voice.session.runtime import SlowClient
 
 if TYPE_CHECKING:
@@ -30,7 +32,23 @@ async def serve_realtime(websocket: WebSocket, services: AppServices) -> None:
                 "INVALID_MESSAGE", "message must be a JSON text frame"
             ) from error
         create = require_create_session(decode_client_message(raw))
-        runtime = await services.registry.create(create, websocket)
+        try:
+            runtime = await services.registry.create(create, websocket)
+        except (ProtocolViolation, DuplicateSession, SessionCapacityExceeded, WebSocketDisconnect):
+            raise
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "SESSION_CREATE_FAILED session_id=%s", create.session_id
+            )
+            await _close_with_protocol_error(
+                websocket,
+                ProtocolViolation(
+                    "SESSION_CREATE_FAILED",
+                    "server could not initialize the session; please retry later",
+                ),
+                close_code=1011,
+            )
+            return
         from realtime_voice.transport.messages import session_created
 
         await runtime.outbound.put(session_created(create))
@@ -48,6 +66,16 @@ async def serve_realtime(websocket: WebSocket, services: AppServices) -> None:
             )
     except ProtocolViolation as error:
         await _close_with_protocol_error(websocket, error)
+    except (DuplicateSession, SessionCapacityExceeded) as error:
+        await _close_with_protocol_error(
+            websocket,
+            ProtocolViolation(
+                error.code,
+                "session_id is already active"
+                if isinstance(error, DuplicateSession)
+                else "active session capacity is exhausted; retry after a session closes",
+            ),
+        )
     except TimeoutError:
         await _close_with_protocol_error(
             websocket,
@@ -64,12 +92,14 @@ def require_create_session(message: object) -> CreateSession:
     return message
 
 
-async def _close_with_protocol_error(websocket: WebSocket, error: ProtocolViolation) -> None:
+async def _close_with_protocol_error(
+    websocket: WebSocket, error: ProtocolViolation, *, close_code: int = 1008
+) -> None:
     """尽力发送 ERROR 并按策略关闭连接；连接可能已断开，故容错。"""
     await send_protocol_error(websocket, error)
     try:
-        await websocket.close(code=1008)
-    except (WebSocketDisconnect, RuntimeError):
+        await websocket.close(code=close_code, reason=error.code)
+    except (WebSocketDisconnect, RuntimeError, OSError):
         return
 
 
@@ -89,5 +119,5 @@ async def send_protocol_error(websocket: WebSocket, error: ProtocolViolation) ->
     payload = message.model_dump_json()
     try:
         await websocket.send_text(payload)
-    except (WebSocketDisconnect, RuntimeError):
+    except (WebSocketDisconnect, RuntimeError, OSError):
         return

@@ -94,7 +94,17 @@ RAG 配置在会话内固定，修改需重新建连。开启后每轮在识别�
 - `recoverable=false`：通常为参数或协议错误，服务端关闭连接；根据 `code` 修正后重新建连。常见原因是字段错误、RAG 场景不合法、音频序号不连续、上传过快或接收过慢。
 - `recoverable=true`：连接可以继续使用，不代表自动重试。`stage=ASR` 的错误没有对应 `RESPONSE_END`；`stage=LLM/TTS` 的错误会终结该轮。
 - 协议错误的 `user_id`、`session_id` 可能为 `"unknown"`，不要因标识不匹配而丢弃错误。
-- 未收到 `SESSION_CREATED` 就断线：检查地址、会话重复或容量问题，稍后用新会话 ID 重试。
+- WebSocket 已建立后，创建失败会先发送 `ERROR`，再发送关闭帧；客户端应优先展示 `code` 和 `message`，不要被随后通用的断线提示覆盖。关闭帧的 `reason` 也携带错误码。
+
+| 创建阶段错误码 | 原因与处理 | 关闭码 |
+|---|---|---|
+| `INVALID_MESSAGE` / `CREATE_SESSION_REQUIRED` | 请求格式或首条消息错误，修正请求 | `1008` |
+| `HANDSHAKE_TIMEOUT` | 未及时发送创建请求 | `1008` |
+| `DUPLICATE_SESSION` | 会话 ID 仍被占用，更换 ID 或等待旧会话清理完成 | `1008` |
+| `SESSION_CAPACITY_EXCEEDED` | 实例会话名额已满，等待名额释放后重试 | `1008` |
+| `SESSION_CREATE_FAILED` | 服务端初始化会话失败，稍后重试；详细异常记录在服务端日志 | `1011` |
+
+这些错误均为 `stage=TRANSPORT`、`turn_id=0`、`recoverable=false`，表示本连接无法继续，重试需要新建连接。TCP/TLS/HTTP 升级失败、进程退出或网络已断开时，服务端无法保证交付 JSON 错误，客户端需保留网络错误提示。
 
 无需自行编写客户端时，可使用网关 `/test/` 麦克风测试页；端口转发方式见 [README](../README.md#浏览器麦克风测试台)。
 
