@@ -105,18 +105,36 @@ sequenceDiagram
     Note over ActorLoop: TurnState触发_signal_tts_interruption
     ActorLoop->>Thinker: spawn _run_thinker
 
-    Note over Client,DTTS: 阶段6 Thinker流式回复
+    Note over Client,DTTS: 阶段6 Thinker流式回复（两段式超时：首字5s + 总时长20s）
     Thinker->>DThinker: stream_reply POST /api/v1/reply（纯文本 JSON，含唯一 req_id）
-    loop 流式NDJSON
-        DThinker-->>Thinker: ThinkerTextDelta
-        Thinker->>ActorLoop: events.put ThinkerDeltaReceived
-        ActorLoop->>SActor: handle ThinkerDeltaReceived
-        SActor-->>ActorLoop: SendOutbound TextDelta
-        ActorLoop->>Sender: outbound.put TextDelta
-        Sender->>Client: TEXT_DELTA
+    alt 首事件在首字预算内到达且整轮在总预算内完成
+        loop 流式NDJSON
+            DThinker-->>Thinker: ThinkerTextDelta
+            Thinker->>ActorLoop: events.put ThinkerDeltaReceived
+            ActorLoop->>SActor: handle ThinkerDeltaReceived
+            SActor-->>ActorLoop: SendOutbound TextDelta
+            ActorLoop->>Sender: outbound.put TextDelta
+            Sender->>Client: TEXT_DELTA
+        end
+        DThinker-->>Thinker: ThinkerDone reply_text + tone
+        Thinker->>ActorLoop: events.put ThinkerCompleted
+    else 首个事件超过 stream_timeout（默认 5s）未到达（首字超时）
+        Thinker->>Thinker: 取消本轮回复消费
+        Thinker->>DThinker: fire-and-forget interrupt POST /api/v1/interrupt
+        Thinker->>ActorLoop: events.put ThinkerFailed THINKER_TIMEOUT
+        ActorLoop->>SActor: handle ThinkerFailed
+        SActor-->>ActorLoop: SendOutbound Error 与 ResponseEnd FAILED
+        ActorLoop->>Sender: outbound.put ERROR / RESPONSE_END
+        Sender->>Client: ERROR(LLM/THINKER_TIMEOUT recoverable) + RESPONSE_END(FAILED)
+    else 首字已到但整轮超过 reply_total_timeout（默认 20s）（总时长超时）
+        Thinker->>Thinker: 取消本轮回复消费
+        Thinker->>DThinker: fire-and-forget interrupt POST /api/v1/interrupt
+        Thinker->>ActorLoop: events.put ThinkerFailed THINKER_REPLY_TIMEOUT
+        ActorLoop->>SActor: handle ThinkerFailed
+        SActor-->>ActorLoop: SendOutbound Error 与 ResponseEnd FAILED
+        ActorLoop->>Sender: outbound.put ERROR / RESPONSE_END
+        Sender->>Client: ERROR(LLM/THINKER_REPLY_TIMEOUT recoverable) + RESPONSE_END(FAILED)
     end
-    DThinker-->>Thinker: ThinkerDone reply_text + tone
-    Thinker->>ActorLoop: events.put ThinkerCompleted
 
     Note over Client,DTTS: 阶段7 Thinker完成启动TTS
     ActorLoop->>SActor: handle ThinkerCompleted
@@ -151,6 +169,12 @@ sequenceDiagram
     ActorLoop->>Sender: outbound.put ResponseEnd
     Sender->>Client: RESPONSE_END
 ```
+
+### Thinker 流超时与中断通知
+
+阶段 6 的回复流受两段式超时保护：`RTVA_THINKER_STREAM_TIMEOUT_SECONDS`（默认 5s）为首字超时——从进入流消费起，首个事件（`text_delta` 或其他）未在该时限内到达即取消本轮，向客户端下发 `ERROR(stage="LLM", code="THINKER_TIMEOUT", recoverable=true)`（“Thinker 未在 5 秒内开始返回回复，本轮已取消，请继续对话”）；首字已到后即解除首字计时，改由 `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS`（默认 20s）约束整轮总时长——超时取消本轮并下发 `ERROR(stage="LLM", code="THINKER_REPLY_TIMEOUT", recoverable=true)`（“Thinker 回复超过 20 秒未完成，本轮已取消，请继续对话”）。两种超时均以 `RESPONSE_END(status="FAILED")` 收尾，同时以 fire-and-forget 方式调用 Thinker `POST /api/v1/interrupt` 通知其停止生成，不等待该通知的结果，也不阻塞客户端收尾。该轮失败不影响会话与连接，下一轮输入可正常触发新的 Thinker 调用。两段式预算均可通过环境变量调整：首字超时体现响应灵敏度，总时长超时兜底异常长回复。
+
+Thinker 侧自身还有内层预算（回复流软 deadline 默认 4.5s、会话锁等待默认 2s，详见 BerryThinker 文档），通常先于网关首字预算到期并产出带错误码的流事件；网关 5s 首字预算是最后一道防线。
 
 ## 关闭流程
 
@@ -197,6 +221,7 @@ sequenceDiagram
 2. **Runtime 通知 TTS**：[runtime.py](../src/realtime_voice/session/runtime.py) 的 `execute_effect` 收到 `TurnState` 时调用 `_signal_tts_interruption(turn_id)`，`set()` 对应的 `interrupt_signal`。
 3. **TTS 排空宽限**：[runtime.py](../src/realtime_voice/session/runtime.py) 的 `_arm_tts_drain_timeout` 监听到信号后，把 `drain_timeout` 重设为 `_tts_drain_timeout` 秒宽限期，让 TTS 尽量消费并丢弃尾部音频后再结束。
 4. **Thinker 中断**：[runtime.py](../src/realtime_voice/session/runtime.py) 中若 `StartNextThinker(interrupt_first=True)`，先调 `thinker_client.interrupt` 再发起新请求。
+5. **流超时中断**：Thinker 回复流首字超过 `RTVA_THINKER_STREAM_TIMEOUT_SECONDS`（默认 5s）未到达，或首字已到但整轮超过 `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS`（默认 20s）未完成时，网关取消本轮消费，并向 Thinker 发送 fire-and-forget 的 interrupt 通知（不等待结果）；客户端收到 `THINKER_TIMEOUT` / `THINKER_REPLY_TIMEOUT` 可恢复错误与 `RESPONSE_END/FAILED`，会话可继续。
 
 ## 采样率转换
 

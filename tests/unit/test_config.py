@@ -26,7 +26,11 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
     assert settings.session_outbound_queue_size == 256
     assert settings.session_audio_queue_max_seconds == 3.0
     assert settings.session_outbound_queue_max_bytes == 8 * 1024 * 1024
-    assert settings.thinker_cleanup_timeout_seconds == 120.0
+    assert settings.thinker_cleanup_timeout_seconds == 25.0
+    assert settings.thinker_stream_timeout_seconds == 5.0
+    assert settings.thinker_reply_total_timeout_seconds == 20.0
+    assert settings.thinker_concurrency == 8
+    assert settings.thinker_max_waiters == 64
     assert settings.tts_drain_timeout_seconds == 120.0
 
 
@@ -41,6 +45,8 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
         "session_audio_queue_max_seconds",
         "session_outbound_queue_max_bytes",
         "thinker_cleanup_timeout_seconds",
+        "thinker_stream_timeout_seconds",
+        "thinker_reply_total_timeout_seconds",
         "tts_drain_timeout_seconds",
     ],
 )

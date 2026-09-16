@@ -32,7 +32,13 @@ class Settings(BaseSettings):
     session_outbound_queue_size: int = Field(default=256, ge=1)
     session_audio_queue_max_seconds: float = Field(default=3.0, gt=0)
     session_outbound_queue_max_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
-    thinker_cleanup_timeout_seconds: float = Field(default=120.0, gt=0)
+    thinker_cleanup_timeout_seconds: float = Field(default=25.0, gt=0)
+    thinker_stream_timeout_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    thinker_reply_total_timeout_seconds: float = Field(
+        default=20.0, gt=0, allow_inf_nan=False
+    )
+    thinker_concurrency: int = Field(default=8, ge=1)
+    thinker_max_waiters: int = Field(default=64, ge=0)
     tts_drain_timeout_seconds: float = Field(default=120.0, gt=0)
     # 下游 /health 后台探测：周期刷新缓存，避免 /health 路由产生网络等待
     downstream_probe_interval_seconds: float = Field(default=10.0, gt=0)

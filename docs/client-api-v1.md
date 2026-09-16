@@ -102,6 +102,10 @@ RAG 配置在会话内固定，修改需重新建连。开启后每轮在识别�
 
 - `recoverable=false`：通常为参数或协议错误，服务端关闭连接；根据 `code` 修正后重新建连。常见原因是字段错误、RAG 场景不合法、音频序号不连续、上传过快或接收过慢。
 - `recoverable=true`：连接可以继续使用，不代表自动重试。任一候选片段发生 `stage=ASR` 错误时，当前尚未提交的整段输入会被放弃，该错误没有对应 `ASR_RESULT` 或 `RESPONSE_END`；客户端可以继续发送下一段输入。语义判断超时、失败或过载不会下发 `ERROR`，服务端会等待最长静音兜底。`stage=LLM/TTS` 的错误会终结对应轮次。
+- `stage=LLM, code=THINKER_TIMEOUT, recoverable=true`：Thinker 未在首字预算时间（服务端默认 5 秒，可配置）内开始返回回复，本轮被取消，服务端先下发该错误（如“Thinker 未在 5 秒内开始返回回复，本轮已取消，请继续对话”），再以 `RESPONSE_END/FAILED` 收尾该轮。连接与会话保持可用，下一轮可正常重试；客户端展示提示后等待用户下一句即可，无需重连。
+- `stage=LLM, code=THINKER_REPLY_TIMEOUT, recoverable=true`：Thinker 回复已开始（首字已到），但超过总时长预算（服务端默认 20 秒，可配置）仍未完成，本轮被取消，服务端先下发该错误（如“Thinker 回复超过 20 秒未完成，本轮已取消，请继续对话”），再以 `RESPONSE_END/FAILED` 收尾该轮。与 `THINKER_TIMEOUT` 一样可继续对话：连接与会话保持可用，客户端展示提示后等待用户下一句即可，无需重连。
+- `stage=LLM, code=THINKER_SESSION_BUSY, recoverable=true`：上一轮 Thinker 回复仍在收尾，本轮未能启动；可直接继续下一轮对话，无需重连。
+- BerryThinker 在回复流中主动产出 `error` 事件时，其远端错误码会原样透传给客户端（如 `THINKER_SESSION_BUSY`、`THINKER_TIMEOUT`），`message` 为远端错误描述；客户端应按 `code` 区分提示，未知码按通用 LLM 阶段错误处理。
 - 协议错误的 `user_id`、`session_id` 可能为 `"unknown"`，不要因标识不匹配而丢弃错误。
 - WebSocket 已建立后，创建失败会先发送 `ERROR`，再发送关闭帧；客户端应优先展示 `code` 和 `message`，不要被随后通用的断线提示覆盖。关闭帧的 `reason` 也携带错误码。
 

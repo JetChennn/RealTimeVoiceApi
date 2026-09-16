@@ -12,6 +12,12 @@ const descriptions = {
   asr: ['ASR 识别', '转写调用 → 识别完成'], rag: ['RAG 检索', '检索排队 → 返回结果'],
   thinker: ['LLM 首包', '回复调用 → 首段文本'], tts: ['TTS 首音频', '合成调用 → 首块可发送音频'],
 };
+// 按 code 前置一句友好提示，便于理解超时/会话忙类错误；原文案仍完整展示。
+const errorHints = {
+  THINKER_TIMEOUT: '本轮思考超时，请说下一句',
+  THINKER_REPLY_TIMEOUT: '回复超时未完成，请说下一句',
+  THINKER_SESSION_BUSY: '上一轮仍在收尾，请稍后重试',
+};
 const cards = {};
 for (const stage of STAGES) {
   const card = document.createElement('div'); card.className = 'metric';
@@ -129,7 +135,8 @@ function playChunk(session, turn, message) {
 function receive(session, message) {
   if (active !== session) return;
   if (message.type === 'ERROR') {
-    const text = `${message.stage} / ${message.code}：${message.message}`;
+    const hint = errorHints[message.code] ? `${errorHints[message.code]} · ` : '';
+    const text = `${hint}${message.stage} / ${message.code}：${message.message}`;
     if (!message.recoverable) stop(session, text, true); else notice(text, true);
     return;
   }

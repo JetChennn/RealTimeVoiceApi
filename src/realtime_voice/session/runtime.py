@@ -23,6 +23,7 @@ from realtime_voice.clients.thinker import (
     ThinkerClient,
     ThinkerDone,
     ThinkerReplyRequest,
+    ThinkerStreamError,
     ThinkerTextDelta,
 )
 from realtime_voice.clients.tts import TTS_SAMPLE_RATE, TtsClient, TtsRequest
@@ -238,6 +239,8 @@ class SessionRuntime:
         audio_queue: BoundedByteQueue[bytes | None] | None = None,
         outbound_queue: BoundedByteQueue[ServerMessage] | None = None,
         thinker_cleanup_timeout: float = 120.0,
+        thinker_stream_timeout: float = 5.0,
+        thinker_reply_total_timeout: float = 20.0,
         metrics: Metrics | None = None,
         tts_drain_timeout: float = 120.0,
         tts_prompt_override: str = "",
@@ -304,6 +307,8 @@ class SessionRuntime:
         self._sender = sender
         self._registry = registry
         self._thinker_cleanup_timeout = thinker_cleanup_timeout
+        self._thinker_stream_timeout = thinker_stream_timeout
+        self._thinker_reply_total_timeout = thinker_reply_total_timeout
         self._tts_drain_timeout = tts_drain_timeout
         self._tts_prompt_override = str(tts_prompt_override or "").strip()
         self._logger = logger or logging.getLogger(__name__)
@@ -642,6 +647,7 @@ class SessionRuntime:
             self._rag_tasks.pop(effect.turn_id, None)
 
     async def _run_thinker(self, effect: StartThinker | StartNextThinker) -> None:
+        first_event_seen = False
         try:
             async with self._thinker_lock:
                 # thinker_lock 串行化所有 Thinker 请求，确保同一会话内不会并发调用 LLM
@@ -679,57 +685,76 @@ class SessionRuntime:
                 first_delta = True
                 first_delta_ts: float | None = None
                 started = self._clock()
-                async for item in self._thinker_client.stream_reply(request):
-                    if isinstance(item, ThinkerTextDelta):
-                        if first_delta:
-                            first_delta = False
-                            first_delta_ts = self._clock()
-                            elapsed = first_delta_ts - started
-                            self._observe(
-                                "thinker_first_delta",
-                                turn_id=effect.turn_id,
-                                duration_ms=elapsed * 1000,
+                # 流消费段受两段式超时约束：
+                # - 外层 thinker_reply_total_timeout 限制整轮回复总时长（含 done 处理）；
+                # - 首个事件到达前 thinker_stream_timeout 单独限制首字等待（首包/首事件预算），
+                #   首事件到达后即解除首字计时，只受总时长约束。
+                # 任一超时即取消本轮，避免卡住的回复流长期占据会话的 LLM 串行槽；
+                # RAG 检索不计入该时限
+                stream = self._thinker_client.stream_reply(request).__aiter__()
+                async with asyncio.timeout(self._thinker_reply_total_timeout):
+                    while True:
+                        try:
+                            if first_event_seen:
+                                item = await stream.__anext__()
+                            else:
+                                async with asyncio.timeout(self._thinker_stream_timeout):
+                                    item = await stream.__anext__()
+                                first_event_seen = True
+                        except StopAsyncIteration:
+                            break
+                        if isinstance(item, ThinkerTextDelta):
+                            if first_delta:
+                                first_delta = False
+                                first_delta_ts = self._clock()
+                                elapsed = first_delta_ts - started
+                                self._observe(
+                                    "thinker_first_delta",
+                                    turn_id=effect.turn_id,
+                                    duration_ms=elapsed * 1000,
+                                )
+                                if self._metrics is not None:
+                                    self._metrics.observe_stage_latency("thinker", elapsed)
+                                    speech_end = self._turn_speech_ends.get(effect.turn_id)
+                                    if (
+                                        speech_end is not None
+                                        and effect.turn_id not in self._llm_milestones
+                                    ):
+                                        self._llm_milestones.add(effect.turn_id)
+                                        self._metrics.observe_speech_end_to_first_llm(
+                                            first_delta_ts - speech_end
+                                        )
+                            await self._publish_event(
+                                ThinkerDeltaReceived(
+                                    session_id=self.session_id,
+                                    turn_id=effect.turn_id,
+                                    generation=effect.generation,
+                                    delta=item.delta,
+                                )
                             )
+                        elif isinstance(item, ThinkerDone):
+                            reply_text = item.reply_text
+                            tone = item.tone
+                            done_ts = self._clock()
                             if self._metrics is not None:
-                                self._metrics.observe_stage_latency("thinker", elapsed)
-                                speech_end = self._turn_speech_ends.get(effect.turn_id)
-                                if (
-                                    speech_end is not None
-                                    and effect.turn_id not in self._llm_milestones
-                                ):
-                                    self._llm_milestones.add(effect.turn_id)
-                                    self._metrics.observe_speech_end_to_first_llm(
-                                        first_delta_ts - speech_end
+                                # 发起→末字：含首 token 等待，与非流式全量口径一致，可与 TTS prompt 全量对比
+                                self._metrics.observe_thinker_full(done_ts - started)
+                                if first_delta_ts is not None:
+                                    # 首字→末字：衡量回复纯生成阶段的耗时
+                                    self._metrics.observe_thinker_generate(
+                                        done_ts - first_delta_ts
                                     )
-                        await self._publish_event(
-                            ThinkerDeltaReceived(
-                                session_id=self.session_id,
-                                turn_id=effect.turn_id,
-                                generation=effect.generation,
-                                delta=item.delta,
-                            )
+                    if reply_text is None:
+                        raise RuntimeError("Thinker stream ended without done")
+                    await self._publish_event(
+                        ThinkerCompleted(
+                            session_id=self.session_id,
+                            turn_id=effect.turn_id,
+                            generation=effect.generation,
+                            reply_text=reply_text,
+                            tone=tone,
                         )
-                    elif isinstance(item, ThinkerDone):
-                        reply_text = item.reply_text
-                        tone = item.tone
-                        done_ts = self._clock()
-                        if self._metrics is not None:
-                            # 发起→末字：含首 token 等待，与非流式全量口径一致，可与 TTS prompt 全量对比
-                            self._metrics.observe_thinker_full(done_ts - started)
-                            if first_delta_ts is not None:
-                                # 首字→末字：衡量回复纯生成阶段的耗时
-                                self._metrics.observe_thinker_generate(done_ts - first_delta_ts)
-                if reply_text is None:
-                    raise RuntimeError("Thinker stream ended without done")
-                await self._publish_event(
-                    ThinkerCompleted(
-                        session_id=self.session_id,
-                        turn_id=effect.turn_id,
-                        generation=effect.generation,
-                        reply_text=reply_text,
-                        tone=tone,
                     )
-                )
         except AdmissionOverloaded as error:
             if self._metrics is not None:
                 self._metrics.record_error("thinker", "SERVICE_OVERLOADED")
@@ -742,9 +767,55 @@ class SessionRuntime:
                     message=str(error),
                 )
             )
+        except TimeoutError:
+            if not first_event_seen:
+                # 首字超时：从进入流消费起，首个事件（无论 text_delta 还是别的）始终未到达
+                code = "THINKER_TIMEOUT"
+                message = (
+                    f"Thinker 未在 {self._thinker_stream_timeout:g} 秒内开始返回回复，"
+                    "本轮已取消，请继续对话"
+                )
+            else:
+                # 总时长超时：回复已开始但超过总预算仍未完成
+                code = "THINKER_REPLY_TIMEOUT"
+                message = (
+                    f"Thinker 回复超过 {self._thinker_reply_total_timeout:g} 秒未完成，"
+                    "本轮已取消，请继续对话"
+                )
+            if self._metrics is not None:
+                self._metrics.record_error("thinker", code)
+            # fire-and-forget 通知 Thinker 收尾：不占 admission 槽，也不阻塞本轮失败发布
+            self._notify_thinker_interrupt()
+            await self._publish_event(
+                ThinkerFailed(
+                    session_id=self.session_id,
+                    turn_id=effect.turn_id,
+                    generation=effect.generation,
+                    code=code,
+                    message=message,
+                )
+            )
+        except ThinkerStreamError as error:
+            # 远端 error 事件收尾的流错误：错误码原样透传（如 THINKER_TIMEOUT/THINKER_SESSION_BUSY），
+            # 流已在远端正常终结，无需再 fire-and-forget interrupt；本地流错误仍需通知收尾
+            code = error.code or "THINKER_STREAM_FAILED"
+            if self._metrics is not None:
+                self._metrics.record_error("thinker", code)
+            if not error.code:
+                self._notify_thinker_interrupt()
+            await self._publish_event(
+                ThinkerFailed(
+                    session_id=self.session_id,
+                    turn_id=effect.turn_id,
+                    generation=effect.generation,
+                    code=code,
+                    message=_error_message(error, "Thinker reply stream failed"),
+                )
+            )
         except Exception as error:  # noqa: BLE001 - background failures become Actor events
             if self._metrics is not None:
                 self._metrics.record_error("thinker", "THINKER_STREAM_FAILED")
+            self._notify_thinker_interrupt()
             await self._publish_event(
                 ThinkerFailed(
                     session_id=self.session_id,
@@ -754,6 +825,29 @@ class SessionRuntime:
                     message=_error_message(error, "Thinker reply stream failed"),
                 )
             )
+
+    def _notify_thinker_interrupt(self) -> None:
+        """流超时/失败后尽力通知 Thinker 中断收尾；失败仅记 debug 日志，不影响会话。"""
+
+        async def notify() -> None:
+            try:
+                await self._thinker_client.interrupt(self.user_id, self.session_id)
+            except Exception as error:  # noqa: BLE001 - best-effort notification
+                self._logger.debug(
+                    "THINKER_INTERRUPT_NOTIFY_FAILED",
+                    extra={
+                        "event": "THINKER_INTERRUPT_NOTIFY_FAILED",
+                        "user_id": self.user_id,
+                        "session_id": self.session_id,
+                        "error_type": type(error).__name__,
+                    },
+                )
+
+        task = asyncio.create_task(
+            notify(), name=f"{self.session_id}:thinker-interrupt-notify"
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _run_tts(
         self,

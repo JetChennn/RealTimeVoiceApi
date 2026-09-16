@@ -34,6 +34,38 @@ class BlockingStream(httpx.AsyncByteStream):
         self.closed = True
 
 
+class ReadTimeoutStream(httpx.AsyncByteStream):
+    """对底层流实施 read 超时，模拟真实传输层在卡住的流上抛出 httpx.ReadTimeout。"""
+
+    def __init__(self, inner: httpx.AsyncByteStream, timeout_seconds: float) -> None:
+        self._inner = inner
+        self._timeout_seconds = timeout_seconds
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                async for chunk in self._inner:
+                    yield chunk
+        except TimeoutError as error:
+            raise httpx.ReadTimeout(
+                f"read timed out after {self._timeout_seconds}s"
+            ) from error
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+class ReadTimeoutTransport(httpx.MockTransport):
+    """MockTransport 不执行 httpx 超时；按请求 extensions 中的 read 超时包裹响应流。"""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await super().handle_async_request(request)
+        read_timeout = (request.extensions.get("timeout") or {}).get("read")
+        if isinstance(read_timeout, (int, float)):
+            response.stream = ReadTimeoutStream(response.stream, float(read_timeout))
+        return response
+
+
 async def test_thinker_streams_text_contract_across_chunk_boundaries() -> None:
     transport, captured = stream_transport(
         [
@@ -77,8 +109,30 @@ async def test_thinker_stream_wraps_event_and_ndjson_failures(chunks: list[bytes
     request = ThinkerReplyRequest("u", "s", "text")
 
     async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
-        with pytest.raises(ThinkerStreamError):
+        with pytest.raises(ThinkerStreamError) as error:
             _ = [event async for event in ThinkerClient(http, admission).stream_reply(request)]
+
+    assert error.value.code is None
+
+
+async def test_thinker_stream_error_event_propagates_remote_error_code() -> None:
+    transport, _ = stream_transport(
+        [
+            (
+                b'{"type":"error","error_code":"THINKER_SESSION_BUSY",'
+                b'"error_message":"previous turn still finalizing"}\n'
+            )
+        ]
+    )
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
+    request = ThinkerReplyRequest("u", "s", "text")
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
+        with pytest.raises(ThinkerStreamError) as error:
+            _ = [event async for event in ThinkerClient(http, admission).stream_reply(request)]
+
+    assert error.value.code == "THINKER_SESSION_BUSY"
+    assert str(error.value) == "previous turn still finalizing"
 
 
 async def test_thinker_stream_wraps_http_failure() -> None:
@@ -135,6 +189,29 @@ async def test_thinker_stream_cancellation_releases_response_and_admission_slot(
 
     assert stream.closed is True
     assert (await admission.snapshot()).active == 0
+
+
+async def test_thinker_stream_read_timeout_wraps_error_with_cause_type_name() -> None:
+    stream = BlockingStream()
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=0)
+    request = ThinkerReplyRequest("u", "s", "text")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    async with httpx.AsyncClient(
+        transport=ReadTimeoutTransport(handler), base_url="http://thinker"
+    ) as http:
+        client = ThinkerClient(http, admission, stream_timeout=0.1)
+        with pytest.raises(ThinkerStreamError) as error:
+            _ = [event async for event in client.stream_reply(request)]
+
+    assert str(error.value) == "Thinker reply stream failed (ReadTimeout)"
+    assert isinstance(error.value.__cause__, httpx.ReadTimeout)
+    assert stream.closed is True
+    assert (await admission.snapshot()).active == 0
+
+
 async def test_thinker_interrupt_sends_only_user_and_session_ids() -> None:
     captured: dict[str, httpx.Request] = {}
 

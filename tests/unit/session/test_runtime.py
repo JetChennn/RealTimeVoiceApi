@@ -10,6 +10,7 @@ from realtime_voice.clients.thinker import (
     DeleteResult,
     ThinkerDone,
     ThinkerReplyRequest,
+    ThinkerStreamError,
     ThinkerTextDelta,
 )
 from realtime_voice.clients.tts import TtsChunk, TtsRequest
@@ -196,6 +197,66 @@ class BlockingThinker(ImmediateThinker):
         self.started.set()
         await self.release.wait()
         yield ThinkerDone(reply_text="reply", tone="测试语气 prompt")
+
+
+class SlowThinker(ImmediateThinker):
+    """首字前即卡住 0.2s 的慢流（无任何事件到达），用于验证首字超时路径。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupts: list[tuple[str, str]] = []
+
+    async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
+        await asyncio.sleep(0.2)
+        yield ThinkerDone(reply_text="late", tone="测试语气 prompt")
+
+    async def interrupt(self, user_id: str, session_id: str) -> None:
+        self.interrupts.append((user_id, session_id))
+
+
+class StalledAfterFirstEventThinker(ImmediateThinker):
+    """首个事件立即到达、随后卡住的流，用于验证回复总时长超时路径。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupts: list[tuple[str, str]] = []
+
+    async def stream_reply(
+        self, request: ThinkerReplyRequest
+    ) -> AsyncIterator[ThinkerTextDelta | ThinkerDone]:
+        yield ThinkerTextDelta(delta="first")
+        await asyncio.sleep(0.2)
+        yield ThinkerDone(reply_text="late", tone="测试语气 prompt")
+
+    async def interrupt(self, user_id: str, session_id: str) -> None:
+        self.interrupts.append((user_id, session_id))
+
+
+class SlowAfterFirstDeltaThinker(ImmediateThinker):
+    """首个事件立即到达、事件间隔超过首字超时但仍正常完成的流。"""
+
+    async def stream_reply(
+        self, request: ThinkerReplyRequest
+    ) -> AsyncIterator[ThinkerTextDelta | ThinkerDone]:
+        yield ThinkerTextDelta(delta="first")
+        await asyncio.sleep(0.15)
+        yield ThinkerTextDelta(delta="second")
+        yield ThinkerDone(reply_text="reply", tone="测试语气 prompt")
+
+
+class RemoteErrorThinker(ImmediateThinker):
+    """抛出携带远端错误码的流错误，用于验证错误码透传与 interrupt 收窄。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupts: list[tuple[str, str]] = []
+
+    async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
+        raise ThinkerStreamError("previous turn still finalizing", code="THINKER_SESSION_BUSY")
+        yield ThinkerDone(reply_text="unreachable", tone="")
+
+    async def interrupt(self, user_id: str, session_id: str) -> None:
+        self.interrupts.append((user_id, session_id))
 
 
 class SignallingAsr:
@@ -531,6 +592,168 @@ async def test_real_asr_thinker_and_tts_failure_boundaries_record_one_error_each
         in rendered
     )
     assert 'realtime_voice_errors_total{code="TTS_STREAM_FAILED",stage="tts"} 1.0' in rendered
+
+
+async def test_thinker_first_event_timeout_fails_the_turn_and_notifies_interrupt() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    thinker = SlowThinker()
+    runtime, _ = make_runtime(thinker=thinker, metrics=metrics, thinker_stream_timeout=0.05)
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_LLM,
+        thinker_generation=1,
+    )
+    runtime.actor.state.active_llm_turn_id = 1
+
+    await runtime.execute_effect(
+        StartThinker(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+    )
+    failure = await next_event(runtime, ThinkerFailed)
+    assert failure.code == "THINKER_TIMEOUT"
+    assert failure.turn_id == 1
+    assert failure.message.startswith("Thinker 未在 0.05 秒内开始返回回复")
+    assert "本轮已取消" in failure.message
+
+    for effect in runtime.actor.handle(failure):
+        await runtime.execute_effect(effect)
+
+    error = await runtime.outbound.get()
+    ended = await runtime.outbound.get()
+    assert (error.type, error.stage, error.code) == ("ERROR", "LLM", "THINKER_TIMEOUT")
+    assert (ended.type, ended.status) == ("RESPONSE_END", "FAILED")
+
+    # 超时后 fire-and-forget 通知 Thinker 中断收尾：不占 admission 槽，也不阻塞失败发布
+    async with asyncio.timeout(1):
+        while not thinker.interrupts:
+            await asyncio.sleep(0)
+    assert thinker.interrupts == [("u", "s")]
+
+    rendered = metrics.render().decode()
+    assert (
+        'realtime_voice_errors_total{code="THINKER_TIMEOUT",stage="thinker"} 1.0'
+        in rendered
+    )
+
+
+async def test_thinker_reply_total_timeout_fails_turn_after_first_event() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    thinker = StalledAfterFirstEventThinker()
+    runtime, _ = make_runtime(
+        thinker=thinker,
+        metrics=metrics,
+        thinker_reply_total_timeout=0.1,
+    )
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_LLM,
+        thinker_generation=1,
+    )
+    runtime.actor.state.active_llm_turn_id = 1
+
+    await runtime.execute_effect(
+        StartThinker(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+    )
+    # 首事件（text_delta）已到达并发布，随后流卡住超过总时长预算
+    delta = await next_event(runtime, ThinkerDeltaReceived)
+    assert delta.delta == "first"
+    failure = await next_event(runtime, ThinkerFailed)
+    assert failure.code == "THINKER_REPLY_TIMEOUT"
+    assert failure.turn_id == 1
+    assert failure.message.startswith("Thinker 回复超过 0.1 秒未完成")
+    assert "本轮已取消" in failure.message
+
+    for effect in runtime.actor.handle(failure):
+        await runtime.execute_effect(effect)
+
+    error = await runtime.outbound.get()
+    ended = await runtime.outbound.get()
+    assert (error.type, error.stage, error.code) == (
+        "ERROR",
+        "LLM",
+        "THINKER_REPLY_TIMEOUT",
+    )
+    assert (ended.type, ended.status) == ("RESPONSE_END", "FAILED")
+
+    # 总时长超时同样 fire-and-forget 通知 Thinker 中断收尾
+    async with asyncio.timeout(1):
+        while not thinker.interrupts:
+            await asyncio.sleep(0)
+    assert thinker.interrupts == [("u", "s")]
+
+    rendered = metrics.render().decode()
+    assert (
+        'realtime_voice_errors_total{code="THINKER_REPLY_TIMEOUT",stage="thinker"} 1.0'
+        in rendered
+    )
+
+
+async def test_normal_stream_after_first_event_ignores_first_event_deadline() -> None:
+    thinker = SlowAfterFirstDeltaThinker()
+    runtime, _ = make_runtime(
+        thinker=thinker,
+        thinker_stream_timeout=0.05,
+    )
+
+    await runtime.execute_effect(
+        StartThinker(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+    )
+    deltas = [
+        await next_event(runtime, ThinkerDeltaReceived),
+        await next_event(runtime, ThinkerDeltaReceived),
+    ]
+    completed = await next_event(runtime, ThinkerCompleted)
+
+    # 事件间隔 0.15s 超过首字预算 0.05s：首事件到达后首字计时已解除，流不受影响
+    assert [event.delta for event in deltas] == ["first", "second"]
+    assert completed.reply_text == "reply"
+
+
+async def test_thinker_remote_error_code_passes_through_and_skips_interrupt_notify() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    thinker = RemoteErrorThinker()
+    runtime, _ = make_runtime(thinker=thinker, metrics=metrics)
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_LLM,
+        thinker_generation=1,
+    )
+    runtime.actor.state.active_llm_turn_id = 1
+
+    await runtime.execute_effect(
+        StartThinker(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+    )
+    failure = await next_event(runtime, ThinkerFailed)
+    assert failure.code == "THINKER_SESSION_BUSY"
+    assert failure.message == "previous turn still finalizing"
+    assert failure.turn_id == 1
+
+    for effect in runtime.actor.handle(failure):
+        await runtime.execute_effect(effect)
+
+    error = await runtime.outbound.get()
+    ended = await runtime.outbound.get()
+    assert (error.type, error.stage, error.code) == (
+        "ERROR",
+        "LLM",
+        "THINKER_SESSION_BUSY",
+    )
+    assert (ended.type, ended.status) == ("RESPONSE_END", "FAILED")
+
+    # 远端 error 事件已在 BerryThinker 侧收尾，网关不再 fire-and-forget interrupt
+    await asyncio.sleep(0.05)
+    assert thinker.interrupts == []
+
+    rendered = metrics.render().decode()
+    assert (
+        'realtime_voice_errors_total{code="THINKER_SESSION_BUSY",stage="thinker"} 1.0'
+        in rendered
+    )
 
 
 async def test_asr_failure_without_metrics_still_publishes_failure_event() -> None:

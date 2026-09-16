@@ -19,6 +19,7 @@
     </div>
     <div class="actions"><button id="start" class="primary">开始对话</button><button id="cancel" disabled>取消</button><div class="mic"><span id="mic-label">麦克风未开启</span><meter id="level" min="0" max="1" value="0" aria-label="麦克风音量"></meter></div><span id="connection" class="connection"></span></div>
     <p id="notice" role="status">开始后持续录音并自动播放回复，推荐佩戴耳机。取消将停止录音、播放并关闭连接。</p>
+    <p class="footnote">Thinker 回复默认 5 秒内开始、最长 20 秒完成（可配置），超时会提示并可直接继续对话。</p>
     <details><summary>连接信息</summary><p id="endpoint"></p><p id="session-label">会话尚未创建</p></details>
   </section>
   <section aria-label="阶段耗时" class="timing-section">

@@ -17,7 +17,11 @@ class ThinkerError(RuntimeError):
 
 
 class ThinkerStreamError(ThinkerError):
-    """当回复流无法提供有效 Thinker 事件时抛出。"""
+    """当回复流无法提供有效 Thinker 事件时抛出；code 携带远端 error 事件的错误码。"""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ThinkerInterruptError(ThinkerError):
@@ -66,9 +70,17 @@ class DeleteResult(str, Enum):
 class ThinkerClient:
     """使用注入的共享 HTTP 客户端执行 BerryThinker 操作。"""
 
-    def __init__(self, http: httpx.AsyncClient, admission: BoundedAdmission) -> None:
+    def __init__(
+        self,
+        http: httpx.AsyncClient,
+        admission: BoundedAdmission,
+        stream_timeout: float = 5.0,
+        reply_total_timeout: float = 20.0,
+    ) -> None:
         self.http = http
         self.admission = admission
+        self._stream_timeout = stream_timeout
+        self._reply_total_timeout = reply_total_timeout
 
     async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerEvent]:
         """发送 ASR 文本并逐条产出 Thinker 的 NDJSON 流式事件。"""
@@ -90,7 +102,13 @@ class ThinkerClient:
                     "POST",
                     "/api/v1/reply",
                     json=payload,
-                    timeout=180.0,
+                    # read 超时是相邻两次数据间隔上限：用回复总时长量级作预算，
+                    # 总时长本身由 SessionRuntime 的两段式 asyncio.timeout 把关；
+                    # connect 沿用首字超时的较小值，避免长时间等待建连
+                    timeout=httpx.Timeout(
+                        self._reply_total_timeout or self._stream_timeout,
+                        connect=min(2.0, self._stream_timeout),
+                    ),
                 ) as response:
                     response.raise_for_status()
                     async for payload in iter_ndjson(response.aiter_bytes()):
@@ -98,7 +116,9 @@ class ThinkerClient:
             except ThinkerStreamError:
                 raise
             except (httpx.HTTPError, TypeError, ValueError) as error:
-                raise ThinkerStreamError("Thinker reply stream failed") from error
+                raise ThinkerStreamError(
+                    f"Thinker reply stream failed ({type(error).__name__})"
+                ) from error
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         """中断 BerryThinker 正在进行的回复，且不争用回复容量。"""
@@ -106,7 +126,7 @@ class ThinkerClient:
             response = await self.http.post(
                 "/api/v1/interrupt",
                 json={"user_id": user_id, "session_id": session_id},
-                timeout=180.0,
+                timeout=5.0,
             )
             response.raise_for_status()
         except httpx.HTTPError as error:
@@ -119,7 +139,7 @@ class ThinkerClient:
             f"{_quote_path_identifier(session_id)}"
         )
         try:
-            response = await self.http.delete(path, timeout=180.0)
+            response = await self.http.delete(path, timeout=5.0)
         except httpx.HTTPError as error:
             raise ThinkerCleanupError("Thinker session cleanup failed") from error
 
@@ -157,6 +177,10 @@ def _thinker_event(payload: dict[str, object]) -> ThinkerEvent:
 
     if event_type == "error":
         message = payload.get("error_message")
-        raise ThinkerStreamError(message if isinstance(message, str) else "thinker stream failed")
+        error_code = payload.get("error_code")
+        raise ThinkerStreamError(
+            message if isinstance(message, str) else "thinker stream failed",
+            code=error_code if isinstance(error_code, str) else None,
+        )
 
     raise ValueError("Thinker stream event type is invalid")

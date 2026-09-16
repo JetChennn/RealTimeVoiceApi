@@ -52,7 +52,14 @@ def configure_services(services: AppServices) -> None:
     )
     services.thinker_client = ThinkerClient(
         httpx.AsyncClient(base_url=str(settings.thinker_base_url), trust_env=False),
-        BoundedAdmission("thinker", 8, 64, metrics=services.metrics),
+        BoundedAdmission(
+            "thinker",
+            settings.thinker_concurrency,
+            settings.thinker_max_waiters,
+            metrics=services.metrics,
+        ),
+        stream_timeout=settings.thinker_stream_timeout_seconds,
+        reply_total_timeout=settings.thinker_reply_total_timeout_seconds,
     )
     services.tts_client = TtsClient(
         httpx.AsyncClient(base_url=str(settings.tts_base_url), trust_env=False),
@@ -136,6 +143,8 @@ def build_runtime(
         audio_queue=audio,
         outbound_queue=outbound,
         thinker_cleanup_timeout=settings.thinker_cleanup_timeout_seconds,
+        thinker_stream_timeout=settings.thinker_stream_timeout_seconds,
+        thinker_reply_total_timeout=settings.thinker_reply_total_timeout_seconds,
         tts_drain_timeout=settings.tts_drain_timeout_seconds,
         tts_prompt_override=settings.tts_prompt_override,
     )
