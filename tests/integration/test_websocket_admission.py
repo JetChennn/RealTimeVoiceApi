@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
@@ -51,5 +53,13 @@ def test_session_initialization_failure_returns_reason_and_internal_close(failur
         assert closed.value.code == 1011
         assert closed.value.reason == "SESSION_CREATE_FAILED"
         assert client.get("/health").json()["active_sessions"] == 0
-    assert "SESSION_CREATE_FAILED session_id=session-1" in caplog.text
-    assert "private model path /internal/model" in caplog.text
+    failure_log = next(
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "session_create_failed"
+    )
+    assert failure_log["error_code"] == "SESSION_CREATE_FAILED"
+    assert failure_log["session_id"] == "session-1"
+    assert failure_log["error_type"] == failure.__name__
+    assert "stack_trace" in failure_log
+    assert "private model path /internal/model" not in caplog.text

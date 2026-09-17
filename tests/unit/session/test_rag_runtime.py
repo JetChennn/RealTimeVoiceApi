@@ -1,9 +1,11 @@
 import asyncio
 
 import pytest
+from prometheus_client import CollectorRegistry
 
 from realtime_voice.clients.rag import RagResult
 from realtime_voice.clients.thinker import ThinkerDone
+from realtime_voice.observability.metrics import Metrics
 from realtime_voice.session.actor import StartThinker
 from realtime_voice.session.events import ThinkerSkipped
 from realtime_voice.session.state import TurnContext, TurnStage
@@ -63,6 +65,24 @@ async def test_independent_turn_context_and_disabled_bypass(enabled):
     assert [r.knowledge_context for r in thinker.requests] == (
         ["knowledge:1", "knowledge:2"] if enabled else ["", ""]
     )
+
+
+async def test_rag_completion_keeps_legacy_and_uniform_lifecycle_events():
+    metrics = Metrics(registry=CollectorRegistry())
+    rag, thinker = Rag(), Thinker()
+    runtime, _ = make_runtime(
+        thinker=thinker,
+        rag_client=rag,
+        rag_enabled=True,
+        scenes=("a",),
+        metrics=metrics,
+    )
+
+    await runtime._retrieve_knowledge(add_turn(runtime, 1))
+
+    rendered = metrics.render().decode()
+    assert 'realtime_voice_lifecycle_events_total{event="rag_retrieved"} 1.0' in rendered
+    assert 'realtime_voice_lifecycle_events_total{event="rag_completed"} 1.0' in rendered
 
 
 async def test_interrupted_retrieval_releases_actor_for_next_turn():

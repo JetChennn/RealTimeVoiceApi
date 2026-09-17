@@ -17,6 +17,7 @@ from realtime_voice.observability.metrics import Metrics
 
 if TYPE_CHECKING:
     from realtime_voice.audio.vad import SpeechSegment
+from realtime_voice.clients.asr import AsrError
 from realtime_voice.clients.limits import AdmissionOverloaded
 from realtime_voice.clients.rag import RagClient, RagResult
 from realtime_voice.clients.thinker import (
@@ -26,7 +27,7 @@ from realtime_voice.clients.thinker import (
     ThinkerStreamError,
     ThinkerTextDelta,
 )
-from realtime_voice.clients.tts import TTS_SAMPLE_RATE, TtsClient, TtsRequest
+from realtime_voice.clients.tts import TTS_SAMPLE_RATE, TtsClient, TtsRequest, TtsStreamError
 from realtime_voice.protocol.server_messages import ServerMessage, TurnState
 from realtime_voice.session.actor import (
     CloseRuntime,
@@ -60,6 +61,21 @@ from realtime_voice.session.state import TERMINAL_TURN_STAGES, SessionState, Tur
 THINKER_CLEANUP_SKIPPED = "THINKER_CLEANUP_SKIPPED"
 DEFAULT_AUDIO_QUEUE_MAX_SECONDS = 3.0
 DEFAULT_OUTBOUND_QUEUE_MAX_BYTES = 8 * 1024 * 1024
+DEFAULT_SLOW_STAGE_WARNING_SECONDS = 2.0
+KNOWN_FAILURE_REASONS = frozenset(
+    {
+        "client_disconnected",
+        "first_audio_timeout",
+        "idle_timeout",
+        "internal_error",
+        "TTS_FIRST_AUDIO_TIMEOUT",
+        "TTS_PCM_ALIGNMENT",
+        "TTS_PCM_EMPTY",
+        "TTS_SAMPLE_RATE",
+        "TTS_STREAM_FAILED",
+        "TTS_STREAM_IDLE_TIMEOUT",
+    }
+)
 
 QueueItem = TypeVar("QueueItem")
 
@@ -244,6 +260,7 @@ class SessionRuntime:
         metrics: Metrics | None = None,
         tts_drain_timeout: float = 120.0,
         tts_prompt_override: str = "",
+        slow_stage_warning_seconds: float = DEFAULT_SLOW_STAGE_WARNING_SECONDS,
         logger: logging.Logger | None = None,
         clock: Callable[[], float] = monotonic,
         turn_end_settings=None,
@@ -263,6 +280,8 @@ class SessionRuntime:
             raise ValueError("outbound queue byte limit must be at least 1")
         if thinker_cleanup_timeout <= 0 or tts_drain_timeout <= 0:
             raise ValueError("session cleanup timeouts must be positive")
+        if not isfinite(slow_stage_warning_seconds) or slow_stage_warning_seconds <= 0:
+            raise ValueError("slow stage warning threshold must be positive and finite")
 
         self.actor = SessionActor(state)
         self.events = event_queue or asyncio.Queue(maxsize=event_queue_size)
@@ -311,6 +330,7 @@ class SessionRuntime:
         self._thinker_reply_total_timeout = thinker_reply_total_timeout
         self._tts_drain_timeout = tts_drain_timeout
         self._tts_prompt_override = str(tts_prompt_override or "").strip()
+        self._slow_stage_warning_seconds = slow_stage_warning_seconds
         self._logger = logger or logging.getLogger(__name__)
         self._metrics = metrics
         self._clock = clock
@@ -343,6 +363,7 @@ class SessionRuntime:
                 self.events,
                 metrics,
                 self._semantic_context,
+                user_id=state.user_id,
             )
 
     @property
@@ -351,6 +372,11 @@ class SessionRuntime:
 
     @property
     def user_id(self) -> str:
+        return self.actor.state.user_id
+
+    @property
+    def device_id(self) -> str:
+        """The V1 protocol device identifier; retained as user_id for compatibility."""
         return self.actor.state.user_id
 
     @property
@@ -391,6 +417,7 @@ class SessionRuntime:
         if self._cleaned:
             raise RuntimeError("session runtime cannot be restarted after cleanup")
         self._is_running = True
+        self._observe("session_created", stage="SESSION")
 
         try:
             try:
@@ -442,6 +469,13 @@ class SessionRuntime:
                     self.outbound.put_nowait(effect.message)
                 except (asyncio.QueueFull, SessionQueueOverloaded) as error:
                     self.request_close()
+                    self._observe(
+                        "slow_client",
+                        level=logging.WARNING,
+                        stage="TRANSPORT",
+                        error_code=SlowClient.code,
+                        error_type=type(error).__name__,
+                    )
                     if self._metrics is not None:
                         self._metrics.record_slow_client_close()
                     raise SlowClient(str(error)) from error
@@ -478,14 +512,11 @@ class SessionRuntime:
                 self.request_close()
             return
         if isinstance(effect, RecordStaleEvent):
-            self._logger.info(
-                "STALE_SESSION_EVENT",
-                extra={
-                    "session_id": self.session_id,
-                    "turn_id": effect.turn_id,
-                    "event_type": effect.event_type,
-                    "reason": effect.reason,
-                },
+            self._observe(
+                "stale_session_event",
+                turn_id=effect.turn_id,
+                event_type=effect.event_type,
+                reason=effect.reason,
             )
             return
         if isinstance(effect, RecordDiscardedAudio):
@@ -563,6 +594,13 @@ class SessionRuntime:
         while True:
             segment = await self._asr_queue.get()
             started = self._clock()
+            trace_id = self._segment_trace_id(segment.segment_id)
+            self._observe(
+                "asr_started",
+                stage="ASR",
+                segment_id=segment.segment_id,
+                trace_id=trace_id,
+            )
             try:
                 text = await self._asr_client.transcribe(segment.pcm16_16k)
                 event: SessionEvent = AsrSucceeded(
@@ -572,13 +610,48 @@ class SessionRuntime:
                     audio_wav=pcm16_wav_bytes(segment.pcm16_16k, 16000),
                 )
             except AdmissionOverloaded as error:
+                self._observe(
+                    "asr_failed",
+                    level=logging.WARNING,
+                    stage="ASR",
+                    segment_id=segment.segment_id,
+                    trace_id=trace_id,
+                    error_code="SERVICE_OVERLOADED",
+                    error_type=type(error).__name__,
+                )
                 event = AsrFailed(
                     session_id=self.session_id,
                     segment_id=segment.segment_id,
                     code="SERVICE_OVERLOADED",
                     message=str(error),
                 )
+            except AsrError as error:
+                self._observe(
+                    "asr_failed",
+                    level=logging.ERROR,
+                    stage="ASR",
+                    segment_id=segment.segment_id,
+                    trace_id=trace_id,
+                    error_code="ASR_FAILED",
+                    error_type=type(error).__name__,
+                )
+                event = AsrFailed(
+                    session_id=self.session_id,
+                    segment_id=segment.segment_id,
+                    code="ASR_FAILED",
+                    message=_error_message(error, "ASR transcription failed"),
+                )
             except Exception as error:  # noqa: BLE001 - worker failures become Actor events
+                self._observe(
+                    "asr_failed",
+                    level=logging.ERROR,
+                    exc_info=error,
+                    stage="ASR",
+                    segment_id=segment.segment_id,
+                    trace_id=trace_id,
+                    error_code="ASR_FAILED",
+                    error_type=type(error).__name__,
+                )
                 event = AsrFailed(
                     session_id=self.session_id,
                     segment_id=segment.segment_id,
@@ -592,7 +665,18 @@ class SessionRuntime:
                     self._metrics.record_error("asr", event.code)
             if isinstance(event, AsrSucceeded):
                 self._observe(
-                    "asr_completed", segment_id=segment.segment_id, duration_ms=elapsed * 1000
+                    "asr_completed",
+                    stage="ASR",
+                    segment_id=segment.segment_id,
+                    trace_id=trace_id,
+                    duration_ms=elapsed * 1000,
+                )
+                self._observe_slow(
+                    "asr_slow",
+                    elapsed,
+                    stage="ASR",
+                    segment_id=segment.segment_id,
+                    trace_id=trace_id,
                 )
             if not self._closing:
                 await self.events.put(event)
@@ -627,27 +711,68 @@ class SessionRuntime:
             or self.actor.state.active_llm_turn_id != effect.turn_id
         ):
             return ""
+        trace_id = self._turn_trace_id(effect.turn_id)
+        self._observe(
+            "rag_started", stage="RAG", turn_id=effect.turn_id, trace_id=trace_id
+        )
         task = asyncio.create_task(self._rag_client.retrieve(effect.text, self._rag_scenes))
         self._rag_tasks[effect.turn_id] = task
         try:
             result = await task
+            observation = {
+                "stage": "RAG",
+                "turn_id": effect.turn_id,
+                "trace_id": trace_id,
+                "status": result.status,
+                "snippet_count": result.snippet_count,
+                "duration_ms": result.duration * 1000,
+            }
+            # Keep the established event during the migration to the uniform stage naming.
+            self._observe("rag_retrieved", **observation)
             self._observe(
-                "rag_retrieved",
+                "rag_completed",
+                **observation,
+            )
+            if result.status in {"timeout", "overloaded", "failed"}:
+                self._observe(
+                    "rag_failed",
+                    level=logging.WARNING,
+                    stage="RAG",
+                    turn_id=effect.turn_id,
+                    trace_id=trace_id,
+                    error_code=f"RAG_{result.status.upper()}",
+                    status=result.status,
+                )
+            self._observe_slow(
+                "rag_slow",
+                result.duration,
+                stage="RAG",
                 turn_id=effect.turn_id,
-                status=result.status,
-                snippet_count=result.snippet_count,
-                duration_ms=result.duration * 1000,
+                trace_id=trace_id,
             )
             return result.context
         except asyncio.CancelledError:
             if asyncio.current_task().cancelling():
                 raise
             return ""
+        except Exception as error:
+            self._observe(
+                "rag_failed",
+                level=logging.ERROR,
+                exc_info=error,
+                stage="RAG",
+                turn_id=effect.turn_id,
+                trace_id=trace_id,
+                error_code="RAG_FAILED",
+                error_type=type(error).__name__,
+            )
+            raise
         finally:
             self._rag_tasks.pop(effect.turn_id, None)
 
     async def _run_thinker(self, effect: StartThinker | StartNextThinker) -> None:
         first_event_seen = False
+        trace_id = self._turn_trace_id(effect.turn_id)
         try:
             async with self._thinker_lock:
                 # thinker_lock 串行化所有 Thinker 请求，确保同一会话内不会并发调用 LLM
@@ -685,6 +810,13 @@ class SessionRuntime:
                 first_delta = True
                 first_delta_ts: float | None = None
                 started = self._clock()
+                self._observe(
+                    "thinker_started",
+                    stage="LLM",
+                    turn_id=effect.turn_id,
+                    generation=effect.generation,
+                    trace_id=trace_id,
+                )
                 # 流消费段受两段式超时约束：
                 # - 外层 thinker_reply_total_timeout 限制整轮回复总时长（含 done 处理）；
                 # - 首个事件到达前 thinker_stream_timeout 单独限制首字等待（首包/首事件预算），
@@ -710,8 +842,19 @@ class SessionRuntime:
                                 elapsed = first_delta_ts - started
                                 self._observe(
                                     "thinker_first_delta",
+                                    stage="LLM",
                                     turn_id=effect.turn_id,
+                                    generation=effect.generation,
+                                    trace_id=trace_id,
                                     duration_ms=elapsed * 1000,
+                                )
+                                self._observe_slow(
+                                    "thinker_first_delta_slow",
+                                    elapsed,
+                                    stage="LLM",
+                                    turn_id=effect.turn_id,
+                                    generation=effect.generation,
+                                    trace_id=trace_id,
                                 )
                                 if self._metrics is not None:
                                     self._metrics.observe_stage_latency("thinker", elapsed)
@@ -746,6 +889,15 @@ class SessionRuntime:
                                     )
                     if reply_text is None:
                         raise RuntimeError("Thinker stream ended without done")
+                    completed_elapsed = self._clock() - started
+                    self._observe(
+                        "thinker_completed",
+                        stage="LLM",
+                        turn_id=effect.turn_id,
+                        generation=effect.generation,
+                        trace_id=trace_id,
+                        duration_ms=completed_elapsed * 1000,
+                    )
                     await self._publish_event(
                         ThinkerCompleted(
                             session_id=self.session_id,
@@ -756,6 +908,16 @@ class SessionRuntime:
                         )
                     )
         except AdmissionOverloaded as error:
+            self._observe(
+                "thinker_failed",
+                level=logging.WARNING,
+                stage="LLM",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                error_code="SERVICE_OVERLOADED",
+                error_type=type(error).__name__,
+            )
             if self._metrics is not None:
                 self._metrics.record_error("thinker", "SERVICE_OVERLOADED")
             await self._publish_event(
@@ -784,6 +946,16 @@ class SessionRuntime:
                 )
             if self._metrics is not None:
                 self._metrics.record_error("thinker", code)
+            self._observe(
+                "thinker_failed",
+                level=logging.WARNING,
+                stage="LLM",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                error_code=code,
+                error_type="TimeoutError",
+            )
             # fire-and-forget 通知 Thinker 收尾：不占 admission 槽，也不阻塞本轮失败发布
             self._notify_thinker_interrupt()
             await self._publish_event(
@@ -803,6 +975,17 @@ class SessionRuntime:
                 self._metrics.record_error("thinker", code)
             if not error.code:
                 self._notify_thinker_interrupt()
+            self._observe(
+                "thinker_failed",
+                level=logging.WARNING if "TIMEOUT" in code.upper() else logging.ERROR,
+                stage="LLM",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                error_code=code,
+                error_type=type(error).__name__,
+                reason=_known_failure_reason(error),
+            )
             await self._publish_event(
                 ThinkerFailed(
                     session_id=self.session_id,
@@ -816,6 +999,17 @@ class SessionRuntime:
             if self._metrics is not None:
                 self._metrics.record_error("thinker", "THINKER_STREAM_FAILED")
             self._notify_thinker_interrupt()
+            self._observe(
+                "thinker_failed",
+                level=logging.ERROR,
+                exc_info=error,
+                stage="LLM",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                error_code="THINKER_STREAM_FAILED",
+                error_type=type(error).__name__,
+            )
             await self._publish_event(
                 ThinkerFailed(
                     session_id=self.session_id,
@@ -827,20 +1021,18 @@ class SessionRuntime:
             )
 
     def _notify_thinker_interrupt(self) -> None:
-        """流超时/失败后尽力通知 Thinker 中断收尾；失败仅记 debug 日志，不影响会话。"""
+        """流超时/失败后尽力通知 Thinker 中断收尾；失败不影响会话。"""
 
         async def notify() -> None:
             try:
                 await self._thinker_client.interrupt(self.user_id, self.session_id)
             except Exception as error:  # noqa: BLE001 - best-effort notification
-                self._logger.debug(
-                    "THINKER_INTERRUPT_NOTIFY_FAILED",
-                    extra={
-                        "event": "THINKER_INTERRUPT_NOTIFY_FAILED",
-                        "user_id": self.user_id,
-                        "session_id": self.session_id,
-                        "error_type": type(error).__name__,
-                    },
+                self._observe(
+                    "thinker_interrupt_notify_failed",
+                    level=logging.WARNING,
+                    stage="LLM",
+                    error_code="THINKER_INTERRUPT_NOTIFY_FAILED",
+                    error_type=type(error).__name__,
                 )
 
         task = asyncio.create_task(
@@ -857,13 +1049,23 @@ class SessionRuntime:
         key = (effect.turn_id, effect.generation)
         first_audio = True
         started = self._clock()
+        last_chunk_at: float | None = None
+        chunk_count = 0
+        trace_id = self._turn_trace_id(effect.turn_id)
         resampler = StreamingResampler(TTS_SAMPLE_RATE, self.sample_rate)
         # prompt 优先级：显式覆盖 > Thinker 回复携带的 tone > BerryThinker 默认语调
         prompt = self._tts_prompt_override or effect.tone.strip() or "平和"
         request = TtsRequest(
             model_reply=effect.reply_text,
             prompt=prompt,
-            trace_id=f"{self.user_id}/{self.session_id}/turn-{effect.turn_id}",
+            trace_id=trace_id,
+        )
+        self._observe(
+            "tts_started",
+            stage="TTS",
+            turn_id=effect.turn_id,
+            generation=effect.generation,
+            trace_id=trace_id,
         )
         try:
             try:
@@ -879,6 +1081,22 @@ class SessionRuntime:
                     )
                     try:
                         async for chunk in self._tts_client.stream(request):
+                            received_at = self._clock()
+                            chunk_count += 1
+                            if last_chunk_at is not None:
+                                gap = received_at - last_chunk_at
+                                if gap >= self._slow_stage_warning_seconds:
+                                    self._observe(
+                                        "tts_chunk_gap_slow",
+                                        level=logging.WARNING,
+                                        stage="TTS",
+                                        turn_id=effect.turn_id,
+                                        generation=effect.generation,
+                                        trace_id=trace_id,
+                                        sequence=chunk.chunk_index,
+                                        gap_ms=gap * 1000,
+                                    )
+                            last_chunk_at = received_at
                             # 输出被抑制（轮次已切换/已中断）时跳过本块，但仍消费流以触发排空
                             if self._tts_output_suppressed(effect):
                                 continue
@@ -892,8 +1110,19 @@ class SessionRuntime:
                                     elapsed = self._clock() - started
                                     self._observe(
                                         "tts_first_audio",
+                                        stage="TTS",
                                         turn_id=effect.turn_id,
+                                        generation=effect.generation,
+                                        trace_id=trace_id,
                                         duration_ms=elapsed * 1000,
+                                    )
+                                    self._observe_slow(
+                                        "tts_first_audio_slow",
+                                        elapsed,
+                                        stage="TTS",
+                                        turn_id=effect.turn_id,
+                                        generation=effect.generation,
+                                        trace_id=trace_id,
                                     )
                                     if self._metrics is not None:
                                         self._metrics.observe_stage_latency("tts", elapsed)
@@ -918,7 +1147,25 @@ class SessionRuntime:
                         deadline_task.cancel()
                         await asyncio.gather(deadline_task, return_exceptions=True)
             except TimeoutError:
-                pass
+                self._observe(
+                    "tts_drain_timeout",
+                    level=logging.WARNING,
+                    stage="TTS",
+                    turn_id=effect.turn_id,
+                    generation=effect.generation,
+                    trace_id=trace_id,
+                    error_code="TTS_DRAIN_TIMEOUT",
+                    error_type="TimeoutError",
+                )
+            self._observe(
+                "tts_completed",
+                stage="TTS",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                duration_ms=(self._clock() - started) * 1000,
+                chunk_count=chunk_count,
+            )
             await self._publish_event(
                 TtsCompleted(
                     session_id=self.session_id,
@@ -927,6 +1174,16 @@ class SessionRuntime:
                 )
             )
         except AdmissionOverloaded as error:
+            self._observe(
+                "tts_failed",
+                level=logging.WARNING,
+                stage="TTS",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                error_code="SERVICE_OVERLOADED",
+                error_type=type(error).__name__,
+            )
             if self._metrics is not None:
                 self._metrics.record_error("tts", "SERVICE_OVERLOADED")
             await self._publish_event(
@@ -938,7 +1195,48 @@ class SessionRuntime:
                     message=str(error),
                 )
             )
+        except TtsStreamError as error:
+            reason = _known_failure_reason(error)
+            self._observe(
+                "tts_failed",
+                level=(
+                    logging.WARNING
+                    if reason is not None and "timeout" in reason.lower()
+                    else logging.ERROR
+                ),
+                stage="TTS",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                error_code="TTS_STREAM_FAILED",
+                downstream_error_code=reason,
+                error_type=type(error).__name__,
+                reason=reason,
+            )
+            if self._metrics is not None:
+                self._metrics.record_error("tts", "TTS_STREAM_FAILED")
+            await self._publish_event(
+                TtsFailed(
+                    session_id=self.session_id,
+                    turn_id=effect.turn_id,
+                    generation=effect.generation,
+                    code="TTS_STREAM_FAILED",
+                    message=_error_message(error, "TTS stream failed"),
+                )
+            )
         except Exception as error:  # noqa: BLE001 - background failures become Actor events
+            self._observe(
+                "tts_failed",
+                level=logging.ERROR,
+                exc_info=error,
+                stage="TTS",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                error_code="TTS_STREAM_FAILED",
+                error_type=type(error).__name__,
+                reason=_known_failure_reason(error),
+            )
             if self._metrics is not None:
                 self._metrics.record_error("tts", "TTS_STREAM_FAILED")
             await self._publish_event(
@@ -974,14 +1272,45 @@ class SessionRuntime:
         # 抑制条件：轮次不存在 / 已被新 TTS 取代 / 已被显式打断
         return turn is None or turn.tts_generation != effect.generation or turn.interrupted
 
-    def _observe(self, event: str, **fields: object) -> None:
+    def _observe(
+        self,
+        event: str,
+        *,
+        level: int = logging.INFO,
+        exc_info: BaseException | bool | None = None,
+        **fields: object,
+    ) -> None:
         """尽力输出生命周期诊断信息，不影响会话行为。"""
         try:
-            log_event(event, user_id=self.user_id, session_id=self.session_id, **fields)
+            log_event(
+                event,
+                logger=self._logger,
+                level=level,
+                exc_info=exc_info,
+                device_id=self.device_id,
+                user_id=self.user_id,
+                session_id=self.session_id,
+                **fields,
+            )
             if self._metrics is not None:
                 self._metrics.record_lifecycle_event(event)
         except Exception:  # noqa: BLE001 - observability is best effort
             return
+
+    def _observe_slow(self, event: str, elapsed: float, **fields: object) -> None:
+        if elapsed >= self._slow_stage_warning_seconds:
+            self._observe(
+                event,
+                level=logging.WARNING,
+                duration_ms=elapsed * 1000,
+                **fields,
+            )
+
+    def _turn_trace_id(self, turn_id: int) -> str:
+        return f"{self.device_id}/{self.session_id}/turn-{turn_id}"
+
+    def _segment_trace_id(self, segment_id: int) -> str:
+        return f"{self.device_id}/{self.session_id}/segment-{segment_id}"
 
     async def _publish_event(self, event: SessionEvent) -> None:
         if not self._closing:
@@ -1019,13 +1348,11 @@ class SessionRuntime:
                 if thinker_safe:
                     await self._delete_thinker_session()
                 else:
-                    self._logger.warning(
-                        THINKER_CLEANUP_SKIPPED,
-                        extra={
-                            "event": THINKER_CLEANUP_SKIPPED,
-                            "user_id": self.user_id,
-                            "session_id": self.session_id,
-                        },
+                    self._observe(
+                        "thinker_cleanup_skipped",
+                        level=logging.WARNING,
+                        stage="LLM",
+                        error_code=THINKER_CLEANUP_SKIPPED,
                     )
             finally:
                 # 无论前面是否成功，都要释放注册表准入并标记已清理，避免泄漏
@@ -1035,7 +1362,8 @@ class SessionRuntime:
                 self._turn_speech_ends.clear()
                 self._llm_milestones.clear()
                 self._cleaned = True
-                self._observe("session_cleanup")
+                self._observe("session_cleanup", stage="SESSION")
+                self._observe("session_closed", stage="SESSION")
 
     async def _stop_audio(self) -> None:
         await self._cancel_named_tasks("receiver", "vad", "sender")
@@ -1077,14 +1405,12 @@ class SessionRuntime:
         try:
             await self._thinker_client.delete_session(self.user_id, self.session_id)
         except Exception as error:  # noqa: BLE001 - cleanup must still release registry
-            self._logger.warning(
-                "THINKER_CLEANUP_FAILED",
-                extra={
-                    "event": "THINKER_CLEANUP_FAILED",
-                    "user_id": self.user_id,
-                    "session_id": self.session_id,
-                    "error_type": type(error).__name__,
-                },
+            self._observe(
+                "thinker_cleanup_failed",
+                level=logging.WARNING,
+                stage="LLM",
+                error_code="THINKER_CLEANUP_FAILED",
+                error_type=type(error).__name__,
             )
 
 
@@ -1105,6 +1431,13 @@ async def _cancel_tasks(tasks: set[asyncio.Task[None]]) -> None:
 def _error_message(error: Exception, fallback: str) -> str:
     message = str(error).strip()
     return message or fallback
+
+
+def _known_failure_reason(error: Exception) -> str | None:
+    """Return only explicitly approved machine reasons, never arbitrary downstream text."""
+    code = getattr(error, "code", None)
+    reason = code.strip() if isinstance(code, str) else str(error).strip()
+    return reason if reason in KNOWN_FAILURE_REASONS else None
 
 
 def _audio_item_size(item: bytes | None) -> int:

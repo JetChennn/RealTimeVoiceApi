@@ -91,6 +91,7 @@ async def test_tts_wraps_non_success_statuses(status_code: int) -> None:
             _ = [chunk async for chunk in TtsClient(http, admission).stream(TtsRequest("u", "m", "t"))]
 
     assert isinstance(error.value.__cause__, httpx.HTTPStatusError)
+    assert error.value.code == "TTS_STREAM_FAILED"
 
 
 async def test_tts_wraps_inline_error_events() -> None:
@@ -99,8 +100,10 @@ async def test_tts_wraps_inline_error_events() -> None:
     admission = BoundedAdmission("tts", concurrency=1, max_waiters=0)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://tts") as http:
-        with pytest.raises(TtsStreamError, match="engine failed"):
+        with pytest.raises(TtsStreamError, match="engine failed") as error:
             _ = [chunk async for chunk in TtsClient(http, admission).stream(TtsRequest("u", "m", "t"))]
+
+    assert error.value.code == "internal_error"
 
 
 @pytest.mark.parametrize(
@@ -126,6 +129,7 @@ async def test_tts_wraps_malformed_events_with_causes(
             _ = [chunk async for chunk in TtsClient(http, admission).stream(TtsRequest("u", "m", "t"))]
 
     assert isinstance(error.value.__cause__, cause_type)
+    assert error.value.code == "TTS_STREAM_FAILED"
 
 
 @pytest.mark.parametrize(
@@ -151,6 +155,7 @@ async def test_tts_rejects_invalid_audio_properties(
         with pytest.raises(TtsStreamError, match=message) as error:
             _ = [chunk async for chunk in TtsClient(http, admission).stream(TtsRequest("u", "m", "t"))]
     assert isinstance(error.value.__cause__, cause_type)
+    assert error.value.code == message
 
 
 async def test_tts_wraps_request_timeouts() -> None:
@@ -166,6 +171,7 @@ async def test_tts_wraps_request_timeouts() -> None:
             _ = [chunk async for chunk in TtsClient(http, admission).stream(TtsRequest("u", "m", "t"))]
 
     assert isinstance(error.value.__cause__, httpx.ReadTimeout)
+    assert error.value.code == "TTS_STREAM_FAILED"
 
 
 async def test_tts_aclose_releases_response_and_admission_slot() -> None:
@@ -277,6 +283,7 @@ async def test_tts_first_audio_deadline_covers_response_headers_and_releases_slo
 
     snapshot = await admission.snapshot()
     assert isinstance(error.value.__cause__, TimeoutError)
+    assert error.value.code == "TTS_FIRST_AUDIO_TIMEOUT"
     assert transport.cancelled is True
     assert transport.closed is True
     assert snapshot.active == 0
@@ -303,6 +310,7 @@ async def test_tts_prompt_does_not_reset_absolute_first_audio_deadline() -> None
 
     snapshot = await admission.snapshot()
     assert isinstance(error.value.__cause__, TimeoutError)
+    assert error.value.code == "TTS_FIRST_AUDIO_TIMEOUT"
     assert stream.closed is True
     assert snapshot.active == 0
     assert snapshot.waiting == 0
@@ -329,6 +337,7 @@ async def test_tts_idle_timeout_closes_response_and_releases_slot() -> None:
 
     snapshot = await admission.snapshot()
     assert isinstance(error.value.__cause__, TimeoutError)
+    assert error.value.code == "TTS_STREAM_IDLE_TIMEOUT"
     assert stream.closed is True
     assert snapshot.active == 0
     assert snapshot.waiting == 0

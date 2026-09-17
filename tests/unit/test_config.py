@@ -32,8 +32,7 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
     assert settings.thinker_concurrency == 8
     assert settings.thinker_max_waiters == 64
     assert settings.tts_drain_timeout_seconds == 120.0
-
-
+    assert settings.slow_stage_warning_seconds == 2.0
 
 @pytest.mark.parametrize(
     "field",
@@ -48,6 +47,7 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
         "thinker_stream_timeout_seconds",
         "thinker_reply_total_timeout_seconds",
         "tts_drain_timeout_seconds",
+        "slow_stage_warning_seconds",
     ],
 )
 def test_settings_rejects_nonpositive_runtime_limits(field: str) -> None:

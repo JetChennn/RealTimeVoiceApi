@@ -192,6 +192,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_SESSION_AUDIO_QUEUE_MAX_SECONDS` | `3` | 同左 | 客户端音频积压上限（触发背压） |
 | `RTVA_DOWNSTREAM_PROBE_INTERVAL_SECONDS` | `10` | 同左 | 下游健康探测周期 |
 | `RTVA_DOWNSTREAM_PROBE_TIMEOUT_SECONDS` | `2` | 同左 | 下游健康探测超时 |
+| `RTVA_SLOW_STAGE_WARNING_SECONDS` | `2` | 同左 | ASR、RAG、Thinker 首段文本、TTS 首块及相邻音频块间隔的慢请求告警阈值 |
 | `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 同左 | 非空时直接作为 TTS `prompt`；为空时依次使用 Thinker `done.output.tone` 和默认值“平和” |
 
 语义结束判断的配置如下。三个静音窗口必须满足 `候选 <= 最短 <= 最长`；这些时间由客户端持续上传的音频帧推进，停止发帧不算静音。模型输入为当前用户输入已经合并的候选 ASR 文本，并附带会话最近三个轮次的用户文本和已完成助手回复。用户恢复说话时，旧语义结果失效；新候选识别完成后再基于合并文本判断。
@@ -412,6 +413,18 @@ uv run python scripts/load_test.py --url ws://127.0.0.1:8000/v1/realtime \
 
 `/health` 返回 HTTP 200 不等于就绪，应读取 `ready`。启动初期的 `unknown`、容量已满或本进程快照异常也会导致 `degraded`，需结合各字段定位。
 
+### 结构化日志
+
+网关业务日志为单行 JSON，并由独立的 `realtime_voice` INFO handler 输出；通过 `start_services.sh` 启动时写入 `logs/gateway.log`。每条 JSON 都包含 UTC `timestamp`、`level` 和 `logger`。正常生命周期使用 INFO，超时、过载、慢客户端和慢阶段使用 WARNING，下游失败与未预期异常使用 ERROR。未预期异常只记录不含异常消息的代码位置 `stack_trace`，避免下游响应正文绕过隐私过滤。主要事件包括会话创建/关闭，以及 ASR、RAG、Thinker、TTS 的开始、首包、完成和失败；TTS 不逐块打印 INFO，仅当相邻音频块间隔达到 `RTVA_SLOW_STAGE_WARNING_SECONDS` 时记录 `tts_chunk_gap_slow`。RAG 完成阶段同时保留历史事件 `rag_retrieved` 和统一命名事件 `rag_completed`，便于现有查询平滑迁移。
+
+会话建立后的业务日志同时包含 `device_id`、兼容字段 `user_id` 和 `session_id`；轮次事件还包含 `turn_id` 与 `trace_id`，因此可以直接按设备或会话检索。握手完成前无法得知这些标识，字段值为 `unknown`。日志不会记录音频、完整 ASR 文本、完整模型回复、TTS 文本或密钥。
+
+例如 TTS 下游返回 `idle_timeout` 时会产生如下 WARNING，可由前端的 device/session/turn 信息直接关联：
+
+```json
+{"device_id":"device-1","downstream_error_code":"idle_timeout","error_code":"TTS_STREAM_FAILED","error_type":"TtsStreamError","event":"tts_failed","generation":1,"level":"WARNING","logger":"realtime_voice","reason":"idle_timeout","session_id":"session-1","stage":"TTS","timestamp":"2026-09-17T10:30:00.000Z","trace_id":"device-1/session-1/turn-3","turn_id":3,"user_id":"device-1"}
+```
+
 ### GET /metrics
 
 Prometheus 格式，包含会话数、各队列水位、限流器占用、执行器状态、事件循环延迟、各阶段（vad/asr/semantic/semantic_queue/semantic_inference/rag/thinker/tts）延迟直方图与错误计数。语义结束判断新增以下指标：
@@ -464,6 +477,7 @@ RAG 专项验证覆盖参数、降级、上下文分离、打断、关闭和会�
   ```
 - **其他环境**：生产可用 systemd 或 supervisord 守护单进程异步服务，模板见
   [deploy/realtime-voice-api.service](deploy/realtime-voice-api.service) 与 [deploy/supervisord.conf](deploy/supervisord.conf)，使用前请替换其中的用户、目录与虚拟环境路径。ASR / TTS 的多实例负载均衡由各自 Nginx 负责，网关不感知实例列表。
+- **日志轮转**：`start_services.sh` 将四个服务的标准输出追加到 `logs/*.log`。生产环境应安装 [deploy/realtime-voice-api.logrotate](deploy/realtime-voice-api.logrotate)，先将 `/path/to/RealTimeVoiceApi` 替换为实际目录，再复制到 `/etc/logrotate.d/realtime-voice-api`；模板按日或达到 100 MiB 轮转，保留 7 份并压缩，`copytruncate` 同时覆盖网关业务 JSON 和 Uvicorn 访问/错误日志。
 
 ## 11. 已知限制
 

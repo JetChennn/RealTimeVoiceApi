@@ -1,4 +1,6 @@
 import asyncio
+import json
+import logging
 import threading
 
 import httpx
@@ -400,3 +402,34 @@ def test_downstream_prober_marks_unreachable_with_error_type() -> None:
     assert states["asr"] == {"status": "unreachable", "error_type": "ConnectError"}
     assert states["thinker"] == {"status": "unreachable", "error_type": "ConnectError"}
     assert states["tts"] == {"status": "unreachable", "error_type": "ConnectError"}
+
+
+def test_downstream_prober_logs_only_health_transitions(caplog) -> None:
+    app = create_app(Settings(_env_file=None))
+    services = app.state.services
+    for name in ("asr", "thinker", "tts"):
+        getattr(services, f"{name}_client").http = _FakeDownstreamHttp(
+            _FakeDownstreamResponse(200)
+        )
+
+    application_logger = logging.getLogger("realtime_voice")
+    original_propagate = application_logger.propagate
+    application_logger.propagate = False
+    application_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger="realtime_voice"):
+            asyncio.run(_run_one_probe_round(services))
+            asyncio.run(_run_one_probe_round(services))
+    finally:
+        application_logger.removeHandler(caplog.handler)
+        application_logger.propagate = original_propagate
+
+    transitions = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "downstream_health_changed"
+    ]
+    assert len(transitions) == 3
+    assert {event["service"] for event in transitions} == {"asr", "thinker", "tts"}
+    assert all(event["previous_status"] == "unknown" for event in transitions)
+    assert all(event["status"] == "ok" for event in transitions)

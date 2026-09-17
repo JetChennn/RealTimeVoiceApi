@@ -1,4 +1,6 @@
 import asyncio
+import json
+import logging
 from collections.abc import AsyncIterator
 
 import pytest
@@ -13,7 +15,7 @@ from realtime_voice.clients.thinker import (
     ThinkerStreamError,
     ThinkerTextDelta,
 )
-from realtime_voice.clients.tts import TtsChunk, TtsRequest
+from realtime_voice.clients.tts import TtsChunk, TtsRequest, TtsStreamError
 from realtime_voice.observability.metrics import Metrics
 from realtime_voice.protocol.server_messages import TextDelta, TurnState
 from realtime_voice.session.actor import (
@@ -756,6 +758,37 @@ async def test_thinker_remote_error_code_passes_through_and_skips_interrupt_noti
     )
 
 
+async def test_remote_thinker_timeout_is_logged_as_warning(caplog) -> None:
+    class RemoteTimeoutThinker(ImmediateThinker):
+        async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
+            raise ThinkerStreamError("remote timeout", code="THINKER_TIMEOUT")
+            yield ThinkerDone(reply_text="unreachable", tone="")
+
+    logger = logging.getLogger("test.runtime.thinker.remote-timeout")
+    runtime, _ = make_runtime(thinker=RemoteTimeoutThinker(), logger=logger)
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_LLM,
+        thinker_generation=1,
+    )
+    runtime.actor.state.active_llm_turn_id = 1
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        await runtime._run_thinker(
+            StartThinker(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+        )
+
+    failure_record = next(
+        record
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "thinker_failed"
+    )
+    assert failure_record.levelno == logging.WARNING
+    assert json.loads(failure_record.message)["error_code"] == "THINKER_TIMEOUT"
+
+
 async def test_asr_failure_without_metrics_still_publishes_failure_event() -> None:
     class FailingAsr:
         async def transcribe(self, pcm16_16k: bytes) -> str:
@@ -1042,6 +1075,139 @@ async def test_tts_uses_one_flushed_resampler_for_the_turn() -> None:
     assert abs(len(output) // 2 - 3200) <= 2
     assert chunks[-1].finalize is True
     assert all(chunk.session_id == "s" for chunk in chunks)
+
+
+async def test_tts_failure_log_is_correlated_and_privacy_filtered(caplog) -> None:
+    class FailingTts:
+        async def stream(self, request: TtsRequest) -> AsyncIterator[TtsChunk]:
+            raise TtsStreamError("idle_timeout")
+            yield TtsChunk(chunk_index=0, pcm16_24k=b"\x00\x00", finalize=True)
+
+    logger = logging.getLogger("test.runtime.tts.failure")
+    runtime, _ = make_runtime(tts=FailingTts(), logger=logger)
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="private question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_TTS,
+        tts_generation=1,
+    )
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        await runtime._run_tts(
+            StartTts(
+                turn_id=1,
+                generation=1,
+                user_input="private question",
+                reply_text="private answer",
+                tone="private tone",
+            ),
+            asyncio.Event(),
+        )
+
+    payloads = [json.loads(record.message) for record in caplog.records]
+    failure = next(payload for payload in payloads if payload["event"] == "tts_failed")
+    timestamp = failure.pop("timestamp")
+    assert timestamp.endswith("Z")
+    assert failure == {
+        "device_id": "u",
+        "downstream_error_code": "idle_timeout",
+        "error_code": "TTS_STREAM_FAILED",
+        "error_type": "TtsStreamError",
+        "event": "tts_failed",
+        "generation": 1,
+        "level": "WARNING",
+        "logger": "test.runtime.tts.failure",
+        "reason": "idle_timeout",
+        "session_id": "s",
+        "stage": "TTS",
+        "trace_id": "u/s/turn-1",
+        "turn_id": 1,
+        "user_id": "u",
+    }
+    serialized = "\n".join(record.message for record in caplog.records)
+    assert "private question" not in serialized
+    assert "private answer" not in serialized
+    assert "private tone" not in serialized
+
+
+async def test_tts_arbitrary_single_token_failure_is_not_logged_as_reason(caplog) -> None:
+    class FailingTts:
+        async def stream(self, request: TtsRequest) -> AsyncIterator[TtsChunk]:
+            raise TtsStreamError("secret-token")
+            yield TtsChunk(chunk_index=0, pcm16_24k=b"\x00\x00", finalize=True)
+
+    logger = logging.getLogger("test.runtime.tts.reason")
+    runtime, _ = make_runtime(tts=FailingTts(), logger=logger)
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_TTS,
+        tts_generation=1,
+    )
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        await runtime._run_tts(
+            StartTts(1, 1, "question", "answer", "tone"), asyncio.Event()
+        )
+
+    failure = next(
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message)["event"] == "tts_failed"
+    )
+    assert "reason" not in failure
+    assert "secret-token" not in "\n".join(record.message for record in caplog.records)
+
+
+async def test_tts_slow_chunk_gap_emits_one_warning(caplog) -> None:
+    now = [0.0]
+    audio = sine_pcm16(sample_rate=24000, seconds=0.02, frequency=440)
+
+    class GapTts:
+        async def stream(self, request: TtsRequest) -> AsyncIterator[TtsChunk]:
+            now[0] = 0.5
+            yield TtsChunk(chunk_index=0, pcm16_24k=audio, finalize=False)
+            now[0] = 3.0
+            yield TtsChunk(chunk_index=1, pcm16_24k=audio, finalize=True)
+
+    logger = logging.getLogger("test.runtime.tts.gap")
+    runtime, _ = make_runtime(
+        tts=GapTts(),
+        logger=logger,
+        clock=lambda: now[0],
+        slow_stage_warning_seconds=2.0,
+    )
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_TTS,
+        tts_generation=1,
+    )
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        await runtime._run_tts(
+            StartTts(
+                turn_id=1,
+                generation=1,
+                user_input="question",
+                reply_text="answer",
+                tone="tone",
+            ),
+            asyncio.Event(),
+        )
+
+    warnings = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and json.loads(record.message)["event"] == "tts_chunk_gap_slow"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0]["gap_ms"] == 2500.0
+    assert warnings[0]["sequence"] == 1
 
 
 async def test_interrupted_tts_drains_while_new_turn_completes_independently() -> None:

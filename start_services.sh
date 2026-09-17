@@ -5,6 +5,9 @@
 #   ./start_services.sh [start|stop|status|restart]
 #
 # Optional environment overrides:
+#   ASR_DIR                        Path to the Qwen3-ASR project directory.
+#   ASR_BIN                        Path to the qwen-asr-serve executable.
+#   ASR_MODEL_PATH                 Path to the Qwen3-ASR model directory.
 #   TTS_MODEL_PATH                 Path to the PromptTTSD model directory.
 #   ASR_GPU_MEMORY_UTILIZATION     vLLM GPU-memory fraction (default: 0.80).
 #   ASR_CUDA_VISIBLE_DEVICES       GPU(s) available to ASR (default: 0).
@@ -25,7 +28,7 @@ set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly WORKSPACE_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
-readonly ASR_DIR="$WORKSPACE_DIR/asr"
+readonly ASR_DIR="${ASR_DIR:-$WORKSPACE_DIR/Qwen3-ASR}"
 readonly THINKER_DIR="$WORKSPACE_DIR/BerryThinker"
 readonly TTS_DIR="$WORKSPACE_DIR/PromptTTSD"
 readonly RUN_DIR="$SCRIPT_DIR/.run"
@@ -35,8 +38,8 @@ readonly ASR_PORT=8001
 readonly THINKER_PORT=8002
 readonly TTS_PORT=9000
 readonly INTERNAL_HOST="${INTERNAL_HOST:-127.0.0.1}"
-readonly ASR_BIN="$ASR_DIR/.venv/bin/qwen-asr-serve"
-readonly ASR_MODEL_PATH="${ASR_MODEL_PATH:-$ASR_DIR/Qwen3-ASR-0.6B}"
+readonly ASR_BIN="${ASR_BIN:-$ASR_DIR/.venv/bin/qwen-asr-serve}"
+readonly ASR_MODEL_PATH="${ASR_MODEL_PATH:-$ASR_DIR/models/Qwen3-ASR-0.6B}"
 readonly THINKER_PYTHON="${THINKER_PYTHON:-$THINKER_DIR/.venv/bin/python}"
 readonly TTS_PYTHON="${TTS_PYTHON:-$TTS_DIR/.venv/bin/python}"
 readonly GATEWAY_PYTHON="${GATEWAY_PYTHON:-$SCRIPT_DIR/.venv/bin/python}"

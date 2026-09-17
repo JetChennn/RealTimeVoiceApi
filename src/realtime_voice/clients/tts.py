@@ -20,6 +20,10 @@ TTS_IDLE_TIMEOUT = 30.0
 class TtsStreamError(RuntimeError):
     """当 PromptDialogAPI 无法提供有效 TTS 音频时抛出。"""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code or message
+
 
 @dataclass(frozen=True, slots=True)
 class TtsRequest:
@@ -104,9 +108,9 @@ class TtsClient:
             except TtsStreamError:
                 raise
             except TimeoutError as error:
-                raise TtsStreamError(timeout_code) from error
+                raise TtsStreamError(timeout_code, code=timeout_code) from error
             except (binascii.Error, httpx.HTTPError, KeyError, TypeError, ValueError) as error:
-                raise TtsStreamError("TTS stream failed") from error
+                raise TtsStreamError("TTS stream failed", code="TTS_STREAM_FAILED") from error
 
 
 async def _next_audio_chunk(
@@ -131,9 +135,11 @@ async def _next_audio_chunk(
 def _decode_audio_event(event: dict[str, object]) -> TtsChunk | None:
     """校验单个 PromptDialogAPI 事件并转换其 PCM 载荷。"""
     if "error" in event:
+        error_code = str(event["error"])
         message = event.get("message")
         raise TtsStreamError(
-            message if isinstance(message, str) and message else str(event["error"])
+            message if isinstance(message, str) and message else error_code,
+            code=error_code,
         )
 
     if event.get("event") == "prompt":
@@ -143,7 +149,9 @@ def _decode_audio_event(event: dict[str, object]) -> TtsChunk | None:
     if type(sample_rate) is not int:  # 用 type() 而非 isinstance() 以拒绝 bool（bool 是 int 子类）
         raise TypeError("TTS sample_rate must be an integer")
     if sample_rate != TTS_SAMPLE_RATE:
-        raise TtsStreamError("TTS_SAMPLE_RATE") from ValueError("TTS_SAMPLE_RATE")
+        raise TtsStreamError("TTS_SAMPLE_RATE", code="TTS_SAMPLE_RATE") from ValueError(
+            "TTS_SAMPLE_RATE"
+        )
 
     chunk_index = event["chunk_index"]
     if type(chunk_index) is not int:
@@ -160,8 +168,12 @@ def _decode_audio_event(event: dict[str, object]) -> TtsChunk | None:
         raise TypeError("TTS audio_i16le_b64 must be text")
     audio = base64.b64decode(encoded_audio, validate=True)
     if not audio:
-        raise TtsStreamError("TTS_PCM_EMPTY") from ValueError("TTS_PCM_EMPTY")
+        raise TtsStreamError("TTS_PCM_EMPTY", code="TTS_PCM_EMPTY") from ValueError(
+            "TTS_PCM_EMPTY"
+        )
     if len(audio) % 2:  # PCM16 每样本 2 字节，字节数必须为偶数
-        raise TtsStreamError("TTS_PCM_ALIGNMENT") from ValueError("TTS_PCM_ALIGNMENT")
+        raise TtsStreamError(
+            "TTS_PCM_ALIGNMENT", code="TTS_PCM_ALIGNMENT"
+        ) from ValueError("TTS_PCM_ALIGNMENT")
 
     return TtsChunk(chunk_index, audio, finalize)

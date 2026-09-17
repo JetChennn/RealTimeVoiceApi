@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import threading
 from collections.abc import Awaitable, Callable
@@ -13,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST
 
 from realtime_voice.config import Settings
+from realtime_voice.observability.logging import configure_application_logging, log_event
 from realtime_voice.observability.metrics import Metrics
 from realtime_voice.session.registry import RuntimeFactory
 from realtime_voice.transport.factory import configure_services
@@ -108,7 +110,24 @@ async def run_downstream_health_prober(
             )
         )
         for name, state in zip(DOWNSTREAM_SERVICES, states, strict=True):
+            previous = services.downstream_health.get(name, {"status": "unknown"})
             services.downstream_health[name] = state
+            if previous.get("status") != state.get("status"):
+                try:
+                    healthy = state.get("status") in {"ok", "healthy"}
+                    log_event(
+                        "downstream_health_changed",
+                        level=logging.INFO if healthy else logging.WARNING,
+                        stage="DOWNSTREAM",
+                        service=name,
+                        previous_status=previous.get("status"),
+                        status=state.get("status"),
+                        error_type=state.get("error_type"),
+                    )
+                except Exception:
+                    logging.getLogger(__name__).debug(
+                        "downstream health transition logging failed", exc_info=True
+                    )
 
 
 @dataclass
@@ -133,6 +152,7 @@ def create_app(
     event_loop_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     event_loop_interval: float = 1.0,
 ) -> FastAPI:
+    configure_application_logging()
     if event_loop_interval <= 0:
         raise ValueError("event loop sampling interval must be positive")
     resolved = settings or Settings()

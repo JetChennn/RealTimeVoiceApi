@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     # 下游 /health 后台探测：周期刷新缓存，避免 /health 路由产生网络等待
     downstream_probe_interval_seconds: float = Field(default=10.0, gt=0)
     downstream_probe_timeout_seconds: float = Field(default=2.0, gt=0)
+    slow_stage_warning_seconds: float = Field(default=2.0, gt=0, allow_inf_nan=False)
     # 非空时透传给 TTS，跳过其内部 qwen-flash prompt 生成（可消除 ~18s 网络延迟）
     tts_prompt_override: str = ""
 

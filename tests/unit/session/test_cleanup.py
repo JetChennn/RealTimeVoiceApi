@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from collections.abc import AsyncIterator
 
@@ -217,7 +218,11 @@ async def test_thinker_cleanup_timeout_skips_delete_and_logs_stable_code(
     assert thinker.deleted == 0
     assert registry.removed == ["s"]
     assert runtime.background_task_count == 0
-    assert [record.message for record in caplog.records] == [THINKER_CLEANUP_SKIPPED]
+    assert len(caplog.records) == 1
+    cleanup_log = json.loads(caplog.records[0].message)
+    assert cleanup_log["event"] == "thinker_cleanup_skipped"
+    assert cleanup_log["error_code"] == THINKER_CLEANUP_SKIPPED
+    assert cleanup_log["session_id"] == "s"
 
 
 @pytest.mark.parametrize("result", [DeleteResult.DELETED, DeleteResult.NOT_FOUND])

@@ -1,0 +1,10 @@
+/path/to/RealTimeVoiceApi/logs/*.log {
+    daily
+    maxsize 100M
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -138,13 +139,28 @@ async def test_sender_absorbs_closed_socket_runtime_error_during_write() -> None
     await WebSocketSender(ClosedSocket(), outbound).run()
 
 
-async def test_protocol_error_write_race_does_not_escape_runtime_exception_group() -> None:
+async def test_protocol_error_write_race_does_not_escape_runtime_exception_group(caplog) -> None:
     services = SimpleNamespace(
         settings=SimpleNamespace(handshake_timeout_seconds=1),
         registry=ProtocolFailingRegistry(),
     )
 
-    await serve_realtime(ErrorWriteRaceSocket(), services)
+    application_logger = logging.getLogger("realtime_voice")
+    application_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.WARNING, logger="realtime_voice.transport.websocket"):
+            await serve_realtime(ErrorWriteRaceSocket(), services)
+    finally:
+        application_logger.removeHandler(caplog.handler)
+
+    protocol_log = next(
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "protocol_error"
+    )
+    assert protocol_log["device_id"] == "device-1"
+    assert protocol_log["session_id"] == "session-1"
+    assert protocol_log["error_code"] == "INVALID_MESSAGE"
 
 
 def test_websocket_handshake_timeout_returns_policy_error_and_close() -> None:

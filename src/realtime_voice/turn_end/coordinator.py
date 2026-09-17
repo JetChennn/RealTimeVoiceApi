@@ -37,8 +37,20 @@ class PendingInput:
 
 
 class TurnEndCoordinator:
-    def __init__(self, session_id, settings, detector, audio, events, metrics, context):
+    def __init__(
+        self,
+        session_id,
+        settings,
+        detector,
+        audio,
+        events,
+        metrics,
+        context,
+        *,
+        user_id="unknown",
+    ):
         self.session_id = session_id
+        self.user_id = user_id
         self.settings = settings
         self.detector = detector
         self.audio = audio
@@ -104,7 +116,10 @@ class TurnEndCoordinator:
                 item.end = event.end
                 log_event(
                     "semantic_evaluated",
+                    device_id=self.user_id,
+                    user_id=self.user_id,
                     session_id=self.session_id,
+                    stage="TURN_END",
                     duration_ms=event.total_seconds * 1000,
                     status=event.status,
                     probability=event.probability,
@@ -173,7 +188,10 @@ class TurnEndCoordinator:
                 self.metrics.turn_end_commits.labels(reason).inc()
                 log_event(
                     "user_input_committed",
+                    device_id=self.user_id,
+                    user_id=self.user_id,
                     session_id=self.session_id,
+                    stage="TURN_END",
                     reason=reason,
                     segment_count=len(item.segments),
                 )

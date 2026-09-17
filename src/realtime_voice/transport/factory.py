@@ -147,5 +147,6 @@ def build_runtime(
         thinker_reply_total_timeout=settings.thinker_reply_total_timeout_seconds,
         tts_drain_timeout=settings.tts_drain_timeout_seconds,
         tts_prompt_override=settings.tts_prompt_override,
+        slow_stage_warning_seconds=settings.slow_stage_warning_seconds,
     )
     return runtime
