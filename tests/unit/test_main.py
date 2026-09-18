@@ -62,7 +62,7 @@ def test_health_reports_cached_capacity_without_downstream_waits():
     assert response.status_code == 200
     assert payload["status"] == "degraded"
     assert payload["ready"] is False
-    assert payload["capacity"] == {"max_sessions": 7, "cpu_workers": 2, "cpu_pending_jobs": 128}
+    assert payload["capacity"] == {"max_sessions": 7, "cpu_workers": 2, "cpu_pending_jobs": 256}
     assert payload["activity"]["active_sessions"] == 0
     assert payload["downstream"]["asr"] == {"status": "degraded"}
 
@@ -153,7 +153,7 @@ def test_health_aggregates_actual_runtime_queues_executor_and_process_state() ->
         "workers": 2,
         "active": 0,
         "pending": 0,
-        "pending_limit": 128,
+        "pending_limit": 256,
     }
     assert payload["process"]["status"] == "ok"
     assert payload["process"]["threads"] >= 1
