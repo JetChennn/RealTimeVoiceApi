@@ -63,7 +63,14 @@ def configure_services(services: AppServices) -> None:
     )
     services.tts_client = TtsClient(
         httpx.AsyncClient(base_url=str(settings.tts_base_url), trust_env=False),
-        BoundedAdmission("tts", 8, 64, metrics=services.metrics),
+        BoundedAdmission(
+            "tts",
+            settings.tts_concurrency,
+            settings.tts_max_waiters,
+            metrics=services.metrics,
+        ),
+        first_audio_timeout=settings.tts_first_audio_timeout_seconds,
+        idle_timeout=settings.tts_idle_timeout_seconds,
     )
     services.detector_offload = BoundedDetectorOffload(
         settings.cpu_workers, metrics=services.metrics

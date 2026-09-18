@@ -32,7 +32,7 @@ def test_normalization_preserves_latest_open_user_turn():
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"turn_end_candidate_silence_ms": 1100},
+        {"turn_end_candidate_silence_ms": 2100},
         {"turn_end_min_silence_ms": 2100},
         {"turn_end_max_silence_ms": 0},
         {"turn_end_complete_threshold": 2},
@@ -44,6 +44,12 @@ def test_normalization_preserves_latest_open_user_turn():
 def test_invalid_configuration_is_rejected(kwargs):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **kwargs)
+
+
+def test_zero_minimum_silence_is_allowed():
+    settings = Settings(_env_file=None, turn_end_min_silence_ms=0)
+
+    assert settings.turn_end_min_silence_ms == 0
 
 
 def test_unsupported_model_language_has_clear_error(tmp_path, monkeypatch):

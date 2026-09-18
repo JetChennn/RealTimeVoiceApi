@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -8,13 +10,17 @@ def test_settings_defaults():
     settings = Settings(_env_file=None)
 
     assert settings.host == "0.0.0.0"
-    assert settings.port == 8003
-    assert str(settings.asr_base_url).rstrip("/") == "http://127.0.0.1:8000"
-    assert str(settings.thinker_base_url).rstrip("/") == "http://127.0.0.1:8082"
-    assert str(settings.tts_base_url).rstrip("/") == "http://127.0.0.1:8001"
+    assert settings.port == 8000
+    assert str(settings.asr_base_url).rstrip("/") == "http://127.0.0.1:8001"
+    assert str(settings.thinker_base_url).rstrip("/") == "http://127.0.0.1:8002"
+    assert str(settings.tts_base_url).rstrip("/") == "http://127.0.0.1:9000"
+    assert str(settings.rag_base_url).rstrip("/") == "http://127.0.0.1:8003"
     assert settings.allowed_sample_rates == (16000, 24000, 48000)
-    assert settings.max_sessions == 64
-    assert settings.cpu_workers == 4
+    assert settings.max_sessions == 30
+    assert settings.cpu_workers == 8
+    assert settings.cpu_pending_jobs == 256
+    assert settings.asr_concurrency == 30
+    assert settings.asr_max_waiters == 30
 
 
 def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
@@ -29,10 +35,35 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
     assert settings.thinker_cleanup_timeout_seconds == 25.0
     assert settings.thinker_stream_timeout_seconds == 5.0
     assert settings.thinker_reply_total_timeout_seconds == 20.0
-    assert settings.thinker_concurrency == 8
+    assert settings.thinker_concurrency == 30
     assert settings.thinker_max_waiters == 64
-    assert settings.tts_drain_timeout_seconds == 120.0
+    assert settings.tts_concurrency == 30
+    assert settings.tts_max_waiters == 64
+    assert settings.tts_first_audio_timeout_seconds == 5.0
+    assert settings.tts_idle_timeout_seconds == 5.0
+    assert settings.tts_drain_timeout_seconds == 0.01
+    assert settings.turn_end_concurrency == 30
+    assert settings.turn_end_min_silence_ms == 0
+    assert settings.turn_end_inference_timeout_ms == 500
+    assert settings.turn_end_cpu_threads == 8
     assert settings.slow_stage_warning_seconds == 2.0
+
+
+def test_env_example_covers_every_runtime_setting() -> None:
+    example = Path(__file__).resolve().parents[2] / ".env.example"
+    configured = {
+        line.split("=", 1)[0]
+        for line in example.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#") and "=" in line
+    }
+    expected = {
+        f"RTVA_{name.upper()}"
+        for name in Settings.model_fields
+        if name != "turn_end_complete_threshold"
+    }
+
+    assert configured == expected
+    Settings(_env_file=example)
 
 @pytest.mark.parametrize(
     "field",
@@ -46,6 +77,8 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
         "thinker_cleanup_timeout_seconds",
         "thinker_stream_timeout_seconds",
         "thinker_reply_total_timeout_seconds",
+        "tts_first_audio_timeout_seconds",
+        "tts_idle_timeout_seconds",
         "tts_drain_timeout_seconds",
         "slow_stage_warning_seconds",
     ],

@@ -195,24 +195,24 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_SLOW_STAGE_WARNING_SECONDS` | `2` | 同左 | ASR、RAG、Thinker 首段文本、TTS 首块及相邻音频块间隔的慢请求告警阈值 |
 | `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 同左 | 非空时直接作为 TTS `prompt`；为空时依次使用 Thinker `done.output.tone` 和默认值“平和” |
 
-语义结束判断的配置如下。三个静音窗口必须满足 `候选 <= 最短 <= 最长`；这些时间由客户端持续上传的音频帧推进，停止发帧不算静音。模型输入为当前用户输入已经合并的候选 ASR 文本，并附带会话最近三个轮次的用户文本和已完成助手回复。用户恢复说话时，旧语义结果失效；新候选识别完成后再基于合并文本判断。
+语义结束判断的配置如下。候选静音和最短静音都不能超过最长静音；这些时间由客户端持续上传的音频帧推进，停止发帧不算静音。模型输入为当前用户输入已经合并的候选 ASR 文本，并附带会话最近三个轮次的用户文本和已完成助手回复。用户恢复说话时，旧语义结果失效；新候选识别完成后再基于合并文本判断。
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
 | `RTVA_TURN_END_SEMANTIC_ENABLED` | `true` | 启用本地语义结束判断；关闭后恢复 VAD 直接切句 |
 | `RTVA_TURN_END_CANDIDATE_SILENCE_MS` | `500` | 静音达到该时间后切出候选片段并调用一次 ASR |
-| `RTVA_TURN_END_MIN_SILENCE_MS` | `1000` | 即使模型判断完整，也要达到该静音时间才提交整段输入 |
+| `RTVA_TURN_END_MIN_SILENCE_MS` | `0` | 模型判断完整后立即提交整段输入 |
 | `RTVA_TURN_END_MAX_SILENCE_MS` | `2000` | 最长等待；模型判断等待、失败或超时时仍会提交 |
-| `RTVA_TURN_END_INFERENCE_TIMEOUT_MS` | `300` | 单次语义任务的排队加推理总预算；超时后走最长静音兜底 |
+| `RTVA_TURN_END_INFERENCE_TIMEOUT_MS` | `500` | 单次语义任务的排队加推理总预算；超时后走最长静音兜底 |
 | `RTVA_TURN_END_MODEL_PATH` | `models/turn-end-livekit` | 下载脚本生成的本地模型目录 |
 | `RTVA_TURN_END_LANGUAGE` | `zh` | 模型语言及其默认判断阈值 |
 | `RTVA_TURN_END_COMPLETE_THRESHOLD` | 未设置 | 完整概率阈值；未设置时使用模型内语言阈值（中文为 `0.0066`） |
-| `RTVA_TURN_END_CONCURRENCY` | `4` | 可同时执行的语义推理数；所有工作线程共享同一个 ONNX 模型实例 |
+| `RTVA_TURN_END_CONCURRENCY` | `30` | 可同时执行的语义推理数；所有工作线程共享同一个 ONNX 模型实例 |
 | `RTVA_TURN_END_MAX_PENDING_JOBS` | `32` | 所有运行槽位之外允许排队的任务数；超限时走最长静音兜底 |
 | `RTVA_TURN_END_MAX_UTTERANCE_SECONDS` | `30` | 单次输入的强制提交时长上限 |
-| `RTVA_TURN_END_CPU_THREADS` | `2` | ONNX Runtime 单次推理使用的 CPU 线程数 |
+| `RTVA_TURN_END_CPU_THREADS` | `8` | ONNX Runtime 单次推理的算子内部 CPU 并行度 |
 
-一次判断的 300ms 超时包含排队和实际推理。最多可同时存在 `RTVA_TURN_END_CONCURRENCY + RTVA_TURN_END_MAX_PENDING_JOBS` 个运行或等待任务；默认即 4 个运行任务和 32 个等待任务。超时、过载或推理异常不会向客户端发送语义错误，也不会提前提交，而是继续接收音频并在最长静音处兜底。模型文件缺失、版本不匹配或校验失败属于启动错误，启用该功能时网关不会带病启动。
+一次判断的 500ms 超时包含排队和实际推理。最多可同时存在 `RTVA_TURN_END_CONCURRENCY + RTVA_TURN_END_MAX_PENDING_JOBS` 个运行或等待任务；默认即 30 个运行任务和 32 个等待任务。超时、过载或推理异常不会向客户端发送语义错误，也不会提前提交，而是继续接收音频并在最长静音处兜底。模型文件缺失、版本不匹配或校验失败属于启动错误，启用该功能时网关不会带病启动。
 
 队列与清理配置的代码默认值如下，启动脚本不单独覆盖这些值：
 

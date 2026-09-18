@@ -72,7 +72,7 @@ class Harness:
 
 
 async def test_resumption_combines_once_and_does_not_commit_before_minimum():
-    h = Harness(end=True)
+    h = Harness(end=True, turn_end_min_silence_ms=1000)
     h.feed(True, 10)
     h.feed(False, 16)
     h.asr("真不知道。")
@@ -93,6 +93,20 @@ async def test_resumption_combines_once_and_does_not_commit_before_minimum():
     with wave.open(io.BytesIO(result.audio_wav)) as w:
         assert w.getnframes() == 52 * 512
     assert h.detector.calls == ["真不知道。", result.text]
+    await h.coordinator.aclose()
+
+
+async def test_semantic_end_commits_immediately_when_minimum_is_zero():
+    h = Harness(end=True, turn_end_min_silence_ms=0)
+    h.feed(True, 10)
+    h.feed(False, 16)
+    h.asr("这句话已经完整。")
+
+    await h.predictions()
+
+    assert len(h.outputs) == 1
+    assert h.outputs[0].text == "这句话已经完整。"
+    assert h.outputs[0].reason == "semantic_end"
     await h.coordinator.aclose()
 
 

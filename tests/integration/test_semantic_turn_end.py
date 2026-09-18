@@ -32,7 +32,13 @@ def test_real_transport_asr_accumulation_emits_one_turn_and_releases_session(mon
     fake_model = EndModel()
     fake_model.threshold = 0.5 if end else 1
     monkeypatch.setattr(model, "LocalModel", lambda *args: fake_model)
-    settings = Settings(_env_file=None, turn_end_semantic_enabled=True)
+    # Keep this test focused on resumed-speech accumulation. Immediate semantic
+    # commit with the zero default is covered by the coordinator unit test.
+    settings = Settings(
+        _env_file=None,
+        turn_end_semantic_enabled=True,
+        turn_end_min_silence_ms=1000,
+    )
     app = create_app(settings)
     harness = FakeServiceHarness(["真不知道。", "事先一点预兆都没有。"])
     services = app.state.services
@@ -44,7 +50,7 @@ def test_real_transport_asr_accumulation_emits_one_turn_and_releases_session(mon
         assert health["semantic"] == {
             "enabled": True,
             "ready": True,
-            "concurrency": 4,
+            "concurrency": 30,
             "max_pending_jobs": 32,
             "pending_jobs": 0,
         }
