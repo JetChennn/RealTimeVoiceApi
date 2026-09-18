@@ -37,6 +37,11 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
     assert settings.thinker_reply_total_timeout_seconds == 20.0
     assert settings.thinker_concurrency == 30
     assert settings.thinker_max_waiters == 64
+    assert settings.thinker_fallback_enabled is True
+    assert settings.thinker_fallback_text_1.startswith("抱歉")
+    assert settings.thinker_fallback_text_2.startswith("不好意思")
+    assert settings.thinker_fallback_text_3.startswith("抱歉")
+    assert settings.thinker_fallback_tone == "平和、自然、略带歉意"
     assert settings.tts_concurrency == 30
     assert settings.tts_max_waiters == 64
     assert settings.tts_first_audio_timeout_seconds == 5.0
@@ -64,6 +69,17 @@ def test_env_example_covers_every_runtime_setting() -> None:
 
     assert configured == expected
     Settings(_env_file=example)
+
+
+def test_thinker_fallback_texts_must_be_non_empty_and_distinct() -> None:
+    with pytest.raises(ValidationError, match="must not be empty"):
+        Settings(_env_file=None, thinker_fallback_text_1="  ")
+    with pytest.raises(ValidationError, match="must be distinct"):
+        Settings(
+            _env_file=None,
+            thinker_fallback_text_2="同一句",
+            thinker_fallback_text_3="同一句",
+        )
 
 @pytest.mark.parametrize(
     "field",

@@ -1,5 +1,10 @@
 from realtime_voice.audio.vad import SpeechSegment
-from realtime_voice.session.actor import SendOutbound, SessionActor, SessionEffect
+from realtime_voice.session.actor import (
+    SendOutbound,
+    SessionActor,
+    SessionEffect,
+    ThinkerFallbackPolicy,
+)
 from realtime_voice.session.events import AsrSucceeded, SpeechSegmentReady, ThinkerCompleted
 from realtime_voice.session.state import SessionState
 from tests.helpers import valid_wav
@@ -26,8 +31,23 @@ def recognize(actor: SessionActor, segment_id: int, text: str):
     )
 
 
-def actor_for_test() -> SessionActor:
-    return SessionActor(SessionState(user_id="u", session_id="s", sample_rate=16000))
+FALLBACK_TEXTS = ("保底一", "保底二", "保底三")
+
+
+def actor_for_test(
+    *,
+    fallback_enabled: bool = True,
+    fallback_selector=lambda texts: texts[0],
+) -> SessionActor:
+    return SessionActor(
+        SessionState(user_id="u", session_id="s", sample_rate=16000),
+        thinker_fallback=ThinkerFallbackPolicy(
+            enabled=fallback_enabled,
+            texts=FALLBACK_TEXTS,
+            tone="平和",
+        ),
+        fallback_selector=fallback_selector,
+    )
 
 
 def actor_with_streaming_turn(segment_id: int = 1) -> SessionActor:

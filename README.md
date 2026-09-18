@@ -176,18 +176,21 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 
 | 变量 | 代码默认 | 脚本部署值 | 说明 |
 |------|----------|------------|------|
-| `RTVA_HOST` / `RTVA_PORT` | `0.0.0.0` / `8003` | `0.0.0.0` / `8000` | 监听地址与端口 |
-| `RTVA_ASR_BASE_URL` | `http://127.0.0.1:8000` | `http://127.0.0.1:8001` | ASR 服务地址 |
-| `RTVA_THINKER_BASE_URL` | `http://127.0.0.1:8082` | `http://127.0.0.1:8002` | Thinker 服务地址 |
-| `RTVA_TTS_BASE_URL` | `http://127.0.0.1:8001` | `http://127.0.0.1:9000` | TTS 服务地址 |
+| `RTVA_HOST` / `RTVA_PORT` | `0.0.0.0` / `8000` | 同左 | 监听地址与端口 |
+| `RTVA_ASR_BASE_URL` | `http://127.0.0.1:8001` | 同左 | ASR 服务地址 |
+| `RTVA_THINKER_BASE_URL` | `http://127.0.0.1:8002` | 同左 | Thinker 服务地址 |
+| `RTVA_TTS_BASE_URL` | `http://127.0.0.1:9000` | 同左 | TTS 服务地址 |
 | `RTVA_ALLOWED_SAMPLE_RATES` | `[16000,24000,48000]` | 同左 | 保留设置；当前协议模型固定接受这三种采样率，不由此项动态扩展或收窄 |
-| `RTVA_MAX_SESSIONS` | `64` | `30` | 最大并发会话数 |
-| `RTVA_CPU_WORKERS` | `4` | `8` | VAD 等 CPU 任务线程池大小 |
-| `RTVA_CPU_PENDING_JOBS` | `128` | `256` | CPU 线程池待处理任务上限 |
-| `RTVA_ASR_CONCURRENCY` / `RTVA_ASR_MAX_WAITERS` | `8` / `64` | `30` / `30` | 脚本分别取 `ASR_MAX_NUM_SEQS` / `GATEWAY_MAX_SESSIONS` |
-| `RTVA_THINKER_STREAM_TIMEOUT_SECONDS` | `5` | 同左 | Thinker 回复首字超时（首包/首事件预算）：首个事件未在该时限内到达即取消本轮并下发 `ERROR(stage="LLM", code="THINKER_TIMEOUT", recoverable=true)` |
-| `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS` | `20` | 同左 | Thinker 回复总时长上限：首字已到但整轮超过该时限未完成时取消本轮并下发 `ERROR(stage="LLM", code="THINKER_REPLY_TIMEOUT", recoverable=true)` |
-| `RTVA_THINKER_CONCURRENCY` / `RTVA_THINKER_MAX_WAITERS` | `8` / `64` | 同左 | Thinker 回复流的并发上限与等待队列上限 |
+| `RTVA_MAX_SESSIONS` | `30` | 同左 | 最大并发会话数 |
+| `RTVA_CPU_WORKERS` | `8` | 同左 | VAD 等 CPU 任务线程池大小 |
+| `RTVA_CPU_PENDING_JOBS` | `256` | 同左 | CPU 线程池待处理任务上限 |
+| `RTVA_ASR_CONCURRENCY` / `RTVA_ASR_MAX_WAITERS` | `30` / `30` | 同左 | ASR 请求的并发上限与等待队列上限 |
+| `RTVA_THINKER_STREAM_TIMEOUT_SECONDS` | `5` | 同左 | Thinker 回复首字超时；超时后触发网关保底回复 |
+| `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS` | `20` | 同左 | Thinker 回复总时长上限；超时后触发网关保底回复 |
+| `RTVA_THINKER_CONCURRENCY` / `RTVA_THINKER_MAX_WAITERS` | `30` / `64` | 同左 | Thinker 回复流的并发上限与等待队列上限 |
+| `RTVA_THINKER_FALLBACK_ENABLED` | `true` | 同左 | Thinker 超时、连接失败、返回异常或回复为空时启用网关保底回复 |
+| `RTVA_THINKER_FALLBACK_TEXT_1..3` | 三条固定中文文案 | 同左 | 每个失败轮次随机选择一次，客户端和 TTS 使用同一条 |
+| `RTVA_THINKER_FALLBACK_TONE` | `平和、自然、略带歉意` | 同左 | 保底文本提交给 TTS 时使用的语气 |
 | `RTVA_HANDSHAKE_TIMEOUT_SECONDS` | `5` | 同左 | 建连首帧超时 |
 | `RTVA_SESSION_AUDIO_QUEUE_MAX_SECONDS` | `3` | 同左 | 客户端音频积压上限（触发背压） |
 | `RTVA_DOWNSTREAM_PROBE_INTERVAL_SECONDS` | `10` | 同左 | 下游健康探测周期 |
@@ -224,7 +227,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_SESSION_OUTBOUND_QUEUE_SIZE` | `256` | 下行消息队列条数 |
 | `RTVA_SESSION_OUTBOUND_QUEUE_MAX_BYTES` | `8388608` | 下行队列字节预算 |
 | `RTVA_THINKER_CLEANUP_TIMEOUT_SECONDS` | `25` | 关闭会话时等待进行中 Thinker 轮次收尾的上限（总超时 20s 后轮次最长约 20s，留余量） |
-| `RTVA_TTS_DRAIN_TIMEOUT_SECONDS` | `120` | 关闭会话时等待 TTS 排空的上限 |
+| `RTVA_TTS_DRAIN_TIMEOUT_SECONDS` | `0.01` | TTS 被打断后允许排空并丢弃后续音频的宽限期 |
 
 ### RAG 配置与调用约定
 
@@ -232,7 +235,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 
 | 变量 | 默认值 | 约束与含义 |
 |---|---|---|
-| `RTVA_RAG_BASE_URL` | `http://127.0.0.1:8004` | KBService HTTP 地址 |
+| `RTVA_RAG_BASE_URL` | `http://127.0.0.1:8003` | KBService HTTP 地址 |
 | `RTVA_RAG_TIMEOUT_SECONDS` | `2` | 正有限数，包含 RAG 准入排队与 HTTP 请求的总预算（秒） |
 | `RTVA_RAG_CONCURRENCY` | `8` | 同时检索的请求数，至少 1 |
 | `RTVA_RAG_MAX_WAITERS` | `64` | 等待检索名额的请求数上限，至少 0 |
@@ -258,9 +261,11 @@ RAG 失败不产生客户端 `ERROR` 或新消息类型；降级及取消通过�
 ### Thinker 与 TTS 调用约定
 
 - 网关调用 Thinker 纯文本接口 `POST /api/v1/reply`，以 JSON 传入 ASR 文本和唯一 `req_id`，并使用 `stream=true` 消费 NDJSON；VAD 音频不会转发给 Thinker。
-- Thinker 回复流受两段式超时保护：`RTVA_THINKER_STREAM_TIMEOUT_SECONDS`（默认 5s）为首字超时——首个事件（`text_delta` 或其他）未在该时限内到达即取消本轮，向客户端下发 `ERROR(stage="LLM", code="THINKER_TIMEOUT", recoverable=true)`（“Thinker 未在 5 秒内开始返回回复，本轮已取消，请继续对话”）；首字已到后解除首字计时，改由 `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS`（默认 20s）约束整轮总时长——超时取消本轮并下发 `ERROR(stage="LLM", code="THINKER_REPLY_TIMEOUT", recoverable=true)`（“Thinker 回复超过 20 秒未完成，本轮已取消，请继续对话”）。两种超时均以 `RESPONSE_END(status="FAILED")` 收尾；随后以 fire-and-forget 方式调用 Thinker `POST /api/v1/interrupt` 通知其停止生成，不等待该通知的结果。会话与连接保持可用，下一轮可正常重试。
-- Thinker 调用使用独立并发准入：`RTVA_THINKER_CONCURRENCY`（默认 8）限制同时进行的回复流，`RTVA_THINKER_MAX_WAITERS`（默认 64）为等待名额上限；interrupt / delete_session 等辅助 HTTP 调用超时均为 5s，HTTP 层异常消息会附带原因类型（如 `Thinker reply stream failed (ReadTimeout)`）。
-- BerryThinker 在回复流中产出 `error` 事件时，远端错误码（如 `THINKER_SESSION_BUSY`、`THINKER_TIMEOUT`）会原样透传给客户端（`ERROR.stage="LLM"`、metrics 按该码计数）；此类错误已在远端收尾，网关不会再调用 interrupt。
+- Thinker 回复流受两段式超时保护：首事件超过 `RTVA_THINKER_STREAM_TIMEOUT_SECONDS`（默认 5s）或整轮超过 `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS`（默认 20s）时取消本轮，并以 fire-and-forget 方式调用 Thinker interrupt。连接失败、远端错误、未知异常和空回复使用同一保底路径。
+- 默认开启 `RTVA_THINKER_FALLBACK_ENABLED`：网关从三条固定文案中随机选择一条，通过 `TEXT_END` 落定客户端展示，并把同一文本交给 TTS；TTS 成功后本轮以 `RESPONSE_END/COMPLETED` 收尾，不向客户端发送 LLM `ERROR`。原始失败码仍写入日志和 Prometheus 指标。关闭该开关后恢复 `ERROR(LLM) + RESPONSE_END/FAILED`。
+- 已被新输入打断的 Thinker 轮次仍返回带 `interrupt=true` 的保底 `TEXT_END`，但不启动 TTS，并以 `RESPONSE_END/INTERRUPTED` 收尾；保底 TTS 已启动后发生打断时，沿用现有机制丢弃后续音频。
+- Thinker 调用使用独立并发准入：`RTVA_THINKER_CONCURRENCY`（默认 30）限制同时进行的回复流，`RTVA_THINKER_MAX_WAITERS`（默认 64）为等待名额上限；interrupt / delete_session 等辅助 HTTP 调用超时均为 5s。
+- BerryThinker 在回复流中产出 `error` 事件时，远端错误码（如 `THINKER_SESSION_BUSY`、`THINKER_TIMEOUT`）保留在网关日志和 metrics 中；远端已经收尾时，网关不会重复调用 interrupt。
 - Thinker 的 `text_delta` 会立即转成 WebSocket `TEXT_DELTA`；`done.output.reply_text` 作为完整回复，`done.output.tone` 作为候选 TTS prompt。
 - Thinker 未返回 `tone` 时网关使用“平和”，也可用 `RTVA_TTS_PROMPT_OVERRIDE` 全局覆盖。
 - 网关调用 TTS `POST /v1/dialogue-tts/stream` 时发送 `model_reply`、非空 `prompt`、`trace_id` 和 `include_prompt_event=false`；TTS 不再负责调用外部模型生成 prompt。
@@ -296,7 +301,7 @@ RAG 失败不产生客户端 `ERROR` 或新消息类型；降级及取消通过�
 ### 音频、输出与轮次
 
 - 收到 `SESSION_CREATED` 后，按真实时间发送 `AUDIO_CHUNK`：Base64 编码的裸 PCM16 小端单声道采样，不含 WAV 文件头。采样率为 16000、24000 或 48000Hz，与创建时一致；单块不超过 500ms，上行 `sequence` 从 0 开始跨轮累计。
-- VAD 默认在连续静音 500ms 时生成候选片段，每个候选只调用一次 ASR；候选结果保留在服务端。最早在静音 1000ms 且语义完整时提交，静音 2000ms 或输入达到 30 秒时强制提交。中途继续说话会把后续候选结果合并进同一输入，不创建新轮次，也不触发打断。提交时只下发一条合并后的 `ASR_RESULT`。文件联调默认发送 2200ms 尾静音。整段均为空转写时不创建轮次，也不返回 `ASR_RESULT` 或 `RESPONSE_END`。
+- VAD 默认在连续静音 500ms 时生成候选片段，每个候选只调用一次 ASR；候选结果保留在服务端。语义判断完整后立即提交，静音 2000ms 或输入达到 30 秒时强制提交。中途继续说话会把后续候选结果合并进同一输入，不创建新轮次，也不触发打断。提交时只下发一条合并后的 `ASR_RESULT`。文件联调默认发送 2200ms 尾静音。整段均为空转写时不创建轮次，也不返回 `ASR_RESULT` 或 `RESPONSE_END`。
 - 正常轮次依次返回 `ASR_RESULT`、零到多条 `TEXT_DELTA`、`TEXT_END`、`AUDIO_DELTA`、`RESPONSE_END`。开启 RAG 后，检索位于 `ASR_RESULT` 与回复生成之间，没有单独的检索事件或知识全文下发。
 - 每轮用 `turn_id` 区分，音频序号每轮从 0 开始。`turn_id=0` 用于创建会话和无轮次错误；ASR 失败没有 `RESPONSE_END`，LLM/TTS 失败则终结对应轮次。
 - 收发及播放需要并行。`TEXT_END` 只表示文本完成；`RESPONSE_END` 表示该轮服务端输出结束，不表示本地播放已完成。
@@ -486,6 +491,6 @@ RAG 专项验证覆盖参数、降级、上下文分离、打断、关闭和会�
 - 整段用户输入的候选 ASR 结果均为空时会被静默丢弃，不下发任何消息（V1 无通知机制）。
 - RAG 配置不能在会话中修改；没有自动选场景、问题改写、重试、预热或客户端检索状态事件。
 - KBService 首次加载模型或场景索引可能超过检索预算，网关会降级；启用 RAG 不保证每轮都有知识，也不强制回答仅来自知识库。
-- Thinker 回复首字超过 5 秒（`RTVA_THINKER_STREAM_TIMEOUT_SECONDS`）未到达会被取消并向客户端报 `THINKER_TIMEOUT`；首字已到但整轮超过 20 秒（`RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS`）未完成会报 `THINKER_REPLY_TIMEOUT`（两段式超时均可通过环境变量调整：首字超时体现响应灵敏度，总时长超时兜底异常长回复）。
+- Thinker 回复首字或总时长超时、连接失败、返回异常或回复为空时，默认使用三选一固定保底回复；客户端不直接收到 LLM 错误，真实失败原因需从网关日志和指标查看。
 
 旧版基础语音链路时序见 [docs/realtime-voice-sequence-diagram.md](docs/realtime-voice-sequence-diagram.md)；该图尚未包含当前语义结束判断和可选 RAG 分支，当前输入提交、检索与打断行为以本文和客户端接入文档为准。

@@ -59,6 +59,12 @@ class Metrics:
             "Thinker first token to reply done",
             registry=r,
         )
+        self.thinker_fallbacks = Counter(
+            "realtime_voice_thinker_fallbacks",
+            "Thinker failures converted to gateway fallback replies",
+            ["code", "tts"],
+            registry=r,
+        )
         self.interruptions = Counter(
             "realtime_voice_turn_interruptions", "Interrupted turns", registry=r
         )
@@ -134,6 +140,10 @@ class Metrics:
 
     def observe_thinker_generate(self, seconds: float) -> None:
         self._safe(self.thinker_generate.observe, seconds)
+
+    def record_thinker_fallback(self, code: str, *, tts_requested: bool) -> None:
+        tts = "requested" if tts_requested else "skipped_interrupted"
+        self._safe(self.thinker_fallbacks.labels(code, tts).inc)
 
     def record_interruption(self) -> None:
         self._safe(self.interruptions.inc)

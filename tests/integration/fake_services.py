@@ -38,9 +38,16 @@ class FakeAsr:
 
 
 class FakeThinker:
-    def __init__(self, *, block_first: bool = False, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        block_first: bool = False,
+        fail: bool = False,
+        fail_after_first_release: bool = False,
+    ) -> None:
         self.block_first = block_first
         self.fail = fail
+        self.fail_after_first_release = fail_after_first_release
         self.calls: list[str] = []
         self.first_delta = threading.Event()
         self.release_first = threading.Event()
@@ -57,6 +64,8 @@ class FakeThinker:
             released = await asyncio.to_thread(self.release_first.wait, 2)
             if not released:
                 raise TimeoutError("fake Thinker release timed out")
+            if self.fail_after_first_release:
+                raise RuntimeError("fake Thinker failure after interruption")
             yield ThinkerTextDelta(delta="late")
         else:
             yield ThinkerTextDelta(delta=f"reply:{request.text}")
@@ -84,8 +93,10 @@ class FakeTts:
         self.first_drained = threading.Event()
         self.second_started = threading.Event()
         self.audio = b"\x00\x00" * 4800
+        self.requests = []
 
     async def stream(self, request):
+        self.requests.append(request)
         turn = request.trace_id.rsplit("-", 1)[-1]
         self.calls.append(f"start:{turn}")
         if self.fail:
@@ -131,10 +142,15 @@ class FakeServiceHarness:
         *,
         block_first_thinker: bool = False,
         block_first_tts: bool = False,
+        fail_after_first_thinker_release: bool = False,
         fail_stage: str | None = None,
     ) -> None:
         self.asr = FakeAsr(texts, fail=fail_stage == "asr")
-        self.thinker = FakeThinker(block_first=block_first_thinker, fail=fail_stage == "thinker")
+        self.thinker = FakeThinker(
+            block_first=block_first_thinker,
+            fail=fail_stage == "thinker",
+            fail_after_first_release=fail_after_first_thinker_release,
+        )
         self.tts = FakeTts(block_first=block_first_tts, fail=fail_stage == "tts")
         self.runtime: SessionRuntime | None = None
 
@@ -162,6 +178,9 @@ class FakeServiceHarness:
             audio_queue=audio,
             outbound_queue=outbound,
             thinker_cleanup_timeout=2,
+            thinker_fallback_enabled=True,
+            thinker_fallback_texts=("保底一", "保底二", "保底三"),
+            thinker_fallback_tone="平和",
             tts_drain_timeout=2,
         )
         self.runtime = runtime

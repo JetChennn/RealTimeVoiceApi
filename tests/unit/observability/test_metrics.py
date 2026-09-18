@@ -2,7 +2,11 @@ from prometheus_client import CollectorRegistry
 
 from realtime_voice.observability.metrics import Metrics
 from realtime_voice.protocol.server_messages import TurnState
-from realtime_voice.session.actor import RecordDiscardedAudio, SendOutbound
+from realtime_voice.session.actor import (
+    RecordDiscardedAudio,
+    RecordThinkerFallback,
+    SendOutbound,
+)
 from tests.unit.session.test_runtime import make_runtime
 
 
@@ -59,3 +63,22 @@ async def test_runtime_records_interruption_and_discard_at_effect_boundary():
     rendered = metrics.render().decode()
     assert "realtime_voice_discarded_tts_bytes_total 12.0" in rendered
     assert "realtime_voice_turn_interruptions_total 1.0" in rendered
+
+
+async def test_runtime_records_thinker_fallback_without_logging_the_text():
+    metrics = Metrics(registry=CollectorRegistry())
+    runtime, _ = make_runtime(metrics=metrics)
+
+    await runtime.execute_effect(
+        RecordThinkerFallback(
+            turn_id=1,
+            code="THINKER_TIMEOUT",
+            tts_requested=False,
+        )
+    )
+
+    assert (
+        'realtime_voice_thinker_fallbacks_total{code="THINKER_TIMEOUT",'
+        'tts="skipped_interrupted"} 1.0'
+        in metrics.render().decode()
+    )

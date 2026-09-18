@@ -1,4 +1,4 @@
-from pydantic import AnyHttpUrl, Field, model_validator
+from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     )
     thinker_concurrency: int = Field(default=30, ge=1)
     thinker_max_waiters: int = Field(default=64, ge=0)
+    thinker_fallback_enabled: bool = True
+    thinker_fallback_text_1: str = "抱歉，我刚刚没反应过来，可以再说一遍吗？"
+    thinker_fallback_text_2: str = "不好意思，我刚才走神了，麻烦你再说一次吧。"
+    thinker_fallback_text_3: str = "抱歉，刚才没有回答上来，请再问我一次好吗？"
+    thinker_fallback_tone: str = "平和、自然、略带歉意"
     tts_concurrency: int = Field(default=30, ge=1)
     tts_max_waiters: int = Field(default=64, ge=0)
     tts_first_audio_timeout_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
@@ -64,8 +69,28 @@ class Settings(BaseSettings):
     turn_end_max_utterance_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     turn_end_cpu_threads: int = Field(default=8, ge=1, le=16)
 
+    @field_validator(
+        "thinker_fallback_text_1",
+        "thinker_fallback_text_2",
+        "thinker_fallback_text_3",
+        "thinker_fallback_tone",
+    )
+    @classmethod
+    def validate_thinker_fallback_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("thinker fallback text and tone must not be empty")
+        return value
+
     @model_validator(mode="after")
     def validate_turn_end(self):
+        fallback_texts = {
+            self.thinker_fallback_text_1,
+            self.thinker_fallback_text_2,
+            self.thinker_fallback_text_3,
+        }
+        if len(fallback_texts) != 3:
+            raise ValueError("the three thinker fallback texts must be distinct")
         if self.turn_end_candidate_silence_ms > self.turn_end_max_silence_ms:
             raise ValueError("turn-end candidate silence must not exceed max silence")
         if self.turn_end_min_silence_ms > self.turn_end_max_silence_ms:

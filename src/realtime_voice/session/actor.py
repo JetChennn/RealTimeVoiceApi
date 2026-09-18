@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from dataclasses import dataclass
+from random import choice
 from typing import TYPE_CHECKING, TypeAlias
 
 if TYPE_CHECKING:
@@ -91,6 +93,24 @@ class StartTts:
 
 
 @dataclass(frozen=True, slots=True)
+class ThinkerFallbackPolicy:
+    """网关在 Thinker 失败后使用的固定回复策略。"""
+
+    enabled: bool
+    texts: tuple[str, ...]
+    tone: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecordThinkerFallback:
+    """记录一次 Thinker 保底，以及是否因打断跳过 TTS。"""
+
+    turn_id: int
+    code: str
+    tts_requested: bool
+
+
+@dataclass(frozen=True, slots=True)
 class CloseRuntime:
     """关闭会话运行时。"""
 
@@ -120,6 +140,7 @@ SessionEffect: TypeAlias = (
     | StartThinker
     | StartNextThinker
     | StartTts
+    | RecordThinkerFallback
     | CloseRuntime
     | RecordStaleEvent
     | RecordDiscardedAudio
@@ -130,8 +151,21 @@ SessionEffect: TypeAlias = (
 class SessionActor:
     """持有单个会话的状态，把事件翻译为运行时 Effect。"""
 
-    def __init__(self, state: SessionState):
+    def __init__(
+        self,
+        state: SessionState,
+        *,
+        thinker_fallback: ThinkerFallbackPolicy | None = None,
+        fallback_selector: Callable[[tuple[str, ...]], str] = choice,
+    ):
         self.state = state
+        self._thinker_fallback = thinker_fallback
+        self._fallback_selector = fallback_selector
+        if thinker_fallback is not None and thinker_fallback.enabled:
+            if not thinker_fallback.texts or any(not text.strip() for text in thinker_fallback.texts):
+                raise ValueError("enabled thinker fallback requires non-empty texts")
+            if not thinker_fallback.tone.strip():
+                raise ValueError("enabled thinker fallback requires a non-empty tone")
 
     def handle(self, event: SessionEvent) -> list[SessionEffect]:
         """把会话事件路由到对应处理方法，返回需执行的 Effect 列表。"""
@@ -360,25 +394,20 @@ class SessionActor:
         return effects
 
     def _thinker_failed(self, event: ThinkerFailed) -> list[SessionEffect]:
-        """Thinker 失败：置 FAILED、下发错误与结束；若有排队轮则接续启动。"""
+        """Thinker 失败：按配置进入保底 TTS，或沿用原失败收尾。"""
         turn = self._thinker_turn(event, event.turn_id, event.generation)
         if not isinstance(turn, TurnContext):
             return [turn]
-        self.state.active_llm_turn_id = None  # 释放活跃 LLM 槽位
-        turn.stage = TurnStage.FAILED
-        effects: list[SessionEffect] = [
-            self._error(turn.turn_id, turn.interrupted, "LLM", event.code, event.message),
-            self._response_end(turn, "FAILED"),
-        ]
-        # 队列非空则按上一轮是否被打断决定是否先打断接续
-        if self.state.llm_queue:
-            effects.append(self._start_thinker(interrupt_first=turn.interrupted))
-        return effects
+        return self._finish_thinker_failure(turn, event.code, event.message)
 
     def _finish_thinker_failure(
         self, turn: TurnContext, code: str, message: str
     ) -> list[SessionEffect]:
-        """以失败收尾 Thinker：置 FAILED、下发错误与结束，并按需接续下一轮。"""
+        """以保底或失败收尾 Thinker，并按需接续下一轮。"""
+        fallback = self._thinker_fallback
+        if fallback is not None and fallback.enabled:
+            return self._start_thinker_fallback(turn, code, fallback)
+
         self.state.active_llm_turn_id = None
         turn.stage = TurnStage.FAILED
         effects: list[SessionEffect] = [
@@ -387,6 +416,51 @@ class SessionActor:
         ]
         if self.state.llm_queue:
             effects.append(self._start_thinker(interrupt_first=turn.interrupted))
+        return effects
+
+    def _start_thinker_fallback(
+        self,
+        turn: TurnContext,
+        code: str,
+        fallback: ThinkerFallbackPolicy,
+    ) -> list[SessionEffect]:
+        """落定保底文本；被打断则只回文本，否则进入正常 TTS 流程。"""
+        turn.reply_text = self._fallback_selector(fallback.texts)
+        turn.thinker_fallback_used = True
+        turn.thinker_failure_code = code
+        self.state.active_llm_turn_id = None
+        tts_requested = not turn.interrupted
+        effects: list[SessionEffect] = [
+            SendOutbound(
+                TextEnd(
+                    type="TEXT_END",
+                    user_id=self.state.user_id,
+                    session_id=self.state.session_id,
+                    turn_id=turn.turn_id,
+                    interrupt=turn.interrupted,
+                    text=turn.reply_text,
+                )
+            ),
+            RecordThinkerFallback(turn.turn_id, code, tts_requested),
+        ]
+        if turn.interrupted:
+            turn.stage = TurnStage.INTERRUPTED
+            effects.append(self._response_end(turn, "INTERRUPTED"))
+            if self.state.llm_queue:
+                effects.append(self._start_thinker(interrupt_first=True))
+            return effects
+
+        turn.stage = TurnStage.STREAMING_TTS
+        turn.tts_generation += 1
+        effects.append(
+            StartTts(
+                turn.turn_id,
+                turn.tts_generation,
+                user_input=turn.asr_text,
+                reply_text=turn.reply_text,
+                tone=fallback.tone,
+            )
+        )
         return effects
 
     def _tts_turn(

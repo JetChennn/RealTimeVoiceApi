@@ -8,6 +8,7 @@ from realtime_voice.session.actor import (
 from realtime_voice.session.events import (
     ThinkerCompleted,
     ThinkerDeltaReceived,
+    ThinkerFailed,
     TtsChunkReceived,
 )
 from realtime_voice.session.state import TurnStage
@@ -104,7 +105,37 @@ def test_new_llm_starts_without_waiting_for_interrupted_tts_to_drain() -> None:
     assert actor.state.turns[1].stage is TurnStage.STREAMING_TTS
 
 
-def test_empty_interrupted_thinker_completion_fails_and_starts_next_fifo_turn() -> None:
+def test_started_fallback_tts_is_discarded_after_new_user_input() -> None:
+    actor = actor_with_streaming_turn()
+    fallback = actor.handle(
+        ThinkerFailed(
+            session_id="s",
+            turn_id=1,
+            generation=1,
+            code="THINKER_TIMEOUT",
+            message="timed out",
+        )
+    )
+    assert any(isinstance(effect, StartTts) for effect in fallback)
+
+    interrupted = recognize(actor, 2, "new")
+    audio = actor.handle(
+        TtsChunkReceived(
+            session_id="s",
+            turn_id=1,
+            generation=1,
+            sequence=0,
+            pcm16=bytes(2),
+            finalize=False,
+        )
+    )
+
+    assert outbound_of_type(interrupted, "TURN_STATE").turn_id == 1
+    assert not any(isinstance(effect, SendOutbound) for effect in audio)
+    assert any(isinstance(effect, RecordDiscardedAudio) for effect in audio)
+
+
+def test_empty_interrupted_thinker_completion_returns_fallback_without_tts() -> None:
     actor = actor_for_test()
     recognize(actor, 1, "one")
     recognize(actor, 2, "two")
@@ -119,13 +150,13 @@ def test_empty_interrupted_thinker_completion_fails_and_starts_next_fifo_turn() 
         )
     )
 
-    error = outbound_of_type(effects, "ERROR")
+    text_end = outbound_of_type(effects, "TEXT_END")
     ended = outbound_of_type(effects, "RESPONSE_END")
     next_start = next(effect for effect in effects if isinstance(effect, StartNextThinker))
-    assert (error.code, error.interrupt) == ("THINKER_EMPTY_REPLY", True)
-    assert (ended.status, ended.interrupt) == ("FAILED", True)
+    assert (text_end.text, text_end.interrupt) == ("保底一", True)
+    assert (ended.status, ended.interrupt) == ("INTERRUPTED", True)
     assert (next_start.turn_id, next_start.interrupt_first) == (2, True)
-    assert actor.state.turns[1].stage is TurnStage.FAILED
-    assert actor.state.turns[1].reply_text == ""
+    assert actor.state.turns[1].stage is TurnStage.INTERRUPTED
+    assert actor.state.turns[1].reply_text == "保底一"
     assert actor.state.active_llm_turn_id == 2
     assert not any(isinstance(effect, StartTts) for effect in effects)

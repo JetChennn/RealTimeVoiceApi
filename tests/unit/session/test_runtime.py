@@ -168,6 +168,11 @@ class ImmediateThinker:
         return DeleteResult.DELETED
 
 
+class EmptyReplyThinker(ImmediateThinker):
+    async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
+        yield ThinkerDone(reply_text="   ", tone="测试语气 prompt")
+
+
 class OrderedThinker(ImmediateThinker):
     def __init__(self) -> None:
         super().__init__()
@@ -712,6 +717,25 @@ async def test_normal_stream_after_first_event_ignores_first_event_deadline() ->
     # 事件间隔 0.15s 超过首字预算 0.05s：首事件到达后首字计时已解除，流不受影响
     assert [event.delta for event in deltas] == ["first", "second"]
     assert completed.reply_text == "reply"
+
+
+async def test_empty_thinker_reply_is_published_as_a_failure_event() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    runtime, _ = make_runtime(thinker=EmptyReplyThinker(), metrics=metrics)
+
+    await runtime.execute_effect(
+        StartThinker(turn_id=1, generation=1, text="question", audio_wav=valid_wav())
+    )
+
+    failure = await next_event(runtime, ThinkerFailed)
+    assert (failure.code, failure.message) == (
+        "THINKER_EMPTY_REPLY",
+        "Thinker reply text is empty",
+    )
+    assert (
+        'realtime_voice_errors_total{code="THINKER_EMPTY_REPLY",stage="thinker"} 1.0'
+        in metrics.render().decode()
+    )
 
 
 async def test_thinker_remote_error_code_passes_through_and_skips_interrupt_notify() -> None:

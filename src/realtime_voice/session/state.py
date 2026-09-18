@@ -29,6 +29,8 @@ class TurnContext:
     thinker_generation: int = 0
     tts_generation: int = 0
     reply_text: str = ""
+    thinker_fallback_used: bool = False
+    thinker_failure_code: str | None = None
     next_audio_sequence: int = 0
 
 

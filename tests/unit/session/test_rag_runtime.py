@@ -204,6 +204,13 @@ async def test_factory_copies_create_session_configuration():
         assert runtime._rag_enabled
         assert runtime._rag_client is services.rag_client
         assert runtime._rag_scenes == ("a", "b")
+        assert runtime.actor._thinker_fallback.enabled is True
+        assert runtime.actor._thinker_fallback.texts == (
+            services.settings.thinker_fallback_text_1,
+            services.settings.thinker_fallback_text_2,
+            services.settings.thinker_fallback_text_3,
+        )
+        assert runtime.actor._thinker_fallback.tone == services.settings.thinker_fallback_tone
         create.scenes.append("c")
         assert runtime._rag_scenes == ("a", "b")
     finally:

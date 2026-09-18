@@ -3,7 +3,12 @@ from copy import deepcopy
 
 import pytest
 
-from realtime_voice.session.actor import SendOutbound, StartThinker, StartTts
+from realtime_voice.session.actor import (
+    RecordThinkerFallback,
+    SendOutbound,
+    StartThinker,
+    StartTts,
+)
 from realtime_voice.session.events import (
     AsrFailed,
     ThinkerCompleted,
@@ -119,7 +124,7 @@ def test_asr_failure_emits_session_level_recoverable_error_without_turn() -> Non
     assert actor.state.turns == {}
 
 
-def test_thinker_failure_ends_turn_failed_and_allows_next_thinker() -> None:
+def test_thinker_failure_returns_fallback_text_and_starts_tts() -> None:
     actor = actor_for_test()
     recognize(actor, 1, "one")
 
@@ -133,11 +138,19 @@ def test_thinker_failure_ends_turn_failed_and_allows_next_thinker() -> None:
         )
     )
 
-    error = outbound_of_type(effects, "ERROR")
-    ended = outbound_of_type(effects, "RESPONSE_END")
-    assert (error.stage, error.interrupt) == ("LLM", False)
-    assert (ended.status, ended.interrupt) == ("FAILED", False)
-    assert actor.state.turns[1].stage is TurnStage.FAILED
+    text_end = outbound_of_type(effects, "TEXT_END")
+    start_tts = next(effect for effect in effects if isinstance(effect, StartTts))
+    recorded = next(effect for effect in effects if isinstance(effect, RecordThinkerFallback))
+    assert (text_end.text, text_end.interrupt) == ("保底一", False)
+    assert (start_tts.reply_text, start_tts.tone) == ("保底一", "平和")
+    assert (recorded.code, recorded.tts_requested) == ("THINKER_FAILED", True)
+    assert actor.state.turns[1].stage is TurnStage.STREAMING_TTS
+    assert actor.state.turns[1].thinker_fallback_used is True
+    assert actor.state.turns[1].thinker_failure_code == "THINKER_FAILED"
+    assert not any(
+        isinstance(effect, SendOutbound) and effect.message.type in {"ERROR", "RESPONSE_END"}
+        for effect in effects
+    )
 
 
 def test_tts_failure_ends_turn_failed() -> None:
@@ -172,7 +185,7 @@ def test_empty_thinker_delta_is_ignored_without_mutating_turn() -> None:
 
 
 @pytest.mark.parametrize("reply_text", ["", "   \t"])
-def test_empty_thinker_completion_fails_atomically(reply_text: str) -> None:
+def test_empty_thinker_completion_uses_fallback(reply_text: str) -> None:
     actor = actor_for_test()
     recognize(actor, 1, "question")
 
@@ -186,18 +199,56 @@ def test_empty_thinker_completion_fails_atomically(reply_text: str) -> None:
         )
     )
 
-    error = outbound_of_type(effects, "ERROR")
-    ended = outbound_of_type(effects, "RESPONSE_END")
-    assert (error.stage, error.code, error.interrupt) == (
-        "LLM",
-        "THINKER_EMPTY_REPLY",
-        False,
-    )
-    assert (ended.status, ended.interrupt) == ("FAILED", False)
+    text_end = outbound_of_type(effects, "TEXT_END")
+    start_tts = next(effect for effect in effects if isinstance(effect, StartTts))
+    assert (text_end.text, text_end.interrupt) == ("保底一", False)
+    assert start_tts.reply_text == "保底一"
     assert actor.state.active_llm_turn_id is None
-    assert actor.state.turns[1].stage is TurnStage.FAILED
-    assert actor.state.turns[1].reply_text == ""
-    assert not any(
-        isinstance(effect, SendOutbound) and effect.message.type == "TEXT_END" for effect in effects
+    assert actor.state.turns[1].stage is TurnStage.STREAMING_TTS
+    assert actor.state.turns[1].reply_text == "保底一"
+
+
+def test_disabled_thinker_fallback_preserves_failed_response() -> None:
+    actor = actor_for_test(fallback_enabled=False)
+    recognize(actor, 1, "question")
+
+    effects = actor.handle(
+        ThinkerFailed(
+            session_id="s",
+            turn_id=1,
+            generation=1,
+            code="THINKER_FAILED",
+            message="bad stream",
+        )
     )
-    assert not any(isinstance(effect, StartTts) for effect in effects)
+
+    assert outbound_of_type(effects, "ERROR").code == "THINKER_FAILED"
+    assert outbound_of_type(effects, "RESPONSE_END").status == "FAILED"
+    assert actor.state.turns[1].stage is TurnStage.FAILED
+
+
+def test_thinker_fallback_uses_the_selector_once_per_turn() -> None:
+    selections = 0
+
+    def select_last(texts: tuple[str, ...]) -> str:
+        nonlocal selections
+        selections += 1
+        return texts[-1]
+
+    actor = actor_for_test(fallback_selector=select_last)
+    recognize(actor, 1, "question")
+    actor.handle(ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="半句话"))
+
+    effects = actor.handle(
+        ThinkerFailed(
+            session_id="s",
+            turn_id=1,
+            generation=1,
+            code="THINKER_REPLY_TIMEOUT",
+            message="timed out",
+        )
+    )
+
+    assert selections == 1
+    assert outbound_of_type(effects, "TEXT_END").text == "保底三"
+    assert next(effect for effect in effects if isinstance(effect, StartTts)).reply_text == "保底三"

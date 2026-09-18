@@ -34,12 +34,14 @@ from realtime_voice.session.actor import (
     QueueAsr,
     RecordDiscardedAudio,
     RecordStaleEvent,
+    RecordThinkerFallback,
     SendOutbound,
     SessionActor,
     SessionEffect,
     StartNextThinker,
     StartThinker,
     StartTts,
+    ThinkerFallbackPolicy,
 )
 from realtime_voice.session.events import (
     AsrFailed,
@@ -257,6 +259,9 @@ class SessionRuntime:
         thinker_cleanup_timeout: float = 120.0,
         thinker_stream_timeout: float = 5.0,
         thinker_reply_total_timeout: float = 20.0,
+        thinker_fallback_enabled: bool = False,
+        thinker_fallback_texts: tuple[str, ...] = (),
+        thinker_fallback_tone: str = "",
         metrics: Metrics | None = None,
         tts_drain_timeout: float = 120.0,
         tts_prompt_override: str = "",
@@ -283,7 +288,14 @@ class SessionRuntime:
         if not isfinite(slow_stage_warning_seconds) or slow_stage_warning_seconds <= 0:
             raise ValueError("slow stage warning threshold must be positive and finite")
 
-        self.actor = SessionActor(state)
+        self.actor = SessionActor(
+            state,
+            thinker_fallback=ThinkerFallbackPolicy(
+                enabled=thinker_fallback_enabled,
+                texts=thinker_fallback_texts,
+                tone=thinker_fallback_tone,
+            ),
+        )
         self.events = event_queue or asyncio.Queue(maxsize=event_queue_size)
         audio_max_bytes = int(state.sample_rate * 2 * audio_queue_max_seconds)
         if audio_queue is not None:
@@ -528,6 +540,20 @@ class SessionRuntime:
             )
             if self._metrics is not None:
                 self._metrics.record_discarded_tts_chunk(byte_count=effect.byte_count)
+            return
+        if isinstance(effect, RecordThinkerFallback):
+            self._observe(
+                "thinker_fallback_selected",
+                stage="LLM",
+                turn_id=effect.turn_id,
+                error_code=effect.code,
+                tts_requested=effect.tts_requested,
+            )
+            if self._metrics is not None:
+                self._metrics.record_thinker_fallback(
+                    effect.code,
+                    tts_requested=effect.tts_requested,
+                )
             return
         raise TypeError(f"unsupported session effect: {type(effect).__name__}")
 
@@ -889,6 +915,30 @@ class SessionRuntime:
                                     )
                     if reply_text is None:
                         raise RuntimeError("Thinker stream ended without done")
+                    if not reply_text.strip():
+                        code = "THINKER_EMPTY_REPLY"
+                        if self._metrics is not None:
+                            self._metrics.record_error("thinker", code)
+                        self._observe(
+                            "thinker_failed",
+                            level=logging.WARNING,
+                            stage="LLM",
+                            turn_id=effect.turn_id,
+                            generation=effect.generation,
+                            trace_id=trace_id,
+                            error_code=code,
+                            error_type="EmptyReply",
+                        )
+                        await self._publish_event(
+                            ThinkerFailed(
+                                session_id=self.session_id,
+                                turn_id=effect.turn_id,
+                                generation=effect.generation,
+                                code=code,
+                                message="Thinker reply text is empty",
+                            )
+                        )
+                        return
                     completed_elapsed = self._clock() - started
                     self._observe(
                         "thinker_completed",

@@ -152,6 +152,13 @@ def build_runtime(
         thinker_cleanup_timeout=settings.thinker_cleanup_timeout_seconds,
         thinker_stream_timeout=settings.thinker_stream_timeout_seconds,
         thinker_reply_total_timeout=settings.thinker_reply_total_timeout_seconds,
+        thinker_fallback_enabled=settings.thinker_fallback_enabled,
+        thinker_fallback_texts=(
+            settings.thinker_fallback_text_1,
+            settings.thinker_fallback_text_2,
+            settings.thinker_fallback_text_3,
+        ),
+        thinker_fallback_tone=settings.thinker_fallback_tone,
         tts_drain_timeout=settings.tts_drain_timeout_seconds,
         tts_prompt_override=settings.tts_prompt_override,
         slow_stage_warning_seconds=settings.slow_stage_warning_seconds,

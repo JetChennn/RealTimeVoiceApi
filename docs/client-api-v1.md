@@ -84,11 +84,13 @@ RAG 配置在会话内固定，修改需重新建连。开启后每轮在识别�
 
 正常顺序：`ASR_RESULT → TEXT_DELTA → TEXT_END → AUDIO_DELTA → RESPONSE_END`。客户端看不到内部候选 ASR 结果，也不需要自行拼接文本。文本完成后才开始合成音频；`RESPONSE_END` 不代表客户端播放队列已经播完。纯静音或整段候选均为空转写时可能没有任何结果，客户端需自行设置等待超时。
 
+Thinker 超时、连接失败、返回异常或回复为空时，网关默认把一条固定保底文案作为普通 `TEXT_END` 返回，并继续输出对应 TTS 音频，最终仍为 `RESPONSE_END/COMPLETED`。失败前已经收到的 `TEXT_DELTA` 由该 `TEXT_END.text` 替换落定，客户端不需要识别新的消息类型或字段。
+
 ## 4. 多轮、打断与关闭
 
 继续上传音频即可开始下一轮，**不要重复创建会话或重置上行序号**。
 
-新的用户输入正式提交时会打断未完成的旧轮；短停顿后继续说话仍属于同一输入，不会触发打断。提交新输入时，服务端先发送旧轮的 `TURN_STATE/INTERRUPTED`，再发送新轮的 `ASR_RESULT`。收到打断消息后停止旧轮播放；后续 `interrupt=true` 的旧消息不能覆盖新轮内容。按 `turn_id` 处理交错消息，不要因旧轮结束而停止整个接收循环。检索阶段被打断的轮次可能直接结束，没有回复文本或音频。
+新的用户输入正式提交时会打断未完成的旧轮；短停顿后继续说话仍属于同一输入，不会触发打断。提交新输入时，服务端先发送旧轮的 `TURN_STATE/INTERRUPTED`，再发送新轮的 `ASR_RESULT`。收到打断消息后停止旧轮播放；后续 `interrupt=true` 的旧消息不能覆盖新轮内容。按 `turn_id` 处理交错消息，不要因旧轮结束而停止整个接收循环。检索阶段被打断的轮次可能直接结束，没有回复文本或音频。若被打断的 Thinker 随后失败，客户端仍会收到带 `interrupt=true` 的保底 `TEXT_END`，但服务端不会为该旧轮启动 TTS；若保底 TTS 已启动，则后续音频会被丢弃。
 
 整个对话结束后发送以下消息，或直接断开连接：
 
@@ -101,11 +103,8 @@ RAG 配置在会话内固定，修改需重新建连。开启后每轮在识别�
 ## 5. 错误处理
 
 - `recoverable=false`：通常为参数或协议错误，服务端关闭连接；根据 `code` 修正后重新建连。常见原因是字段错误、RAG 场景不合法、音频序号不连续、上传过快或接收过慢。
-- `recoverable=true`：连接可以继续使用，不代表自动重试。任一候选片段发生 `stage=ASR` 错误时，当前尚未提交的整段输入会被放弃，该错误没有对应 `ASR_RESULT` 或 `RESPONSE_END`；客户端可以继续发送下一段输入。语义判断超时、失败或过载不会下发 `ERROR`，服务端会等待最长静音兜底。`stage=LLM/TTS` 的错误会终结对应轮次。
-- `stage=LLM, code=THINKER_TIMEOUT, recoverable=true`：Thinker 未在首字预算时间（服务端默认 5 秒，可配置）内开始返回回复，本轮被取消，服务端先下发该错误（如“Thinker 未在 5 秒内开始返回回复，本轮已取消，请继续对话”），再以 `RESPONSE_END/FAILED` 收尾该轮。连接与会话保持可用，下一轮可正常重试；客户端展示提示后等待用户下一句即可，无需重连。
-- `stage=LLM, code=THINKER_REPLY_TIMEOUT, recoverable=true`：Thinker 回复已开始（首字已到），但超过总时长预算（服务端默认 20 秒，可配置）仍未完成，本轮被取消，服务端先下发该错误（如“Thinker 回复超过 20 秒未完成，本轮已取消，请继续对话”），再以 `RESPONSE_END/FAILED` 收尾该轮。与 `THINKER_TIMEOUT` 一样可继续对话：连接与会话保持可用，客户端展示提示后等待用户下一句即可，无需重连。
-- `stage=LLM, code=THINKER_SESSION_BUSY, recoverable=true`：上一轮 Thinker 回复仍在收尾，本轮未能启动；可直接继续下一轮对话，无需重连。
-- BerryThinker 在回复流中主动产出 `error` 事件时，其远端错误码会原样透传给客户端（如 `THINKER_SESSION_BUSY`、`THINKER_TIMEOUT`），`message` 为远端错误描述；客户端应按 `code` 区分提示，未知码按通用 LLM 阶段错误处理。
+- `recoverable=true`：连接可以继续使用，不代表自动重试。任一候选片段发生 `stage=ASR` 错误时，当前尚未提交的整段输入会被放弃，该错误没有对应 `ASR_RESULT` 或 `RESPONSE_END`；客户端可以继续发送下一段输入。语义判断超时、失败或过载不会下发 `ERROR`，服务端会等待最长静音兜底。TTS 错误仍会终结对应轮次。
+- 默认开启 Thinker 保底时，`THINKER_TIMEOUT`、`THINKER_REPLY_TIMEOUT`、`THINKER_SESSION_BUSY`、连接/流异常及空回复均由网关转换为普通保底文本和音频，不再向客户端发送 `stage=LLM` 的 `ERROR`。若服务端关闭保底开关，则恢复原有的 `ERROR(LLM) → RESPONSE_END/FAILED` 行为。
 - 协议错误的 `user_id`、`session_id` 可能为 `"unknown"`，不要因标识不匹配而丢弃错误。
 - WebSocket 已建立后，创建失败会先发送 `ERROR`，再发送关闭帧；客户端应优先展示 `code` 和 `message`，不要被随后通用的断线提示覆盖。关闭帧的 `reason` 也携带错误码。
 
