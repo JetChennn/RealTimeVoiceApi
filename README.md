@@ -1,6 +1,6 @@
 # RealTimeVoiceAPI
 
-基于异步 WebSocket 的实时语音网关，统一编排 **VAD → ASR → 语义结束判断 → 可选 RAG → Thinker → TTS**。客户端在创建会话时决定是否使用知识检索、指定检索场景，随后持续上传语音并接收识别文本、回复文本和音频。
+基于异步 WebSocket 的实时语音网关，统一编排 **VAD → ASR → 语义结束判断 → Thinker（可选 RAG）→ TTS**。客户端在创建会话时决定是否使用知识检索、指定检索场景；网关只把这两个参数传给 Thinker，不再直接访问 KBService 或组装知识上下文。
 
 ```mermaid
 flowchart LR
@@ -14,16 +14,15 @@ flowchart LR
     E -->|否| F{静音达到 2000ms 或输入达到 30s?}
     F -->|否，继续收音| C
     F -->|是，保底提交| S
-    S --> R{会话启用 RAG?}
-    R -->|是| K[KBService 联合检索]
-    R -->|否| T[Thinker 流式回复]
-    K -->|参考知识或失败降级| T
+    S --> T[Thinker 流式回复<br/>携带 rag.enabled + rag.scenes]
+    T --> K[Thinker 内部按需调用 KBService]
+    K --> T
     T --> D[TEXT_DELTA / TEXT_END]
     D --> U[TTS 合成并重采样]
     U --> O[AUDIO_DELTA / RESPONSE_END]
 ```
 
-ASR 使用 16kHz 音频；候选片段只识别一次，同一段用户输入的多次 ASR 文本会合并后交给本地语义模型判断。候选识别结果不会直接下发，整段输入提交时客户端只收到一条合并后的 `ASR_RESULT`。Thinker 接收合并后的识别原文和本轮可选参考知识，不接收语音。TTS 在完整回复生成后开始，24kHz 输出重采样为客户端协商的采样率。检索及生成均在后台任务中执行，音频上传与下行接收可继续进行。
+ASR 使用 16kHz 音频；候选片段只识别一次，同一段用户输入的多次 ASR 文本会合并后交给本地语义模型判断。候选识别结果不会直接下发，整段输入提交时客户端只收到一条合并后的 `ASR_RESULT`。Thinker 接收合并后的识别原文与会话级 RAG 开关/场景，不接收语音。TTS 在完整回复生成后开始，24kHz 输出重采样为客户端协商的采样率。
 
 面向调用方的独立接入文档：[实时语音 API 调用说明（V1）](docs/client-api-v1.md)，包含创建会话、RAG 参数、音频收发、打断与错误处理要点。
 
@@ -48,10 +47,10 @@ ASR 使用 16kHz 音频；候选片段只识别一次，同一段用户输入的
 - **WebSocket 单连接**：建连时声明音频格式与采样率，上下行共用；客户端只传 Base64 编码的 PCM16 音频。
 - **全链路编排**：VAD 静音形成候选片段，ASR 转写后由本地模型结合上下文判断用户是否说完，再按需检索知识、生成回复和语音。
 - **语义结束判断**：短停顿先等待；达到最短静音且语义完整时提交，模型判断继续等待、超时、失败或过载时由最长静音兜底，输入达到最大时长时强制提交。
-- **会话级知识检索**：`rag_enabled` 默认关闭；开启后每轮在 1～3 个指定场景内检索，默认最多等待 2 秒，失败时继续普通回答。
+- **会话级 RAG 透传**：`rag_enabled` 默认关闭；开启后每轮把 0～3 个场景传给 Thinker，场景为空时由 Thinker 仅检索通用知识。
 - **流式输出**：ASR 返回最终转写，Thinker 回复文本和 TTS 音频分别流式下发。
 - **打断能力**：新的完整用户输入提交后可以打断上一轮未完成的回复；同一输入中的短停顿和续说不会触发打断。服务端下发 `TURN_STATE/INTERRUPTED`，旧 TTS 在后台排空并丢弃。
-- **并发与背压**：多会话并行；语义模型默认 4 路并行并有有界等待队列；事件与音频队列有界，音频和出站队列另有字节上限；RAG 使用独立并发准入和有界等待队列。
+- **并发与背压**：多会话并行；语义模型有界并发；事件、音频和出站队列有界；Thinker 请求统一使用并发准入。
 - **可观测性**：`/health` 聚合健康检查（含后台周期探测的下游真实状态）、`/metrics` 暴露 Prometheus 指标、结构化日志。
 - **一键启停**：`start_services.sh` 统一拉起 ASR / Thinker / TTS / 网关全栈并做就绪等待。
 - **压测工具**：内置联调客户端、链路延迟测试和多并发压测脚本（见 [第 7 节](#7-快速联调)）。
@@ -87,9 +86,8 @@ RealTimeVoiceAPI/
 │   │   ├── state.py          # 会话状态（turn、子任务、去重集合）
 │   │   ├── registry.py       # 会话注册表与活跃数限制
 │   │   └── events.py
-│   ├── clients/              # ASR / RAG / Thinker / TTS 客户端 + 并发控制
+│   ├── clients/              # ASR / Thinker / TTS 客户端 + 并发控制
 │   │   ├── asr.py            # ASR（POST /v1/chat/completions）
-│   │   ├── rag.py            # KBService 联合检索、超时降级
 │   │   ├── thinker.py        # Thinker/LLM（stream + interrupt + delete）
 │   │   ├── tts.py            # TTS（POST /v1/dialogue-tts/stream）
 │   │   ├── limits.py         # BoundedAdmission：有界并发准入
@@ -109,18 +107,17 @@ RealTimeVoiceAPI/
 
 ## 3. 前置依赖
 
-普通语音链路依赖 ASR、Thinker、TTS；启用 RAG 的会话额外访问 KBService。下表为本机部署约定，客户端只连接网关，网关通过配置的地址访问下游：
+普通语音链路依赖 ASR、Thinker、TTS。启用 RAG 时仍由网关调用 Thinker；Thinker 在内部访问 KBService。下表为本机部署约定，客户端只连接网关：
 
 | 下游 | 部署地址 | 作用 | 调用接口 |
 |------|----------|------|----------|
 | ASR（Qwen3-ASR） | `http://127.0.0.1:8001` | 语音转文本 | `POST /v1/chat/completions` |
-| Thinker（LLM） | `http://127.0.0.1:8002` | LLM 回复 + 记忆 | `/api/v1/reply`（纯文本流式）、`/api/v1/interrupt`、`DELETE /api/v1/sessions/{…}` |
+| Thinker（LLM） | `http://127.0.0.1:8002` | LLM 回复、记忆及可选 RAG | `/api/v1/reply`（纯文本流式）、`/api/v1/interrupt`、`DELETE /api/v1/sessions/{…}` |
 | TTS | `http://127.0.0.1:9000` | 文本合成语音 | `POST /v1/dialogue-tts/stream` |
-| KBService（可选） | `http://127.0.0.1:8004` | 指定场景的知识检索 | `POST /retrieve/joint` |
 
-`start_services.sh` 管理 ASR、Thinker、TTS 和网关，**不启动、停止或探测 KBService**。本机知识服务项目位于 `/root/KBService`，由部署方独立管理。网关只检索知识，不调用 KBService `/query` 生成答案，也不提供知识管理接口。
+`start_services.sh` 管理 ASR、Thinker、TTS 和网关，**不直接管理 KBService**。KBService 的地址、超时和召回参数由 BerryThinker 配置；网关没有 KBService 客户端，也不负责检索、拼装知识上下文或检索降级。
 
-语义结束模型不是独立服务。网关通过 ONNX Runtime 在本进程内加载一份固定的 `livekit/turn-detector v0.4.1-intl` 量化模型，所有会话共享该模型。模型文件约 389MB，不需要 GPU；默认 4 路推理、每路最多使用 2 个 CPU 线程。模型目录 `models/` 被 Git 忽略，不随提交或推送上传。
+语义结束模型不是独立服务。网关通过 ONNX Runtime 在本进程内加载一份固定的 `livekit/turn-detector v0.4.1-intl` 量化模型，所有会话共享该模型。模型文件约 389MB，不需要 GPU；默认最多并发执行 30 个语义推理任务，ONNX Runtime 单次推理最多使用 16 个 CPU 线程。模型目录 `models/` 被 Git 忽略，不随提交或推送上传。
 
 运行环境：**Python 3.11+**，推荐使用 [`uv`](https://docs.astral.sh/uv/)。GPU 要求：ASR 与 TTS 必须使用不同 GPU（启动脚本会校验）。
 
@@ -168,7 +165,7 @@ curl http://127.0.0.1:8000/health    # 整体就绪状态（含下游）
 curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 ```
 
-`/health` 的 `ready` 为 `true` 表示本服务各子系统正常、三个下游可达、且有剩余会话容量，此时即可开始联调（详见 [第 8 节](#8-健康检查与监控)）。它不代表 RAG 已就绪；开启知识检索前还需独立确认 KBService 的场景和检索接口。
+`/health` 的 `ready` 为 `true` 表示本服务各子系统正常、三个下游可达、且有剩余会话容量，此时即可开始联调（详见 [第 8 节](#8-健康检查与监控)）。RAG 的实际可用性由 Thinker 及其 KBService 配置决定。
 
 ## 5. 配置项
 
@@ -195,10 +192,10 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_SESSION_AUDIO_QUEUE_MAX_SECONDS` | `3` | 同左 | 客户端音频积压上限（触发背压） |
 | `RTVA_DOWNSTREAM_PROBE_INTERVAL_SECONDS` | `10` | 同左 | 下游健康探测周期 |
 | `RTVA_DOWNSTREAM_PROBE_TIMEOUT_SECONDS` | `2` | 同左 | 下游健康探测超时 |
-| `RTVA_SLOW_STAGE_WARNING_SECONDS` | `2` | 同左 | ASR、RAG、Thinker 首段文本、TTS 首块及相邻音频块间隔的慢请求告警阈值 |
+| `RTVA_SLOW_STAGE_WARNING_SECONDS` | `2` | 同左 | ASR、Thinker 首段文本、TTS 首块及相邻音频块间隔的慢请求告警阈值 |
 | `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 同左 | 非空时直接作为 TTS `prompt`；为空时依次使用 Thinker `done.output.tone` 和默认值“平和” |
 
-语义结束判断的配置如下。候选静音和最短静音都不能超过最长静音；这些时间由客户端持续上传的音频帧推进，停止发帧不算静音。模型输入为当前用户输入已经合并的候选 ASR 文本，并附带会话最近三个轮次的用户文本和已完成助手回复。用户恢复说话时，旧语义结果失效；新候选识别完成后再基于合并文本判断。
+语义结束判断的配置如下。候选静音和最短静音都不能超过最长静音；这些时间由客户端持续上传的音频帧推进，停止发帧不算静音。模型输入只包含当前用户输入已经合并的候选 ASR 文本，以及上一轮已经产生的完整回复；无论该回复的 TTS 是否播放完成或被打断，都会作为上下文，但不会携带更早轮次或上一轮用户文本。用户恢复说话时，旧语义结果失效；新候选识别完成后再基于合并文本判断。
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
@@ -213,7 +210,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_TURN_END_CONCURRENCY` | `30` | 可同时执行的语义推理数；所有工作线程共享同一个 ONNX 模型实例 |
 | `RTVA_TURN_END_MAX_PENDING_JOBS` | `32` | 所有运行槽位之外允许排队的任务数；超限时走最长静音兜底 |
 | `RTVA_TURN_END_MAX_UTTERANCE_SECONDS` | `30` | 单次输入的强制提交时长上限 |
-| `RTVA_TURN_END_CPU_THREADS` | `8` | ONNX Runtime 单次推理的算子内部 CPU 并行度 |
+| `RTVA_TURN_END_CPU_THREADS` | `16` | ONNX Runtime 单次推理的算子内部 CPU 并行度 |
 
 一次判断的 500ms 超时包含排队和实际推理。最多可同时存在 `RTVA_TURN_END_CONCURRENCY + RTVA_TURN_END_MAX_PENDING_JOBS` 个运行或等待任务；默认即 30 个运行任务和 32 个等待任务。超时、过载或推理异常不会向客户端发送语义错误，也不会提前提交，而是继续接收音频并在最长静音处兜底。模型文件缺失、版本不匹配或校验失败属于启动错误，启用该功能时网关不会带病启动。
 
@@ -231,31 +228,34 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 
 ### RAG 配置与调用约定
 
-客户端只指定 `rag_enabled` 和 `scenes`；服务地址、容量、召回条数和阈值由网关配置，不接受客户端覆盖。以下默认值也见 `.env.example`，启动脚本不单独覆盖：
+客户端只指定会话级 `rag_enabled` 和 `scenes`。网关完成格式校验和标准化后，在每轮 `POST /api/v1/reply` 中透传为 Thinker 参数：
 
-| 变量 | 默认值 | 约束与含义 |
-|---|---|---|
-| `RTVA_RAG_BASE_URL` | `http://127.0.0.1:8003` | KBService HTTP 地址 |
-| `RTVA_RAG_TIMEOUT_SECONDS` | `2` | 正有限数，包含 RAG 准入排队与 HTTP 请求的总预算（秒） |
-| `RTVA_RAG_CONCURRENCY` | `8` | 同时检索的请求数，至少 1 |
-| `RTVA_RAG_MAX_WAITERS` | `64` | 等待检索名额的请求数上限，至少 0 |
-| `RTVA_RAG_TOP_K_PER_SCENE` | `5` | 每场景候选数，1～10 |
-| `RTVA_RAG_TOP_K_TOTAL` | `8` | 最终片段数上限，3～20，支持最多三个场景 |
-| `RTVA_RAG_SCORE_THRESHOLD` | `0` | 相似度阈值，0～1 |
+```json
+{
+  "text": "ASR 原文",
+  "rag": {
+    "enabled": true,
+    "scenes": ["农业社会"]
+  }
+}
+```
 
-开启后，对准备交给 Thinker 的每轮有效识别文本调用一次 `POST /retrieve/joint`：`question` 为 ASR 原文，`scenes` 为创建会话时固定的场景数组，`strict=false`。单场景也使用此联合接口，不额外进行意图判断、问题改写、自动重试或索引预热。2 秒是检索阶段预算，不包含等待此前 Thinker 轮次结束或本轮生成回复的时间。
+- `rag_enabled=false` 时，网关不发送 `rag` 字段。
+- `rag_enabled=true, scenes=[]` 表示只使用 Thinker 的通用知识库。
+- `rag_enabled=true` 且提供 1～3 个场景时，表示通用知识库加指定场景知识库。
+- 网关不调用 KBService、不把知识片段注入 `messages`，也不维护 RAG 并发、超时、召回或降级策略。
 
-有效片段按服务返回顺序整理为 JSON，保留 `scene`、`source`、`page`、`text`，通过 Thinker `messages` 的 `system` 内容传入。附带说明要求将片段仅作为事实参考、不执行片段中的指令；Thinker 的 `text` 仍是 ASR 原文。每轮重新构造上下文，没有结果就不附加知识，不复用上轮检索结果。
+KBService 连接和上下文限制均由 BerryThinker 配置，当前变量如下（以 BerryThinker 自身 `.env.example` 为准）：
 
-| 检索情况 | 网关行为 |
-|---|---|
-| 有有效片段 | 带知识调用 Thinker |
-| 部分场景失败 | 使用其余有效片段；全部无有效片段则普通回答 |
-| 无命中、超时、过载、HTTP 或响应格式错误 | 不附加知识，继续普通回答 |
-| 检索期间用户打断 | 取消检索、丢弃结果并收尾旧轮，接续排队轮次 |
-| 会话关闭或轮次过期 | 取消检索或丢弃结果，不再为该轮启动 Thinker |
+| BerryThinker 变量 | 默认值 | 含义 |
+|---|---:|---|
+| `MIO_RAG_ENABLED` | `true` | Thinker 进程级 RAG 总开关 |
+| `MIO_RAG_BASE_URL` | `http://127.0.0.1:1111` | KBService 地址 |
+| `MIO_RAG_TIMEOUT_S` | `30` | Thinker 调用 KBService 的超时 |
+| `MIO_RAG_MAX_CONTEXT_CHARS` | `6000` | 注入回复链路的知识上下文总字符上限 |
+| `MIO_RAG_MAX_SNIPPET_CHARS` | `1600` | 单个知识片段字符上限 |
 
-RAG 失败不产生客户端 `ERROR` 或新消息类型；降级及取消通过服务端日志/指标观察。场景是否存在由 KBService 在检索时判断，创建会话只校验字段格式。
+Thinker 的内部检索时间包含在网关 `RTVA_THINKER_STREAM_TIMEOUT_SECONDS` 和 `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS` 预算内；部署时应保证 `MIO_RAG_TIMEOUT_S` 小于网关首事件预算，或相应调大网关预算。
 
 
 ### Thinker 与 TTS 调用约定
@@ -294,7 +294,7 @@ RAG 失败不产生客户端 `ERROR` 或新消息类型；降级及取消通过�
 }
 ```
 
-`rag_enabled` 可选，必须是 JSON 布尔值，默认 `false`。`scenes` 可选，默认 `[]`；去除名称首尾空白并按首次出现顺序去重，最多三个非空字符串，启用 RAG 时必须至少一个。即使关闭 RAG，显式传入的场景数组也需要通过格式校验。配置在会话内固定；修改时新建会话。省略两个字段即为普通语音会话。
+`rag_enabled` 可选，必须是 JSON 布尔值，默认 `false`。`scenes` 可选，默认 `[]`；去除名称首尾空白并按首次出现顺序去重，最多三个非空字符串。启用 RAG 时允许场景为空，此时 Thinker 只检索通用知识库；提供场景时检索通用知识库和指定场景知识库。即使关闭 RAG，显式传入的场景数组也需要通过格式校验。配置在会话内固定；修改时新建会话。省略两个字段即为普通语音会话。
 
 协议不允许额外字段。格式错误返回 `TRANSPORT/INVALID_MESSAGE` 并关闭连接。`SESSION_CREATED` 回显会话和音频参数，**不回显 RAG 配置**，也不表示知识服务已验证成功。
 
@@ -302,7 +302,7 @@ RAG 失败不产生客户端 `ERROR` 或新消息类型；降级及取消通过�
 
 - 收到 `SESSION_CREATED` 后，按真实时间发送 `AUDIO_CHUNK`：Base64 编码的裸 PCM16 小端单声道采样，不含 WAV 文件头。采样率为 16000、24000 或 48000Hz，与创建时一致；单块不超过 500ms，上行 `sequence` 从 0 开始跨轮累计。
 - VAD 默认在连续静音 500ms 时生成候选片段，每个候选只调用一次 ASR；候选结果保留在服务端。语义判断完整后立即提交，静音 2000ms 或输入达到 30 秒时强制提交。中途继续说话会把后续候选结果合并进同一输入，不创建新轮次，也不触发打断。提交时只下发一条合并后的 `ASR_RESULT`。文件联调默认发送 2200ms 尾静音。整段均为空转写时不创建轮次，也不返回 `ASR_RESULT` 或 `RESPONSE_END`。
-- 正常轮次依次返回 `ASR_RESULT`、零到多条 `TEXT_DELTA`、`TEXT_END`、`AUDIO_DELTA`、`RESPONSE_END`。开启 RAG 后，检索位于 `ASR_RESULT` 与回复生成之间，没有单独的检索事件或知识全文下发。
+- 正常轮次依次返回 `ASR_RESULT`、零到多条 `TEXT_DELTA`、`TEXT_END`、`AUDIO_DELTA`、`RESPONSE_END`。开启 RAG 后，网关把配置随回复请求传给 Thinker；客户端没有单独的检索事件或知识全文下发。
 - 每轮用 `turn_id` 区分，音频序号每轮从 0 开始。`turn_id=0` 用于创建会话和无轮次错误；ASR 失败没有 `RESPONSE_END`，LLM/TTS 失败则终结对应轮次。
 - 收发及播放需要并行。`TEXT_END` 只表示文本完成；`RESPONSE_END` 表示该轮服务端输出结束，不表示本地播放已完成。
 
@@ -312,11 +312,10 @@ RAG 失败不产生客户端 `ERROR` 或新消息类型；降级及取消通过�
 
 | 旧轮所处阶段 | 旧轮处理 | 新轮处理 |
 |---|---|---|
-| RAG 检索或检索前排队 | 取消或跳过检索，不调用旧轮 Thinker；以 `RESPONSE_END/INTERRUPTED` 收尾，无 `TEXT_END` | 释放旧轮位置后接续；开启 RAG 时先检索 |
 | Thinker 流式回复 | 继续消费旧文本，后续消息带 `interrupt=true`；不进入 TTS | 等旧文本收尾，先调用 Thinker interrupt 再接续 |
 | TTS 合成 | 排空并丢弃旧音频，不再下发；旧轮终态可能较晚到达 | 可开始本轮处理，和旧 TTS 排空交错 |
 
-整个会话结束时发送 `CLOSE_SESSION` 或断开连接。网关取消 RAG、停止音频及 ASR 工作，等待 Thinker 和 TTS 清理，再在安全条件下删除 Thinker 会话。没有 `SESSION_CLOSED` 业务回执，也不支持断线恢复。
+整个会话结束时发送 `CLOSE_SESSION` 或断开连接。网关停止音频及 ASR 工作，等待 Thinker（包括其内部 RAG）和 TTS 清理，再在安全条件下删除 Thinker 会话。没有 `SESSION_CLOSED` 业务回执，也不支持断线恢复。
 
 重复会话 ID、容量已满、创建超时或会话初始化失败时，WebSocket 已建立的情况下会先返回结构化 `ERROR`，再发送关闭帧；关闭原因携带错误码。详细错误码和客户端处理方式见客户端文档第 5 节。
 
@@ -342,7 +341,7 @@ ssh -N -L 8005:127.0.0.1:8005 用户名@服务器地址
 .venv/bin/python -m uvicorn realtime_voice.main:app --app-dir src --host 127.0.0.1 --port 8005
 ```
 
-页面显示 ASR、语义判断总耗时、语义排队、语义实际推理、RAG、LLM 首段文本和 TTS 首块音频耗时。对 `/metrics` 的阶段直方图累计值做差，按 `增量 sum / 增量 count × 1000` 得到新增样本的平均毫秒数；首次采样只建立基线，计数回退后重新建立基线。无新增样本保留上次值及其时间，指标请求失败单独提示并重试，不中断对话。
+页面显示 ASR、语义判断总耗时、语义排队、语义实际推理、LLM 首段文本和 TTS 首块音频耗时。Thinker 内部 RAG 的等待包含在 LLM 指标中。页面对 `/metrics` 的阶段直方图累计值做差，按 `增量 sum / 增量 count × 1000` 得到新增样本的平均毫秒数；首次采样只建立基线，计数回退后重新建立基线。无新增样本保留上次值及其时间，指标请求失败单独提示并重试，不中断对话。
 
 这些是**全网关采样值，不是本会话或每轮的精确耗时**；并发调用会混入其他用户数据。每次开始清空页面记录，最多保留最近 50 个已收尾轮次；取消后可以重播已收到的音频。网页关闭后不保存录音或对话。页面保护上限为单轮音频 120 秒、待播放积压 60 秒，超出会停止本次测试。
 
@@ -413,14 +412,14 @@ uv run python scripts/load_test.py --url ws://127.0.0.1:8000/v1/realtime \
   - `unhealthy`：下游返回非 200 或自报异常。
   - `unreachable`：连接失败/超时（附 `error_type`）。
   - 其他值（如 `degraded`）：下游自报状态词直接透传。
-- RAG 不在后台探测列表、`downstream` 或 `limiters` 快照中，不参与 `ready` 判定。排查知识检索需查看 RAG 指标，或从网关主机访问 KBService `/health`、`/scenes` 和 `/retrieve/joint`。
+- 网关不单独探测 RAG/KBService；Thinker 在 `downstream` 中健康只表示其健康接口可达。知识检索状态和指标需在 BerryThinker、KBService 侧排查。
 - 其余字段：`semantic`（语义模型开关、加载状态、并行度和任务数）、`activity`（会话与各队列水位）、`limiters`（下游并发准入）、`executor`（VAD 线程池）、`process`（线程/内存）。
 
 `/health` 返回 HTTP 200 不等于就绪，应读取 `ready`。启动初期的 `unknown`、容量已满或本进程快照异常也会导致 `degraded`，需结合各字段定位。
 
 ### 结构化日志
 
-网关业务日志为单行 JSON，并由独立的 `realtime_voice` INFO handler 输出；通过 `start_services.sh` 启动时写入 `logs/gateway.log`。每条 JSON 都包含 UTC `timestamp`、`level` 和 `logger`。正常生命周期使用 INFO，超时、过载、慢客户端和慢阶段使用 WARNING，下游失败与未预期异常使用 ERROR。未预期异常只记录不含异常消息的代码位置 `stack_trace`，避免下游响应正文绕过隐私过滤。主要事件包括会话创建/关闭，以及 ASR、RAG、Thinker、TTS 的开始、首包、完成和失败；TTS 不逐块打印 INFO，仅当相邻音频块间隔达到 `RTVA_SLOW_STAGE_WARNING_SECONDS` 时记录 `tts_chunk_gap_slow`。RAG 完成阶段同时保留历史事件 `rag_retrieved` 和统一命名事件 `rag_completed`，便于现有查询平滑迁移。
+网关业务日志为单行 JSON，并由独立的 `realtime_voice` INFO handler 输出；通过 `start_services.sh` 启动时写入 `logs/gateway.log`。每条 JSON 都包含 UTC `timestamp`、`level` 和 `logger`。正常生命周期使用 INFO，超时、过载、慢客户端和慢阶段使用 WARNING，下游失败与未预期异常使用 ERROR。未预期异常只记录不含异常消息的代码位置 `stack_trace`，避免下游响应正文绕过隐私过滤。主要事件包括会话创建/关闭，以及 ASR、Thinker、TTS 的开始、首包、完成和失败；TTS 不逐块打印 INFO，仅当相邻音频块间隔达到 `RTVA_SLOW_STAGE_WARNING_SECONDS` 时记录 `tts_chunk_gap_slow`。RAG 的检索日志由 Thinker 记录。
 
 会话建立后的业务日志同时包含 `device_id`、兼容字段 `user_id` 和 `session_id`；轮次事件还包含 `turn_id` 与 `trace_id`，因此可以直接按设备或会话检索。握手完成前无法得知这些标识，字段值为 `unknown`。日志不会记录音频、完整 ASR 文本、完整模型回复、TTS 文本或密钥。
 
@@ -432,7 +431,7 @@ uv run python scripts/load_test.py --url ws://127.0.0.1:8000/v1/realtime \
 
 ### GET /metrics
 
-Prometheus 格式，包含会话数、各队列水位、限流器占用、执行器状态、事件循环延迟、各阶段（vad/asr/semantic/semantic_queue/semantic_inference/rag/thinker/tts）延迟直方图与错误计数。语义结束判断新增以下指标：
+Prometheus 格式，包含会话数、各队列水位、限流器占用、执行器状态、事件循环延迟、各阶段（vad/asr/semantic/semantic_queue/semantic_inference/thinker/tts）延迟直方图与错误计数。语义结束判断新增以下指标：
 
 | 指标 | 含义 |
 |---|---|
@@ -443,20 +442,9 @@ Prometheus 格式，包含会话数、各队列水位、限流器占用、执行
 | `realtime_voice_semantic_results_total{status="..."}` | `end`、`wait`、`timeout`、`overloaded`、`failed`、`cancelled` 结果数 |
 | `realtime_voice_turn_end_commits_total{reason="..."}` | 按 `semantic_end`、`max_silence`、`max_utterance` 统计提交原因 |
 
-RAG 使用以下指标：
-
-| 指标 | 含义 |
-|---|---|
-| `realtime_voice_stage_latency_seconds{stage="rag"}` | 检索耗时，含 RAG 准入排队 |
-| `realtime_voice_rag_requests_total{status="..."}` | 检索结果计数 |
-| `realtime_voice_rag_snippets` | 返回有效片段数量的直方图 |
-| `realtime_voice_limiter_active{service="rag"}` / `realtime_voice_limiter_waiting{service="rag"}` | 检索并发与等待数量 |
-
-RAG 的 `status` 为 `success`、`partial_failure`、`no_match`、`timeout`、`overloaded`、`failed` 或 `cancelled`。响应 `errors` 非空即记为 `partial_failure`，即使没有有效片段；只有 `errors` 为空且无有效片段时才记为 `no_match`。关闭 RAG 的轮次不产生检索计数。
-
 语义结果的 `status` 为 `end`、`wait`、`timeout`、`overloaded`、`failed` 或 `cancelled`。`semantic` 统计调用方看到的总等待，`semantic_queue` 统计进入工作线程前的等待，`semantic_inference` 只统计实际执行。结构化日志 `semantic_evaluated` 记录耗时、状态和概率；`user_input_committed` 记录提交原因和候选片段数量，不记录识别正文。
 
-结构化日志 `rag_retrieved` 记录会话、轮次、耗时、状态和片段数量，不记录问题及知识正文。取消检索计入 `cancelled` 指标，不生成 `rag_retrieved` 日志。Thinker 生成耗时不包含 RAG，但“语音结束到首段回复”的端到端指标包含检索等待。
+网关不再暴露独立的 RAG 指标。`stage="thinker"` 以及“语音结束到首段回复”的端到端指标都包含 Thinker 内部检索等待；检索命中、耗时和失败原因请查看 BerryThinker/KBService 指标与日志。
 
 ## 9. 运行验证
 
@@ -466,14 +454,14 @@ uv run pytest -q tests/integration   # 集成测试（含假下游）
 uv run ruff check .                  # 静态检查
 ```
 
-RAG 专项验证覆盖参数、降级、上下文分离、打断、关闭和会话隔离；真实服务验证记录见 [docs/rag-validation.md](docs/rag-validation.md)。
+RAG 专项验证覆盖协议参数校验、网关到 Thinker 的请求映射、空场景通用知识模式、逐轮透传和会话隔离；验证说明见 [docs/rag-validation.md](docs/rag-validation.md)。
 
 语义结束判断专项验证覆盖候选文本合并、恢复说话后的旧结果失效、最短/最长静音、30 秒强制提交、ASR 失败清理、推理超时与过载、4 路真实并行、模型版本和文件哈希校验；集成测试确认一个用户输入只下发一次合并后的 `ASR_RESULT`。
 
 ## 10. 部署与运维
 
 - **本机全栈**：使用 `./start_services.sh start|stop|status|restart`（见 [第 4 节](#4-快速开始)）。脚本会校验 `.env` 中的端口约定（网关 8000、ASR 8001、Thinker 8002、TTS 9000），做 GPU 隔离校验，并在启用语义结束判断时校验或自动下载固定版本模型。
-- **KBService**：单独管理 `/root/KBService` 服务，网关启动器不会管理它。发布网关代码或修改 RAG 服务端配置后需要重启网关；每个新会话再通过客户端参数选择是否检索。
+- **RAG/KBService**：由 BerryThinker 配置和管理。修改 `MIO_RAG_*` 后按 Thinker 的部署方式重启 Thinker；网关无需配置 KBService 地址。每个新会话仍由客户端参数选择是否检索。
 - **单独重启网关**（不动 GPU 服务）：`restart` 会连 ASR/Thinker/TTS 一起重启（模型重新加载耗时数分钟）。只需重启网关时，先停止网关 PID，再执行 `start`；脚本会复用健康的 ASR、Thinker 和 TTS，只重新启动网关：
   ```bash
   kill "$(cat .run/gateway.pid)"
@@ -489,8 +477,8 @@ RAG 专项验证覆盖参数、降级、上下文分离、打断、关闭和会�
 - V1 **不支持 Opus**，只支持 PCM16。
 - 不提供跨进程或服务重启后的 Session 恢复 / 重连（状态仅在本进程内）；客户端断线需重新握手建会话。
 - 整段用户输入的候选 ASR 结果均为空时会被静默丢弃，不下发任何消息（V1 无通知机制）。
-- RAG 配置不能在会话中修改；没有自动选场景、问题改写、重试、预热或客户端检索状态事件。
-- KBService 首次加载模型或场景索引可能超过检索预算，网关会降级；启用 RAG 不保证每轮都有知识，也不强制回答仅来自知识库。
+- RAG 配置不能在会话中修改，也没有客户端检索状态事件；检索选择、重试与降级行为由 Thinker 实现。
+- Thinker 内部 RAG 与回复共用网关的 Thinker 超时预算；启用 RAG 不保证每轮都有知识，也不强制回答仅来自知识库。
 - Thinker 回复首字或总时长超时、连接失败、返回异常或回复为空时，默认使用三选一固定保底回复；客户端不直接收到 LLM 错误，真实失败原因需从网关日志和指标查看。
 
-旧版基础语音链路时序见 [docs/realtime-voice-sequence-diagram.md](docs/realtime-voice-sequence-diagram.md)；该图尚未包含当前语义结束判断和可选 RAG 分支，当前输入提交、检索与打断行为以本文和客户端接入文档为准。
+内部链路时序见 [docs/realtime-voice-sequence-diagram.md](docs/realtime-voice-sequence-diagram.md)；RAG 作为 Thinker 回复请求的一部分处理。

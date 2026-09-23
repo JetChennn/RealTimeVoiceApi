@@ -14,7 +14,7 @@
   <section class="panel controls" aria-label="连接与录音设置">
     <div class="fields">
       <label>设备标识<input id="device" value="browser-test" maxlength="128" autocomplete="off"></label>
-      <label class="scene-field">知识场景 <span>逗号分隔，最多 3 个</span><input id="scenes" placeholder="例如：农业社会，渔猎社会" disabled></label>
+      <label class="scene-field">知识场景 <span>可留空，逗号分隔，最多 3 个</span><input id="scenes" placeholder="留空仅用通用知识" disabled></label>
       <label class="toggle"><input id="rag" type="checkbox">开启 RAG</label>
     </div>
     <div class="actions"><button id="start" class="primary">开始对话</button><button id="cancel" disabled>取消</button><div class="mic"><span id="mic-label">麦克风未开启</span><meter id="level" min="0" max="1" value="0" aria-label="麦克风音量"></meter></div><span id="connection" class="connection"></span></div>
@@ -25,7 +25,7 @@
   <section aria-label="阶段耗时" class="timing-section">
     <div class="section-heading"><h2>阶段耗时</h2><span id="metrics-status">开始对话后采样</span></div>
     <div id="metrics" class="metrics"></div>
-    <p class="footnote">来自 /metrics 每秒采样的增量平均值；包含网关到下游的等待与通信。全网关统计，不能归属到某一轮或某个用户。RAG 关闭或无新增样本时不会产生新的采样值。</p>
+    <p class="footnote">来自 /metrics 每秒采样的增量平均值；包含网关到下游的等待与通信。全网关统计，不能归属到某一轮或某个用户。Thinker 内部 RAG 耗时包含在 LLM 首包耗时中。</p>
   </section>
   <section class="conversation-section" aria-label="对话记录">
     <div class="section-heading"><h2>对话记录</h2><span id="turn-count">0 轮</span></div>

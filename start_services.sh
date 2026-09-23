@@ -116,6 +116,8 @@ load_gateway_config() {
     [[ "${RTVA_ASR_BASE_URL:-}" == "http://127.0.0.1:8001" ]] || die "RTVA_ASR_BASE_URL must be http://127.0.0.1:8001"
     [[ "${RTVA_THINKER_BASE_URL:-}" == "http://127.0.0.1:8002" ]] || die "RTVA_THINKER_BASE_URL must be http://127.0.0.1:8002"
     [[ "${RTVA_TTS_BASE_URL:-}" == "http://127.0.0.1:9000" ]] || die "RTVA_TTS_BASE_URL must be http://127.0.0.1:9000"
+    export RTVA_KEEP_ALIVE_SECONDS="${RTVA_KEEP_ALIVE_SECONDS:-10}"
+    [[ "$RTVA_KEEP_ALIVE_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "RTVA_KEEP_ALIVE_SECONDS must be a positive integer"
 
     # Deployment defaults for 30 concurrent WebSocket sessions. Keep these as
     # launcher-specific values so a user's .env remains untouched.
@@ -314,7 +316,10 @@ start_thinker() {
         # Ark SDK 会读取 ALL_PROXY；当前环境中的 socks5 代理需要未安装的
         # socksio 依赖。保留 HTTP(S)_PROXY，同时禁止继承 SOCKS 代理。
         unset ALL_PROXY all_proxy
-        exec "$THINKER_PYTHON" apps/thinker_api.py --host "$INTERNAL_HOST" --port "$THINKER_PORT"
+        exec "$THINKER_PYTHON" apps/thinker_api.py \
+            --host "$INTERNAL_HOST" \
+            --port "$THINKER_PORT" \
+            --timeout-keep-alive "${MIO_API_KEEP_ALIVE_SECONDS:-15}"
     '
 }
 
@@ -361,7 +366,8 @@ start_gateway() {
         exec "$GATEWAY_PYTHON" -m uvicorn realtime_voice.main:app \
             --app-dir src \
             --host "$RTVA_HOST" \
-            --port "$RTVA_PORT"
+            --port "$RTVA_PORT" \
+            --timeout-keep-alive "$RTVA_KEEP_ALIVE_SECONDS"
     '
 }
 

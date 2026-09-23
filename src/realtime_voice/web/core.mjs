@@ -1,4 +1,4 @@
-export const STAGES = ['asr', 'semantic', 'semantic_inference', 'semantic_queue', 'rag', 'thinker', 'tts'];
+export const STAGES = ['asr', 'semantic', 'semantic_inference', 'semantic_queue', 'thinker', 'tts'];
 export function parseMetrics(text) {
   const values = Object.fromEntries(STAGES.map(stage => [stage, {sum: 0, count: 0}]));
   let found = false;
@@ -27,7 +27,7 @@ export function metricDelta(previous, current) {
 }
 export function parseScenes(value) {
   const scenes = [...new Set(value.split(/[,，\n]/).map(s => s.trim()).filter(Boolean))];
-  if (scenes.length < 1 || scenes.length > 3) throw new Error('开启 RAG 时请填写 1～3 个知识场景');
+  if (scenes.length > 3) throw new Error('最多填写 3 个知识场景');
   return scenes;
 }
 export function base64Pcm(buffer) {

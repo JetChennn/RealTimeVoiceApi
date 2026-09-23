@@ -197,7 +197,6 @@ def create_app(
             if services.semantic_detector is not None:
                 await services.semantic_detector.aclose()
             await services.detector_offload.aclose()
-            await services.rag_client.http.aclose()
 
     app = FastAPI(title="RealTimeVoiceAPI", version="1.0.0", lifespan=lifespan)
     app.mount(

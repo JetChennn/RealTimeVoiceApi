@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 
 class CreateSession(BaseModel):
@@ -28,12 +28,6 @@ class CreateSession(BaseModel):
         if len(values) > 3:
             raise ValueError("scenes supports at most 3 distinct names")
         return values
-
-    @model_validator(mode="after")
-    def require_rag_scenes(self) -> "CreateSession":
-        if self.rag_enabled and not self.scenes:
-            raise ValueError("scenes is required when rag_enabled is true")
-        return self
 
 
 class AudioChunkMessage(BaseModel):

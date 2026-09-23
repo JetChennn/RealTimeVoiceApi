@@ -4,21 +4,21 @@ import vm from 'node:vm';
 import fs from 'node:fs';
 import {parseMetrics, metricDelta, parseScenes, decodePcm, base64Pcm, wavBlob} from '../../src/realtime_voice/web/core.mjs';
 const empty = '# HELP realtime_voice_stage_latency_seconds Stage duration\n';
-const metrics = (count, sum) => `${empty}realtime_voice_stage_latency_seconds_count{stage="rag"} ${count}\nrealtime_voice_stage_latency_seconds_sum{stage="rag"} ${sum}\n`;
+const metrics = (count, sum) => `${empty}realtime_voice_stage_latency_seconds_count{stage="thinker"} ${count}\nrealtime_voice_stage_latency_seconds_sum{stage="thinker"} ${sum}\n`;
 test('metrics subtract cumulative histograms and distinguish resets and absent samples', () => {
   const baseline = parseMetrics(metrics(10, 2));
   const result = metricDelta(baseline, parseMetrics(metrics(12, 2.6)));
-  assert.ok(Math.abs(result.samples.rag.ms - 300) < .0001);
-  assert.equal(result.samples.rag.count, 2);
+  assert.ok(Math.abs(result.samples.thinker.ms - 300) < .0001);
+  assert.equal(result.samples.thinker.count, 2);
   assert.equal(result.samples.asr, null);
-  assert.equal(metricDelta(baseline, parseMetrics(metrics(10, 2))).samples.rag, null);
+  assert.equal(metricDelta(baseline, parseMetrics(metrics(10, 2))).samples.thinker, null);
   assert.equal(metricDelta(baseline, parseMetrics(metrics(1, .1))).reset, true);
-  assert.equal(metricDelta(parseMetrics(empty), parseMetrics(metrics(1, .08))).samples.rag.ms, 80);
+  assert.equal(metricDelta(parseMetrics(empty), parseMetrics(metrics(1, .08))).samples.thinker.ms, 80);
   assert.throws(() => parseMetrics('<html>not metrics</html>'));
 });
 test('scene input normalizes whitespace, duplicates and Chinese commas', () => {
   assert.deepEqual(parseScenes(' 农业社会，渔猎社会,农业社会 '), ['农业社会', '渔猎社会']);
-  assert.throws(() => parseScenes(' , '));
+  assert.deepEqual(parseScenes(' , '), []);
   assert.throws(() => parseScenes('a,b,c,d'));
 });
 test('PCM16 roundtrip and WAV header preserve sample rate, signs and payload', async () => {

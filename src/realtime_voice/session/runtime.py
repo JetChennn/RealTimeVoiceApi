@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from realtime_voice.audio.vad import SpeechSegment
 from realtime_voice.clients.asr import AsrError
 from realtime_voice.clients.limits import AdmissionOverloaded
-from realtime_voice.clients.rag import RagClient, RagResult
 from realtime_voice.clients.thinker import (
     ThinkerClient,
     ThinkerDone,
@@ -243,7 +242,6 @@ class SessionRuntime:
         receiver: AsyncWorker,
         vad_worker: AsyncWorker,
         sender: AsyncWorker,
-        rag_client: RagClient | None = None,
         rag_enabled: bool = False,
         scenes: tuple[str, ...] = (),
         registry: RegistryProtocol | None = None,
@@ -326,10 +324,8 @@ class SessionRuntime:
         )
         self._asr_queue: asyncio.Queue[SpeechSegment] = asyncio.Queue(maxsize=asr_queue_size)
 
-        self._rag_client = rag_client
-        self._rag_enabled = rag_enabled
-        self._rag_scenes = tuple(scenes)
-        self._rag_tasks: dict[int, asyncio.Task[RagResult]] = {}
+        self._thinker_rag_enabled = rag_enabled
+        self._thinker_rag_scenes = tuple(scenes)
         self._asr_client = asr_client
         self._thinker_client = thinker_client
         self._tts_client = tts_client
@@ -470,9 +466,6 @@ class SessionRuntime:
             if isinstance(effect.message, TurnState):
                 # TurnState 表示轮次切换，需中断上一轮未完成的 TTS 输出
                 self._signal_tts_interruption(effect.message.turn_id)
-                rag_task = self._rag_tasks.get(effect.message.turn_id)
-                if rag_task is not None:
-                    rag_task.cancel()
                 self._observe("turn_interrupted", turn_id=effect.message.turn_id, interrupt=True)
                 if self._metrics is not None:
                     self._metrics.record_interruption()
@@ -564,13 +557,14 @@ class SessionRuntime:
         await worker.run()
         self.request_close()
 
-    def _semantic_context(self):
-        context = []
-        for turn in list(self.actor.state.turns.values())[-3:]:
-            context.append({"role": "user", "content": turn.asr_text})
-            if turn.stage == TurnStage.COMPLETED and turn.reply_text:
-                context.append({"role": "assistant", "content": turn.reply_text})
-        return context
+    def _semantic_context(self) -> list[dict[str, str]]:
+        """只向轮次结束模型提供上一轮已经产生的完整回复。"""
+        if not self.actor.state.turns:
+            return []
+        previous = next(reversed(self.actor.state.turns.values()))
+        if not previous.reply_text:
+            return []
+        return [{"role": "assistant", "content": previous.reply_text}]
 
     async def _actor_loop(self) -> None:
         while True:
@@ -727,75 +721,6 @@ class SessionRuntime:
 
         task.add_done_callback(finished)
 
-    async def _retrieve_knowledge(self, effect: StartThinker | StartNextThinker) -> str:
-        turn = self.actor.state.turns.get(effect.turn_id)
-        if (
-            turn is None
-            or turn.interrupted
-            or turn.thinker_generation != effect.generation
-            or turn.stage is not TurnStage.STREAMING_LLM
-            or self.actor.state.active_llm_turn_id != effect.turn_id
-        ):
-            return ""
-        trace_id = self._turn_trace_id(effect.turn_id)
-        self._observe(
-            "rag_started", stage="RAG", turn_id=effect.turn_id, trace_id=trace_id
-        )
-        task = asyncio.create_task(self._rag_client.retrieve(effect.text, self._rag_scenes))
-        self._rag_tasks[effect.turn_id] = task
-        try:
-            result = await task
-            observation = {
-                "stage": "RAG",
-                "turn_id": effect.turn_id,
-                "trace_id": trace_id,
-                "status": result.status,
-                "snippet_count": result.snippet_count,
-                "duration_ms": result.duration * 1000,
-            }
-            # Keep the established event during the migration to the uniform stage naming.
-            self._observe("rag_retrieved", **observation)
-            self._observe(
-                "rag_completed",
-                **observation,
-            )
-            if result.status in {"timeout", "overloaded", "failed"}:
-                self._observe(
-                    "rag_failed",
-                    level=logging.WARNING,
-                    stage="RAG",
-                    turn_id=effect.turn_id,
-                    trace_id=trace_id,
-                    error_code=f"RAG_{result.status.upper()}",
-                    status=result.status,
-                )
-            self._observe_slow(
-                "rag_slow",
-                result.duration,
-                stage="RAG",
-                turn_id=effect.turn_id,
-                trace_id=trace_id,
-            )
-            return result.context
-        except asyncio.CancelledError:
-            if asyncio.current_task().cancelling():
-                raise
-            return ""
-        except Exception as error:
-            self._observe(
-                "rag_failed",
-                level=logging.ERROR,
-                exc_info=error,
-                stage="RAG",
-                turn_id=effect.turn_id,
-                trace_id=trace_id,
-                error_code="RAG_FAILED",
-                error_type=type(error).__name__,
-            )
-            raise
-        finally:
-            self._rag_tasks.pop(effect.turn_id, None)
-
     async def _run_thinker(self, effect: StartThinker | StartNextThinker) -> None:
         first_event_seen = False
         trace_id = self._turn_trace_id(effect.turn_id)
@@ -804,18 +729,10 @@ class SessionRuntime:
                 # thinker_lock 串行化所有 Thinker 请求，确保同一会话内不会并发调用 LLM
                 if self._closing:
                     return
-                if isinstance(effect, StartNextThinker) and effect.interrupt_first:
-                    # 用户打断场景：先中断 Thinker 当前会话再发起新请求
-                    await self._thinker_client.interrupt(self.user_id, self.session_id)
-                knowledge_context = ""
-                if self._rag_enabled and self._rag_client is not None:
-                    knowledge_context = await self._retrieve_knowledge(effect)
-                    if self._closing:
-                        return
-                    turn = self.actor.state.turns.get(effect.turn_id)
+                turn = self.actor.state.turns.get(effect.turn_id)
+                if turn is not None:
                     if (
-                        turn is None
-                        or turn.thinker_generation != effect.generation
+                        turn.thinker_generation != effect.generation
                         or turn.stage is not TurnStage.STREAMING_LLM
                         or self.actor.state.active_llm_turn_id != effect.turn_id
                     ):
@@ -825,11 +742,15 @@ class SessionRuntime:
                             ThinkerSkipped(self.session_id, effect.turn_id, effect.generation)
                         )
                         return
+                if isinstance(effect, StartNextThinker) and effect.interrupt_first:
+                    # 用户打断场景：先中断 Thinker 当前会话再发起新请求
+                    await self._thinker_client.interrupt(self.user_id, self.session_id)
                 request = ThinkerReplyRequest(
                     user_id=self.user_id,
                     session_id=self.session_id,
                     text=effect.text,
-                    knowledge_context=knowledge_context,
+                    rag_enabled=self._thinker_rag_enabled,
+                    rag_scenes=self._thinker_rag_scenes,
                 )
                 reply_text: str | None = None
                 tone = ""
@@ -848,7 +769,7 @@ class SessionRuntime:
                 # - 首个事件到达前 thinker_stream_timeout 单独限制首字等待（首包/首事件预算），
                 #   首事件到达后即解除首字计时，只受总时长约束。
                 # 任一超时即取消本轮，避免卡住的回复流长期占据会话的 LLM 串行槽；
-                # RAG 检索不计入该时限
+                # Thinker 内部的 RAG 检索包含在该时限内
                 stream = self._thinker_client.stream_reply(request).__aiter__()
                 async with asyncio.timeout(self._thinker_reply_total_timeout):
                     while True:
@@ -1386,8 +1307,6 @@ class SessionRuntime:
             self._closing = True
             if self.turn_end is not None:
                 await self.turn_end.aclose()
-            for task in self._rag_tasks.values():
-                task.cancel()
             try:
                 # 清理顺序：先停音频采集/发送，再取消 ASR，等待 Thinker 结束，
                 # 排空 TTS，最后（若 Thinker 正常结束）才删除 Thinker 会话

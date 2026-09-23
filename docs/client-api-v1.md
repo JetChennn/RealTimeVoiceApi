@@ -1,14 +1,52 @@
-# 实时语音 API 接入说明（V1）
+# 实时语音 API V1 快速接入
 
-连接 `ws://<服务地址>:8000/v1/realtime`，端口及 `wss` 地址以部署方提供为准。所有消息均为 **WebSocket 文本帧中的 JSON 对象**，不要添加未定义字段。
+网关入口：
 
-流程：**创建会话 → 持续上传音频（包括静音）→ 服务端确认用户输入结束 → 接收识别、回复文本和音频 → 结束会话**。上传和接收必须同时进行，同一连接支持多轮对话。
+- WebSocket：`ws://<host>:8000/v1/realtime`
+- 健康检查：`http://<host>:8000/health`
+- 浏览器测试台：`http://<host>:8000/test/`
 
-服务端默认使用“候选静音 + ASR 文本合并 + 语义完整判断 + 最长静音兜底”确认用户是否说完。该能力由服务端统一配置，创建会话时没有语义判断参数，客户端只需持续、实时地发送包含静音的音频流。
+实际处理链路：
 
-## 1. 创建会话
+```text
+客户端音频 → VAD → ASR → 语义轮次结束判断 → Thinker（内部可选 RAG）→ TTS → 客户端
+```
 
-连接后 **5 秒内**发送以下消息，收到 `SESSION_CREATED` 后开始上传音频：
+WebSocket 上下行均使用**文本帧 JSON**。一个连接支持多轮对话。
+生产环境如果通过 HTTPS 暴露服务，请使用对应的 `wss://` 地址。
+
+## 1. 最快调试方式
+
+### 1.1 检查服务
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+必须检查响应中的 `ready`，HTTP 200 不等于服务可用：
+
+```json
+{
+  "status": "ok",
+  "ready": true,
+  "downstream": {
+    "asr": {"status": "ok"},
+    "thinker": {"status": "ok"},
+    "tts": {"status": "healthy"}
+  }
+}
+```
+
+## 2. 客户端交互流程
+
+1. 建立 WebSocket 连接。
+2. 在 5 秒内发送 `CREATE_SESSION`。
+3. 收到 `SESSION_CREATED` 后持续发送 `AUDIO_CHUNK`，说完后也要继续发送静音。
+4. 按 `turn_id` 接收 `ASR_RESULT`、文本、音频和 `RESPONSE_END`。
+5. 下一轮继续发送音频；上行 `sequence` 不重置。
+6. 对话结束时发送 `CLOSE_SESSION` 或直接断开。
+
+## 3. 创建会话
 
 ```json
 {
@@ -25,23 +63,45 @@
 }
 ```
 
-| 字段 | 要求 |
+| 字段 | 说明 |
 |---|---|
-| `type`、`protocol_version` | 固定为 `"CREATE_SESSION"`、`1` |
-| `device_id` | 设备/用户标识，1～128 字符；下行 `user_id` 取此值 |
-| `session_id` | 会话标识，1～128 字符；建议每次连接使用新 UUID，不得与活跃会话重复 |
-| `audio_format`、`audio_transport`、`channels` | 固定为 `"PCM16"`、`"BASE64_JSON"`、`1` |
-| `sample_rate` | `16000`、`24000` 或 `48000`；必须与上传音频一致 |
-| `rag_enabled` | 可选，布尔值，默认 `false`；开启知识检索时传 `true` |
-| `scenes` | 可选，字符串数组，默认 `[]`；开启 RAG 时必传 1～3 个场景名，由部署方提供 |
+| `device_id` | 设备/用户标识，1～128 字符；下行 `user_id` 与其相同 |
+| `session_id` | 会话标识，1～128 字符；活跃会话之间不能重复 |
+| `sample_rate` | `16000`、`24000` 或 `48000`，必须与上传音频一致 |
+| `audio_format` | 固定为 `PCM16` |
+| `audio_transport` | 固定为 `BASE64_JSON` |
+| `channels` | 固定为 `1` |
+| `rag_enabled` | 可选，默认 `false` |
+| `scenes` | 可选，默认 `[]`；去空白、去重后最多 3 个非空场景名 |
 
-除两个 RAG 字段外，其余字段必填。场景名去除首尾空白、去重后最多三个，不允许空名称。**不需要 RAG 时，省略 `rag_enabled` 和 `scenes` 即可。**
+除 RAG 字段外，其余字段必填，不要添加未定义字段。
 
-RAG 配置在会话内固定，修改需重新建连。开启后每轮在识别完成后检索知识，默认最多等待 2 秒；无结果或检索失败时继续普通回答。没有独立的 RAG 状态消息，`SESSION_CREATED` 也不回显 RAG 参数。
+RAG 在整个会话内固定：
 
-## 2. 上传音频
+- `rag_enabled=false`：Thinker 请求不包含 RAG 参数；
+- `rag_enabled=true, scenes=[]`：Thinker 检索通用知识；
+- `rag_enabled=true` 且有场景：Thinker 检索通用知识和指定场景知识。
 
-持续发送 `AUDIO_CHUNK`，包括说话后的静音。以下音频值仅为短静音示例：
+网关不访问 KBService，只在每轮请求中把 RAG 配置传给 Thinker。协议当前不返回独立的 RAG 命中或降级状态。
+
+创建成功响应：
+
+```json
+{
+  "type": "SESSION_CREATED",
+  "protocol_version": 1,
+  "user_id": "device-demo",
+  "session_id": "session-demo-001",
+  "turn_id": 0,
+  "interrupt": false,
+  "audio_format": "PCM16",
+  "audio_transport": "BASE64_JSON",
+  "sample_rate": 16000,
+  "channels": 1
+}
+```
+
+## 4. 上传音频
 
 ```json
 {
@@ -53,71 +113,101 @@ RAG 配置在会话内固定，修改需重新建连。开启后每轮在识别�
 }
 ```
 
-- `session_id`：与创建时一致。
-- `sequence`：从 `0` 开始，每块加 `1`，**跨轮次继续累计**。
-- `timestamp_ms`：可选，非负整数，表示音频流中的毫秒位置。
-- `audio_b64`：裸 **PCM16、小端、单声道**采样的 Base64，非空且解码后字节数为偶数；不要发送 WAV 文件头、MP3 或 Float32。
+音频要求：
 
-建议每块 **20～40ms**，按实时速度发送，单块最多 **500ms**。默认连续静音达到 500ms 时，服务端截取一个候选片段并调用一次 ASR；该候选结果只在服务端累积，不会立即下发。服务端用当前输入已合并的 ASR 文本和最近会话上下文判断语义是否完整：
+- PCM16、小端、单声道裸数据的 Base64；不要包含 WAV 头，不支持 MP3/Float32；
+- 建议每块 20～40ms，单块不能超过 500ms；
+- `sequence` 从 0 开始严格递增，**跨轮次不能重置**；
+- `timestamp_ms` 可选，表示音频流中的位置；
+- 按真实时间发送，不要瞬间灌入整段音频。
 
-- 语义完整且静音达到 1000ms：提交整段输入。
-- 用户在提交前恢复说话：旧判断失效，后续候选 ASR 文本合并到同一输入，不创建新轮次。
-- 语义判断要求继续等待、超时、失败或过载：继续收音，静音达到 2000ms 时保底提交。
-- 单次输入持续达到 30 秒：不再等待语义结果，强制提交。
+客户端不发送“说完了”消息。当前默认行为是：静音约 500ms 后产生候选 ASR，网关结合合并文本和上下文判断语义是否完整；如果继续说话，仍合并到本次输入；静音达到 2000ms 或单次输入达到 30 秒时强制提交。
 
-以上是当前服务端默认值，部署方可以调整。说完后必须继续上传静音，文件测试建议补 **2200ms 静音音频**；仅等待而不发音频不会推进判断窗口。不需要发送“提交”或“语音结束”消息。
+因此，说完后必须继续上传静音。文件测试建议补至少 2200ms 静音；只等待、不发送音频不会推进静音计时。
 
-## 3. 接收结果
+## 5. 接收消息
 
-每条消息都有 `type`、`user_id`、`session_id`、`turn_id`、`interrupt`。有效轮次的 `turn_id` 从 `1` 递增，建连及无轮次错误使用 `0`。
+所有下行消息都包含：
+
+```text
+type, user_id, session_id, turn_id, interrupt
+```
 
 | `type` | 关键字段 | 客户端处理 |
 |---|---|---|
-| `SESSION_CREATED` | `protocol_version`、音频格式、`sample_rate`、`channels` | 创建成功，开始上传 |
-| `ASR_RESULT` | `text` | 展示已提交整段输入的最终合并识别文本；每个用户轮次只下发一次 |
-| `TEXT_DELTA` | `delta` | 按轮次追加回复文本 |
-| `TEXT_END` | `text` | 完整回复，替换/落定展示，不要重复追加 |
-| `AUDIO_DELTA` | `sequence`、`audio_b64`、`audio_format`、`sample_rate`、`channels` | 解码 PCM16，按该消息采样率顺序播放；序号每轮从 `0` 开始 |
-| `TURN_STATE` | `state: "INTERRUPTED"` | 立即停止该轮播放，清空其音频缓冲 |
-| `RESPONSE_END` | `status: "COMPLETED" / "INTERRUPTED" / "FAILED"` | 该轮结束，连接仍可继续使用 |
-| `ERROR` | `stage`、`code`、`message`、`recoverable` | 按第 5 节处理 |
+| `SESSION_CREATED` | 协商后的音频参数 | 开始上传音频 |
+| `ASR_RESULT` | `text` | 本轮最终合并识别文本 |
+| `TEXT_DELTA` | `delta` | 追加流式回复文本 |
+| `TEXT_END` | `text` | 本轮最终文本，以它覆盖并落定增量文本 |
+| `AUDIO_DELTA` | `sequence`, `audio_b64`, `sample_rate` | 按序解码并播放 PCM16；每轮音频序号从 0 开始 |
+| `TURN_STATE` | `state="INTERRUPTED"` | 停止该轮播放并清空该轮音频缓冲 |
+| `RESPONSE_END` | `status` | 本轮结束，连接仍可继续使用 |
+| `ERROR` | `stage`, `code`, `message`, `recoverable` | 按第 7 节处理 |
 
-正常顺序：`ASR_RESULT → TEXT_DELTA → TEXT_END → AUDIO_DELTA → RESPONSE_END`。客户端看不到内部候选 ASR 结果，也不需要自行拼接文本。文本完成后才开始合成音频；`RESPONSE_END` 不代表客户端播放队列已经播完。纯静音或整段候选均为空转写时可能没有任何结果，客户端需自行设置等待超时。
+典型成功顺序：
 
-Thinker 超时、连接失败、返回异常或回复为空时，网关默认把一条固定保底文案作为普通 `TEXT_END` 返回，并继续输出对应 TTS 音频，最终仍为 `RESPONSE_END/COMPLETED`。失败前已经收到的 `TEXT_DELTA` 由该 `TEXT_END.text` 替换落定，客户端不需要识别新的消息类型或字段。
-
-## 4. 多轮、打断与关闭
-
-继续上传音频即可开始下一轮，**不要重复创建会话或重置上行序号**。
-
-新的用户输入正式提交时会打断未完成的旧轮；短停顿后继续说话仍属于同一输入，不会触发打断。提交新输入时，服务端先发送旧轮的 `TURN_STATE/INTERRUPTED`，再发送新轮的 `ASR_RESULT`。收到打断消息后停止旧轮播放；后续 `interrupt=true` 的旧消息不能覆盖新轮内容。按 `turn_id` 处理交错消息，不要因旧轮结束而停止整个接收循环。检索阶段被打断的轮次可能直接结束，没有回复文本或音频。若被打断的 Thinker 随后失败，客户端仍会收到带 `interrupt=true` 的保底 `TEXT_END`，但服务端不会为该旧轮启动 TTS；若保底 TTS 已启动，则后续音频会被丢弃。
-
-整个对话结束后发送以下消息，或直接断开连接：
-
-```json
-{"type":"CLOSE_SESSION","session_id":"session-demo-001"}
+```text
+ASR_RESULT → TEXT_DELTA... → TEXT_END → AUDIO_DELTA... → RESPONSE_END(COMPLETED)
 ```
 
-需要完整回复时，先等对应轮的 `RESPONSE_END`。没有 `SESSION_CLOSED` 回执，断线重连不恢复旧会话。
+`TEXT_DELTA` 和 `AUDIO_DELTA` 可能有多条；某些回复也可能没有 `TEXT_DELTA`。`RESPONSE_END` 表示服务端已结束该轮，不代表客户端音频播放队列已经播完。
 
-## 5. 错误处理
+## 6. 多轮与打断
 
-- `recoverable=false`：通常为参数或协议错误，服务端关闭连接；根据 `code` 修正后重新建连。常见原因是字段错误、RAG 场景不合法、音频序号不连续、上传过快或接收过慢。
-- `recoverable=true`：连接可以继续使用，不代表自动重试。任一候选片段发生 `stage=ASR` 错误时，当前尚未提交的整段输入会被放弃，该错误没有对应 `ASR_RESULT` 或 `RESPONSE_END`；客户端可以继续发送下一段输入。语义判断超时、失败或过载不会下发 `ERROR`，服务端会等待最长静音兜底。TTS 错误仍会终结对应轮次。
-- 默认开启 Thinker 保底时，`THINKER_TIMEOUT`、`THINKER_REPLY_TIMEOUT`、`THINKER_SESSION_BUSY`、连接/流异常及空回复均由网关转换为普通保底文本和音频，不再向客户端发送 `stage=LLM` 的 `ERROR`。若服务端关闭保底开关，则恢复原有的 `ERROR(LLM) → RESPONSE_END/FAILED` 行为。
-- 协议错误的 `user_id`、`session_id` 可能为 `"unknown"`，不要因标识不匹配而丢弃错误。
-- WebSocket 已建立后，创建失败会先发送 `ERROR`，再发送关闭帧；客户端应优先展示 `code` 和 `message`，不要被随后通用的断线提示覆盖。关闭帧的 `reason` 也携带错误码。
+继续上传音频即可开始下一轮，不要重复发送 `CREATE_SESSION`。
 
-| 创建阶段错误码 | 原因与处理 | 关闭码 |
-|---|---|---|
-| `INVALID_MESSAGE` / `CREATE_SESSION_REQUIRED` | 请求格式或首条消息错误，修正请求 | `1008` |
-| `HANDSHAKE_TIMEOUT` | 未及时发送创建请求 | `1008` |
-| `DUPLICATE_SESSION` | 会话 ID 仍被占用，更换 ID 或等待旧会话清理完成 | `1008` |
-| `SESSION_CAPACITY_EXCEEDED` | 实例会话名额已满，等待名额释放后重试 | `1008` |
-| `SESSION_CREATE_FAILED` | 服务端初始化会话失败，稍后重试；详细异常记录在服务端日志 | `1011` |
+当新的用户输入正式提交时，网关会打断尚未结束的旧轮：
 
-这些错误均为 `stage=TRANSPORT`、`turn_id=0`、`recoverable=false`，表示本连接无法继续，重试需要新建连接。TCP/TLS/HTTP 升级失败、进程退出或网络已断开时，服务端无法保证交付 JSON 错误，客户端需保留网络错误提示。
+1. 旧轮收到 `TURN_STATE/INTERRUPTED`；
+2. 新轮收到新的 `ASR_RESULT`；
+3. 旧轮后续消息带原 `turn_id`，可能与新轮消息交错；
+4. 旧轮最终收到 `RESPONSE_END/INTERRUPTED`。
 
-无需自行编写客户端时，可使用网关 `/test/` 麦克风测试页；端口转发方式见 [README](../README.md#浏览器麦克风测试台)。
+客户端必须按 `turn_id` 分开维护文本和音频状态。收到 `TURN_STATE` 后立即停止旧轮播放；不要因为旧轮结束而关闭整个 WebSocket。
 
-部署、服务端配置与排障见 [README](../README.md)。
+## 7. 错误与保底
+
+`ERROR.recoverable` 的处理规则：
+
+- `false`：当前连接不能继续，修正问题后重新连接；
+- `true`：连接仍可继续，但客户端需要决定是否重试当前操作。
+
+常见问题：
+
+| 错误码/阶段 | 原因 |
+|---|---|
+| `HANDSHAKE_TIMEOUT` | 5 秒内未发送 `CREATE_SESSION` |
+| `INVALID_JSON` / `INVALID_MESSAGE` | JSON、字段或文本帧格式错误 |
+| `DUPLICATE_SESSION` | `session_id` 已被活跃连接占用 |
+| `SESSION_CAPACITY_EXCEEDED` | 网关会话容量已满 |
+| `AUDIO_SEQUENCE_GAP` | 上行音频序号不连续或跨轮重置 |
+| `CLIENT_AUDIO_BACKPRESSURE` | 音频发送过快，网关积压超过限制 |
+| `SESSION_ID_MISMATCH` | 消息中的 `session_id` 与当前连接不一致 |
+| `stage=ASR` | 当前尚未提交的输入失败，不会产生对应 `RESPONSE_END` |
+| `stage=TTS` | 当前轮以 `RESPONSE_END/FAILED` 结束 |
+
+默认开启 Thinker 保底：Thinker 超时、连接失败、流异常或空回复时，网关发送一条保底 `TEXT_END`，继续合成音频，最终通常仍为 `RESPONSE_END/COMPLETED`。若失败前已有 `TEXT_DELTA`，以最终 `TEXT_END.text` 为准。
+
+## 8. 关闭会话
+
+```json
+{
+  "type": "CLOSE_SESSION",
+  "session_id": "session-demo-001"
+}
+```
+
+需要完整回复时，先等待当前轮的 `RESPONSE_END`。服务端没有 `SESSION_CLOSED` 回执，断线重连也不会恢复旧会话。
+
+## 9. 联调检查清单
+
+- `/health` 返回 `ready=true`；
+- 首帧是 `CREATE_SESSION`，且在连接后 5 秒内发送；
+- 只发送 WebSocket 文本帧 JSON；
+- 音频是与会话采样率一致的单声道 PCM16；
+- `sequence` 严格递增且跨轮不重置；
+- 说完后仍持续发送至少 2 秒静音；
+- 按 `turn_id` 管理文本、音频和打断状态；
+- 用 `TEXT_END` 落定文本，用 `RESPONSE_END` 判断服务端轮次结束。
+
+服务部署、配置和监控说明见 [README](../README.md)。

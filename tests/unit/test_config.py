@@ -11,10 +11,10 @@ def test_settings_defaults():
 
     assert settings.host == "0.0.0.0"
     assert settings.port == 8000
+    assert settings.keep_alive_seconds == 10
     assert str(settings.asr_base_url).rstrip("/") == "http://127.0.0.1:8001"
     assert str(settings.thinker_base_url).rstrip("/") == "http://127.0.0.1:8002"
     assert str(settings.tts_base_url).rstrip("/") == "http://127.0.0.1:9000"
-    assert str(settings.rag_base_url).rstrip("/") == "http://127.0.0.1:8003"
     assert settings.allowed_sample_rates == (16000, 24000, 48000)
     assert settings.max_sessions == 30
     assert settings.cpu_workers == 8
@@ -50,7 +50,7 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
     assert settings.turn_end_concurrency == 30
     assert settings.turn_end_min_silence_ms == 0
     assert settings.turn_end_inference_timeout_ms == 500
-    assert settings.turn_end_cpu_threads == 8
+    assert settings.turn_end_cpu_threads == 16
     assert settings.slow_stage_warning_seconds == 2.0
 
 
@@ -84,6 +84,7 @@ def test_thinker_fallback_texts_must_be_non_empty_and_distinct() -> None:
 @pytest.mark.parametrize(
     "field",
     [
+        "keep_alive_seconds",
         "session_event_queue_size",
         "session_audio_queue_size",
         "session_asr_queue_size",

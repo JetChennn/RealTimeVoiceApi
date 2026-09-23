@@ -93,6 +93,52 @@ async def test_thinker_streams_text_contract_across_chunk_boundaries() -> None:
     assert payload["reply_mode"] == "dialogue"
     assert payload["req_id"].startswith("rtva-")
     assert "audio" not in payload
+    assert "rag" not in payload
+
+
+async def test_thinker_forwards_rag_configuration_without_building_knowledge_context() -> None:
+    transport, captured = stream_transport(
+        [b'{"type":"done","output":{"reply_text":"ok","tone":""}}\n']
+    )
+    admission = BoundedAdmission("thinker", concurrency=1, max_waiters=1)
+    request = ThinkerReplyRequest(
+        "device-01",
+        "session-100",
+        "农业社会如何生产？",
+        rag_enabled=True,
+        rag_scenes=("农业社会", "渔猎社会"),
+    )
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
+        events = [event async for event in ThinkerClient(http, admission).stream_reply(request)]
+
+    assert events == [ThinkerDone("ok", "")]
+    payload = json.loads(captured["request"].content)
+    assert payload["rag"] == {
+        "enabled": True,
+        "scenes": ["农业社会", "渔猎社会"],
+    }
+    assert "messages" not in payload
+
+
+async def test_thinker_forwards_empty_scenes_for_general_knowledge_rag() -> None:
+    transport, captured = stream_transport(
+        [b'{"type":"done","output":{"reply_text":"ok","tone":""}}\n']
+    )
+    request = ThinkerReplyRequest("u", "s", "问题", rag_enabled=True)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
+        _ = [
+            event
+            async for event in ThinkerClient(
+                http, BoundedAdmission("thinker", 1, 1)
+            ).stream_reply(request)
+        ]
+
+    assert json.loads(captured["request"].content)["rag"] == {
+        "enabled": True,
+        "scenes": [],
+    }
 
 
 @pytest.mark.parametrize(

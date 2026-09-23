@@ -354,6 +354,77 @@ def make_runtime(
     return runtime, (resolved_receiver, vad, resolved_sender)
 
 
+def test_semantic_context_only_contains_the_previous_reply() -> None:
+    runtime, _ = make_runtime()
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="older user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.COMPLETED,
+        reply_text="older thinker reply",
+    )
+    runtime.actor.state.turns[2] = TurnContext(
+        turn_id=2,
+        asr_text="previous user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.COMPLETED,
+        reply_text="previous thinker reply",
+    )
+
+    assert runtime._semantic_context() == [
+        {"role": "assistant", "content": "previous thinker reply"}
+    ]
+
+
+def test_semantic_context_includes_reply_while_previous_tts_is_streaming() -> None:
+    runtime, _ = make_runtime()
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="previous user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_TTS,
+        reply_text="previous thinker reply",
+    )
+
+    assert runtime._semantic_context() == [
+        {"role": "assistant", "content": "previous thinker reply"}
+    ]
+
+
+def test_semantic_context_includes_reply_after_previous_tts_was_interrupted() -> None:
+    runtime, _ = make_runtime()
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="previous user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.INTERRUPTED,
+        reply_text="previous thinker reply",
+    )
+
+    assert runtime._semantic_context() == [
+        {"role": "assistant", "content": "previous thinker reply"}
+    ]
+
+
+def test_semantic_context_does_not_reuse_an_older_reply_if_latest_has_none() -> None:
+    runtime, _ = make_runtime()
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="older user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.COMPLETED,
+        reply_text="older thinker reply",
+    )
+    runtime.actor.state.turns[2] = TurnContext(
+        turn_id=2,
+        asr_text="interrupted user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.INTERRUPTED,
+    )
+
+    assert runtime._semantic_context() == []
+
+
 async def next_event(runtime: SessionRuntime, event_type: type[object]) -> object:
     while True:
         event = await asyncio.wait_for(runtime.events.get(), timeout=1)

@@ -49,12 +49,14 @@ class FakeThinker:
         self.fail = fail
         self.fail_after_first_release = fail_after_first_release
         self.calls: list[str] = []
+        self.requests = []
         self.first_delta = threading.Event()
         self.release_first = threading.Event()
         self.first_done = threading.Event()
         self.deleted = threading.Event()
 
     async def stream_reply(self, request):
+        self.requests.append(request)
         self.calls.append(f"start:{request.text}")
         if self.fail:
             raise RuntimeError("fake Thinker failure")
@@ -170,6 +172,8 @@ class FakeServiceHarness:
             state=SessionState(create.device_id, create.session_id, create.sample_rate),
             asr_client=self.asr,
             thinker_client=self.thinker,
+            rag_enabled=create.rag_enabled,
+            scenes=tuple(create.scenes),
             tts_client=self.tts,
             receiver=receiver,
             vad_worker=FakeVadWorker(create.session_id, audio, events),
@@ -188,7 +192,7 @@ class FakeServiceHarness:
 
     def app(self):
         return create_app(
-            Settings(_env_file=None),
+            Settings(_env_file=None, turn_end_semantic_enabled=False),
             runtime_factory=self.runtime_factory,
         )
 
@@ -198,6 +202,8 @@ def connected_session(
     harness: FakeServiceHarness,
     *,
     session_id: str = "session-1",
+    rag_enabled: bool = False,
+    scenes: list[str] | None = None,
 ) -> Iterator[tuple[WebSocketTestSession, dict[str, object]]]:
     with (
         TestClient(harness.app()) as client,
@@ -213,6 +219,8 @@ def connected_session(
                 "audio_transport": "BASE64_JSON",
                 "sample_rate": 16000,
                 "channels": 1,
+                "rag_enabled": rag_enabled,
+                "scenes": scenes or [],
             }
         )
         yield websocket, websocket.receive_json()

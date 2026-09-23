@@ -23,6 +23,32 @@ def test_full_turn_emits_asr_text_and_audio() -> None:
     assert messages[-1]["status"] == "COMPLETED"
 
 
+def test_websocket_rag_configuration_reaches_thinker_request() -> None:
+    harness = FakeServiceHarness(["农业社会如何生产？"])
+    with connected_session(
+        harness,
+        rag_enabled=True,
+        scenes=["农业社会", "农业社会", "渔猎社会"],
+    ) as (websocket, _):
+        send_audio(websocket, 0)
+        receive_until(websocket, "RESPONSE_END")
+
+    request = harness.thinker.requests[0]
+    assert request.rag_enabled is True
+    assert request.rag_scenes == ("农业社会", "渔猎社会")
+
+
+def test_websocket_empty_rag_scenes_reaches_thinker_as_general_knowledge() -> None:
+    harness = FakeServiceHarness(["开放问题"])
+    with connected_session(harness, rag_enabled=True) as (websocket, _):
+        send_audio(websocket, 0)
+        receive_until(websocket, "RESPONSE_END")
+
+    request = harness.thinker.requests[0]
+    assert request.rag_enabled is True
+    assert request.rag_scenes == ()
+
+
 def test_thinker_failure_uses_fallback_text_and_audio() -> None:
     harness = FakeServiceHarness(["hello"], fail_stage="thinker")
     with connected_session(harness) as (websocket, _):

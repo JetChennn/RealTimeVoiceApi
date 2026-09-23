@@ -1,6 +1,6 @@
 # RealTimeVoiceAPI 内部调用时序图
 
-本文档描述一次完整请求在 RealTimeVoiceAPI 内部的调用链路：从 WebSocket 握手、客户端音频输入，到 VAD → ASR → Thinker(LLM) → TTS 再回传音频给客户端的全过程，以及会话关闭流程。
+本文档描述一次完整请求在 RealTimeVoiceAPI 内部的调用链路：从 WebSocket 握手、客户端音频输入，到 VAD → ASR → Thinker（内部可选 RAG）→ TTS 再回传音频给客户端的全过程，以及会话关闭流程。网关不直接调用 KBService。
 
 ## 总体架构
 
@@ -37,7 +37,7 @@ sequenceDiagram
     Client->>WS: 建立WS连接
     WS->>WS: websocket.accept
     WS->>WS: 等待首帧 handshake_timeout
-    Client->>WS: CREATE_SESSION 首帧含采样率
+    Client->>WS: CREATE_SESSION 首帧含采样率及可选 rag_enabled/scenes
     WS->>WS: decode_client_message 校验
     WS->>Reg: registry.create
     Reg->>RT: build_runtime 装配5个worker和4个队列
@@ -89,6 +89,7 @@ sequenceDiagram
     participant Thinker as run_thinker
     participant TTS as run_tts
     participant DThinker as 下游Thinker
+    participant KB as KBService
     participant DTTS as 下游TTS
 
     Note over Client,DTTS: 阶段5 ASR成功开新轮次启动Thinker
@@ -106,7 +107,11 @@ sequenceDiagram
     ActorLoop->>Thinker: spawn _run_thinker
 
     Note over Client,DTTS: 阶段6 Thinker流式回复（两段式超时：首字5s + 总时长20s）
-    Thinker->>DThinker: stream_reply POST /api/v1/reply（纯文本 JSON，含唯一 req_id）
+    Thinker->>DThinker: stream_reply POST /api/v1/reply（纯文本、req_id、可选 rag.enabled/scenes）
+    opt rag.enabled=true
+        DThinker->>KB: Thinker 内部检索通用及可选场景知识
+        KB-->>DThinker: 检索结果
+    end
     alt 首事件在首字预算内到达且整轮在总预算内完成
         loop 流式NDJSON
             DThinker-->>Thinker: ThinkerTextDelta
@@ -176,7 +181,7 @@ sequenceDiagram
 
 若用户已打断该轮，状态机仍发送带 `interrupt=true` 的保底 `TEXT_END`，但不启动 TTS，并以 `RESPONSE_END/INTERRUPTED` 收尾；若保底 TTS 已启动后才发生打断，则继续沿用现有排空和音频丢弃机制。
 
-Thinker 侧自身还有内层预算（回复流软 deadline 默认 4.5s、会话锁等待默认 2s，详见 BerryThinker 文档），通常先于网关首字预算到期并产出带错误码的流事件；网关 5s 首字预算是最后一道防线。
+Thinker 侧自身还有会话锁、RAG 和回复流预算（详见 BerryThinker 文档）。Thinker 内部 RAG 耗时计入网关首事件与总时长预算；部署时应让 Thinker 的 RAG 超时小于网关首事件预算，或相应调大网关预算。
 
 ## 关闭流程
 

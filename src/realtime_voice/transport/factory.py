@@ -17,7 +17,6 @@ from realtime_voice.audio.vad import (
 )
 from realtime_voice.clients.asr import AsrClient
 from realtime_voice.clients.limits import BoundedAdmission
-from realtime_voice.clients.rag import RagClient
 from realtime_voice.clients.thinker import ThinkerClient
 from realtime_voice.clients.tts import TtsClient
 from realtime_voice.protocol.client_messages import CreateSession
@@ -41,14 +40,6 @@ def configure_services(services: AppServices) -> None:
             settings.asr_max_waiters,
             metrics=services.metrics,
         ),
-    )
-    services.rag_client = RagClient(
-        httpx.AsyncClient(base_url=str(settings.rag_base_url), trust_env=False),
-        BoundedAdmission(
-            "rag", settings.rag_concurrency, settings.rag_max_waiters, metrics=services.metrics
-        ),
-        settings=settings,
-        metrics=services.metrics,
     )
     services.thinker_client = ThinkerClient(
         httpx.AsyncClient(base_url=str(settings.thinker_base_url), trust_env=False),
@@ -131,7 +122,6 @@ def build_runtime(
         semantic_detector=services.semantic_detector,
         state=state,
         asr_client=services.asr_client,
-        rag_client=services.rag_client,
         rag_enabled=create.rag_enabled,
         scenes=tuple(create.scenes),
         thinker_client=services.thinker_client,

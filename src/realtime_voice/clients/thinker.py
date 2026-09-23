@@ -39,7 +39,8 @@ class ThinkerReplyRequest:
     user_id: str
     session_id: str
     text: str
-    knowledge_context: str = ""
+    rag_enabled: bool = False
+    rag_scenes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,8 +94,11 @@ class ThinkerClient:
             "reply_mode": "dialogue",
         }
 
-        if request.knowledge_context:
-            payload["messages"] = [{"role": "system", "content": request.knowledge_context}]
+        if request.rag_enabled:
+            payload["rag"] = {
+                "enabled": True,
+                "scenes": list(request.rag_scenes),
+            }
 
         async with self.admission.slot():
             try:
