@@ -17,6 +17,7 @@ from realtime_voice.observability.metrics import Metrics
 
 if TYPE_CHECKING:
     from realtime_voice.audio.vad import SpeechSegment
+    from realtime_voice.speaker.gate import SessionSpeakerGate
 from realtime_voice.clients.asr import AsrError
 from realtime_voice.clients.limits import AdmissionOverloaded
 from realtime_voice.clients.thinker import (
@@ -27,7 +28,13 @@ from realtime_voice.clients.thinker import (
     ThinkerTextDelta,
 )
 from realtime_voice.clients.tts import TTS_SAMPLE_RATE, TtsClient, TtsRequest, TtsStreamError
-from realtime_voice.protocol.server_messages import ServerMessage, TurnState
+from realtime_voice.protocol.decoder import DecodedSpeakerRegister
+from realtime_voice.protocol.server_messages import (
+    ServerMessage,
+    SpeakerRegisterResult,
+    SpeakerStatus,
+    TurnState,
+)
 from realtime_voice.session.actor import (
     CloseRuntime,
     QueueAsr,
@@ -45,6 +52,7 @@ from realtime_voice.session.actor import (
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
+    AudioSegmentDiscarded,
     SessionEvent,
     SpeechSegmentReady,
     ThinkerCompleted,
@@ -268,6 +276,7 @@ class SessionRuntime:
         clock: Callable[[], float] = monotonic,
         turn_end_settings=None,
         semantic_detector=None,
+        speaker_gate: SessionSpeakerGate | None = None,
     ) -> None:
         if min(event_queue_size, audio_queue_size, asr_queue_size, outbound_queue_size) < 1:
             raise ValueError("session queue sizes must be at least 1")
@@ -342,6 +351,7 @@ class SessionRuntime:
         self._logger = logger or logging.getLogger(__name__)
         self._metrics = metrics
         self._clock = clock
+        self._speaker_gate = speaker_gate
 
         self._close_requested = asyncio.Event()
         self._long_tasks: dict[str, asyncio.Task[None]] = {}
@@ -485,6 +495,7 @@ class SessionRuntime:
                         self._metrics.record_slow_client_close()
                     raise SlowClient(str(error)) from error
             return
+
         if isinstance(effect, QueueAsr):
             if not self._closing and effect.session_id == self.session_id:
                 await self._asr_queue.put(effect.segment)
@@ -550,6 +561,73 @@ class SessionRuntime:
             return
         raise TypeError(f"unsupported session effect: {type(effect).__name__}")
 
+    async def register_speaker(self, request: DecodedSpeakerRegister) -> None:
+        """Register or replace this session's reference voiceprint."""
+        pcm16_16k = StreamingResampler(request.sample_rate, 16000).process_pcm16(
+            request.pcm16, final=True
+        )
+        if self._speaker_gate is None:
+            success = False
+            registered = False
+            replaced = False
+            reason = "disabled"
+            duration_ms = request.duration_ms
+            min_audio_ms = 0.0
+        else:
+            result = await self._speaker_gate.register(pcm16_16k)
+            success = result.success
+            registered = result.registered
+            replaced = result.replaced
+            reason = result.reason
+            duration_ms = result.duration_ms
+            min_audio_ms = result.min_audio_ms
+
+        codes = {
+            "registered": "REGISTERED",
+            "updated": "UPDATED",
+            "too_short": "AUDIO_TOO_SHORT",
+            "no_speech": "NO_SPEECH",
+            "embedding_failed": "EMBEDDING_FAILED",
+            "embedder_unavailable": "EMBEDDER_UNAVAILABLE",
+            "disabled": "SPEAKER_DISABLED",
+        }
+        messages = {
+            "registered": "speaker voiceprint registered",
+            "updated": "speaker voiceprint replaced",
+            "too_short": "speaker registration audio is too short",
+            "no_speech": "speaker registration audio contains no usable speech signal",
+            "embedding_failed": "speaker embedding extraction failed",
+            "embedder_unavailable": "speaker embedding model is unavailable",
+            "disabled": "speaker verification is disabled",
+        }
+        self._observe(
+            "speaker_registration_completed",
+            stage="SPEAKER",
+            status=reason,
+            duration_ms=duration_ms,
+            registered=registered,
+            replaced=replaced,
+        )
+        await self.execute_effect(
+            SendOutbound(
+                SpeakerRegisterResult(
+                    type="SPEAKER_REGISTER_RESULT",
+                    user_id=self.user_id,
+                    session_id=self.session_id,
+                    turn_id=0,
+                    interrupt=False,
+                    request_id=request.request_id,
+                    success=success,
+                    registered=registered,
+                    replaced=replaced,
+                    code=codes.get(reason, "REGISTER_FAILED"),
+                    message=messages.get(reason, "speaker registration failed"),
+                    duration_ms=duration_ms,
+                    min_audio_ms=min_audio_ms,
+                )
+            )
+        )
+
     async def _receiver_loop(self) -> None:
         await self._worker_loop(self._receiver)
 
@@ -577,6 +655,8 @@ class SessionRuntime:
                     speech_end = self._speech_ends.pop(event.segment_id, None)
                     if speech_end is not None and self._metrics is not None:
                         self._metrics.observe_speech_end_to_asr(self._clock() - speech_end)
+                elif isinstance(event, AudioSegmentDiscarded):
+                    self._speech_ends.pop(event.segment_id, None)
                 for ready in self.turn_end.process(event):
                     await self._handle_actor_event(ready)
             else:
@@ -599,7 +679,7 @@ class SessionRuntime:
                 self._metrics.observe_speech_end_to_asr(self._clock() - speech_end)
             if speech_end is not None and self.actor.state.next_turn_id == next_turn_id + 1:
                 self._turn_speech_ends[next_turn_id] = speech_end
-        elif isinstance(event, AsrFailed):
+        elif isinstance(event, (AsrFailed, AudioSegmentDiscarded)):
             # ASR 失败不产生 turn，也不再需要这段的结束时间，及时清理避免字典随段数无限增长
             self._speech_ends.pop(event.segment_id, None)
         if isinstance(event, (ThinkerCompleted, ThinkerFailed, TtsCompleted, TtsFailed)):
@@ -613,8 +693,54 @@ class SessionRuntime:
     async def _asr_loop(self) -> None:
         while True:
             segment = await self._asr_queue.get()
-            started = self._clock()
             trace_id = self._segment_trace_id(segment.segment_id)
+            if self._speaker_gate is not None:
+                decision = await self._speaker_gate.evaluate(segment)
+                if self._metrics is not None:
+                    self._metrics.record_speaker_decision(decision.reason)
+                self._observe(
+                    "speaker_gate_decision",
+                    stage="SPEAKER",
+                    segment_id=segment.segment_id,
+                    trace_id=trace_id,
+                    decision=decision.reason,
+                    allow=decision.allow,
+                    registered=decision.registered,
+                    similarity=decision.similarity,
+                    voiced_ms=decision.voiced_ms,
+                    min_audio_ms=decision.min_audio_ms,
+                    audio_eligible=decision.audio_eligible,
+                )
+                await self.execute_effect(
+                    SendOutbound(
+                        SpeakerStatus(
+                            type="SPEAKER_STATUS",
+                            user_id=self.user_id,
+                            session_id=self.session_id,
+                            turn_id=0,
+                            interrupt=False,
+                            segment_id=segment.segment_id,
+                            state=decision.reason,
+                            registered=decision.registered,
+                            voiced_ms=decision.voiced_ms,
+                            min_audio_ms=decision.min_audio_ms,
+                            audio_eligible=decision.audio_eligible,
+                            similarity=decision.similarity,
+                            allowed=decision.allow,
+                        )
+                    )
+                )
+                if not decision.allow:
+                    if not self._closing:
+                        await self.events.put(
+                            AudioSegmentDiscarded(
+                                session_id=self.session_id,
+                                segment_id=segment.segment_id,
+                                reason=decision.reason,
+                            )
+                        )
+                    continue
+            started = self._clock()
             self._observe(
                 "asr_started",
                 stage="ASR",
@@ -1330,6 +1456,8 @@ class SessionRuntime:
                 self._speech_ends.clear()
                 self._turn_speech_ends.clear()
                 self._llm_milestones.clear()
+                if self._speaker_gate is not None:
+                    self._speaker_gate.clear()
                 self._cleaned = True
                 self._observe("session_cleanup", stage="SESSION")
                 self._observe("session_closed", stage="SESSION")

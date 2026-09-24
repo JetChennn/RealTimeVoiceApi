@@ -16,6 +16,18 @@ class Metrics:
         self.turn_end_commits = Counter(
             "realtime_voice_turn_end_commits", "Turn commit reasons", ["reason"], registry=r
         )
+        self.vad_segments_discarded = Counter(
+            "realtime_voice_vad_segments_discarded",
+            "VAD segments discarded before ASR",
+            ["reason"],
+            registry=r,
+        )
+        self.speaker_decisions = Counter(
+            "realtime_voice_speaker_decisions",
+            "Speaker-gate decisions",
+            ["decision"],
+            registry=r,
+        )
         self.active_sessions = Gauge(
             "realtime_voice_active_sessions", "Admitted realtime sessions", registry=r
         )
@@ -109,6 +121,12 @@ class Metrics:
 
     def record_queue_overload(self, queue: str, limit: str) -> None:
         self._safe(self.queue_overload.labels(queue, limit).inc)
+
+    def record_vad_segment_discarded(self, reason: str) -> None:
+        self._safe(self.vad_segments_discarded.labels(reason).inc)
+
+    def record_speaker_decision(self, decision: str) -> None:
+        self._safe(self.speaker_decisions.labels(decision).inc)
 
     def set_limiter_state(self, service: str, *, active: int, waiting: int) -> None:
         self._safe(self.limiter_active.labels(service).set, active)

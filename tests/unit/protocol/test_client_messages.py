@@ -3,7 +3,12 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from realtime_voice.protocol.client_messages import AudioChunkMessage, CloseSession, CreateSession
+from realtime_voice.protocol.client_messages import (
+    AudioChunkMessage,
+    CloseSession,
+    CreateSession,
+    SpeakerRegister,
+)
 from realtime_voice.protocol.decoder import decode_client_message
 from realtime_voice.protocol.errors import ProtocolViolation
 
@@ -66,6 +71,24 @@ def test_audio_chunk_forbids_unknown_fields() -> None:
                 "unexpected": True,
             }
         )
+
+
+def test_speaker_register_accepts_one_complete_pcm_recording() -> None:
+    message = decode_client_message(
+        json.dumps(
+            {
+                "type": "SPEAKER_REGISTER",
+                "session_id": "session-100",
+                "request_id": "register-1",
+                "audio_format": "PCM16",
+                "sample_rate": 24000,
+                "channels": 1,
+                "audio_b64": "AAAA",
+            }
+        )
+    )
+
+    assert isinstance(message, SpeakerRegister)
 
 
 def test_close_session_requires_nonempty_session_id() -> None:

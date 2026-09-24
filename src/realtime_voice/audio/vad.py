@@ -31,6 +31,7 @@ class VadConfig:
     threshold: float = 0.5
     min_silence_ms: int = 500
     max_speech_seconds: int = 30
+    min_speech_ms: int = 200
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class SpeechSegment:
     segment_id: int
     pcm16_16k: bytes
     trailing_silence_samples: int = 0
+    voiced_samples: int = 0
 
 
 class SpeechDetector(Protocol):
@@ -69,6 +71,7 @@ class StreamingVadSegmenter:
         self.active = False
         self.silence_ms = 0.0
         self._trailing_silence_samples = 0
+        self._voiced_samples = 0
         self._chunks: list[bytes] = []
         self._next_segment_id = 1
         self._ready: deque[SpeechSegment] = deque()
@@ -96,6 +99,7 @@ class StreamingVadSegmenter:
             if has_speech:
                 self.silence_ms = 0.0  # 激活态检测到语音则重置静默计时
                 self._trailing_silence_samples = 0
+                self._voiced_samples += len(chunk) // 2
             else:
                 # 累积尾部静默时长与采样数，用于推算语音段结束时刻 speech_end_at
                 self.silence_ms += self._duration_ms(chunk)
@@ -126,11 +130,13 @@ class StreamingVadSegmenter:
             self._next_segment_id,
             b"".join(self._chunks),
             trailing_silence_samples=self._trailing_silence_samples,
+            voiced_samples=self._voiced_samples,
         )
         self._next_segment_id += 1
         self.active = False
         self.silence_ms = 0.0
         self._trailing_silence_samples = 0
+        self._voiced_samples = 0
         self._chunks.clear()
         return segment
 
@@ -303,6 +309,19 @@ class VadWorker:
         trailing_seconds = segment.trailing_silence_samples / self._segmenter.config.sample_rate
         return self._clock() - trailing_seconds  # 分段刚发出，故语音结束于 trailing_seconds 之前
 
+    def _is_effective_segment(self, segment: SpeechSegment) -> bool:
+        if segment.voiced_samples <= 0:
+            return False
+        voiced_ms = segment.voiced_samples / 16
+        return voiced_ms >= self._segmenter.config.min_speech_ms
+
+    async def _publish_event(self, event: object) -> None:
+        if isinstance(event, SpeechSegmentReady) and not self._is_effective_segment(event.segment):
+            if self._metrics is not None:
+                self._metrics.record_vad_segment_discarded("too_short")
+            return
+        await self._event_queue.put(event)
+
     async def run(self) -> None:
         while (input_pcm16 := await self._audio_queue.get()) is not None:
             started = self._clock()
@@ -329,11 +348,11 @@ class VadWorker:
         has_speech = await self._detector_offload.run(partial(self._detector.has_speech, samples))
         if self.turn_end_audio is not None:
             for event in self.turn_end_audio.push(remainder, has_speech):
-                await self._event_queue.put(event)
+                await self._publish_event(event)
             return
         segment = self._segmenter.push(remainder, has_speech)
         if segment is not None:
-            await self._event_queue.put(
+            await self._publish_event(
                 SpeechSegmentReady(
                     session_id=self._session_id,
                     segment=segment,
@@ -352,11 +371,11 @@ class VadWorker:
             )
             if self.turn_end_audio is not None:
                 for event in self.turn_end_audio.push(frame, has_speech):
-                    await self._event_queue.put(event)
+                    await self._publish_event(event)
                 continue
             segment = self._segmenter.push(frame, has_speech)
             if segment is not None:
-                await self._event_queue.put(
+                await self._publish_event(
                     SpeechSegmentReady(
                         session_id=self._session_id,
                         segment=segment,
@@ -367,7 +386,7 @@ class VadWorker:
 
     async def _publish_ready_segments(self) -> None:
         while (segment := self._segmenter.pop_ready()) is not None:
-            await self._event_queue.put(
+            await self._publish_event(
                 SpeechSegmentReady(
                     session_id=self._session_id,
                     segment=segment,

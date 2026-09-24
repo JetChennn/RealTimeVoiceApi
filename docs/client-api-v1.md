@@ -41,10 +41,12 @@ curl http://127.0.0.1:8000/health
 
 1. 建立 WebSocket 连接。
 2. 在 5 秒内发送 `CREATE_SESSION`。
-3. 收到 `SESSION_CREATED` 后持续发送 `AUDIO_CHUNK`，说完后也要继续发送静音。
-4. 按 `turn_id` 接收 `ASR_RESULT`、文本、音频和 `RESPONSE_END`。
-5. 下一轮继续发送音频；上行 `sequence` 不重置。
-6. 对话结束时发送 `CLOSE_SESSION` 或直接断开。
+3. 等待并校验 `SESSION_CREATED`。
+4. 可选：按第 4.1 节发送 `SPEAKER_REGISTER` 注册会话声纹；需要更新时重复相同流程。
+5. 持续发送 `AUDIO_CHUNK`，说完后也要继续发送静音。
+6. 按 `turn_id` 接收 `ASR_RESULT`、文本、音频和 `RESPONSE_END`。
+7. 下一轮继续发送音频；上行 `sequence` 不重置。
+8. 对话结束时发送 `CLOSE_SESSION` 或直接断开。
 
 ## 3. 创建会话
 
@@ -125,6 +127,70 @@ RAG 在整个会话内固定：
 
 因此，说完后必须继续上传静音。文件测试建议补至少 2200ms 静音；只等待、不发送音频不会推进静音计时。
 
+### 4.1 注册或替换会话声纹
+
+声纹只保存在当前 Session，断开后清除。未注册时普通音频不过滤；注册成功后，普通语音会先通过声纹验证，再进入 ASR。
+
+#### 客户端操作
+
+1. 收到 `SESSION_CREATED` 后，录制约 3 秒目标用户的清晰单人语音。
+2. 暂停发送普通 `AUDIO_CHUNK`。
+3. 将整段录音作为一条 `SPEAKER_REGISTER` 发送。首次注册和更新声纹使用相同消息，每次使用新的 `request_id`。
+4. 等待 `request_id` 匹配的 `SPEAKER_REGISTER_RESULT`，再恢复发送普通音频。
+
+```json
+{
+  "type": "SPEAKER_REGISTER",
+  "session_id": "session-demo-001",
+  "request_id": "register-001",
+  "audio_format": "PCM16",
+  "sample_rate": 16000,
+  "channels": 1,
+  "audio_b64": "AAAAAA=="
+}
+```
+
+注册音频必须是 PCM16、小端、单声道裸数据的 Base64，不包含 WAV 头；采样率必须与 Session 一致。音频最长 10 秒，当前默认至少 2000ms。注册音频只用于提取声纹，不进入对话流程。
+
+#### 注册结果
+
+```json
+{
+  "type": "SPEAKER_REGISTER_RESULT",
+  "user_id": "device-demo",
+  "session_id": "session-demo-001",
+  "turn_id": 0,
+  "interrupt": false,
+  "request_id": "register-001",
+  "success": true,
+  "registered": true,
+  "replaced": false,
+  "code": "REGISTERED",
+  "message": "speaker voiceprint registered",
+  "duration_ms": 3000.0,
+  "min_audio_ms": 2000.0
+}
+```
+
+客户端应先匹配 `request_id`，再按以下组合处理：
+
+| `success` | `registered` | `replaced` | 含义 |
+|---:|---:|---:|---|
+| `true` | `true` | `false` | 首次注册成功，`code=REGISTERED` |
+| `true` | `true` | `true` | 更新成功，`code=UPDATED`，新声纹已覆盖旧声纹 |
+| `false` | `false` | `false` | 注册失败，当前仍无声纹 |
+| `false` | `true` | `false` | 更新失败，原声纹继续有效 |
+
+失败码包括 `AUDIO_TOO_SHORT`、`NO_SPEECH`、`EMBEDDING_FAILED`、`EMBEDDER_UNAVAILABLE` 和 `SPEAKER_DISABLED`。`NO_SPEECH` 表示录音中没有检测到可用的声音信号。只有新声纹提取成功才会覆盖旧声纹。
+
+#### 关键规则
+
+- 同一时刻只能有一个注册请求；并发注册会返回 `SPEAKER_REGISTER_IN_PROGRESS` 并关闭连接。
+- 注册处理中收到的普通 `AUDIO_CHUNK` 会被服务端直接丢弃，但其 `sequence` 仍会被校验并推进。
+- 消息格式、采样率或音频上限不合法时，服务端返回不可恢复的 `ERROR`，不会返回 `SPEAKER_REGISTER_RESULT`。
+- 注册成功后，客户端可通过 `SPEAKER_STATUS.allowed` 判断普通语音是已放行还是已过滤；`similarity` 可能为 `null`。
+- 更新失败不会影响原声纹；当前协议没有单独删除声纹的消息，结束 Session 即删除。
+
 ## 5. 接收消息
 
 所有下行消息都包含：
@@ -136,6 +202,8 @@ type, user_id, session_id, turn_id, interrupt
 | `type` | 关键字段 | 客户端处理 |
 |---|---|---|
 | `SESSION_CREATED` | 协商后的音频参数 | 开始上传音频 |
+| `SPEAKER_REGISTER_RESULT` | `request_id`, `success`, `registered`, `replaced`, `code` | 结束注册暂停；成功后记录已注册/已修改，失败时保留旧状态 |
+| `SPEAKER_STATUS` | `state`, `registered`, `similarity`, `allowed` | 展示普通语音的声纹匹配或过滤结果 |
 | `ASR_RESULT` | `text` | 本轮最终合并识别文本 |
 | `TEXT_DELTA` | `delta` | 追加流式回复文本 |
 | `TEXT_END` | `text` | 本轮最终文本，以它覆盖并落定增量文本 |
@@ -183,6 +251,9 @@ ASR_RESULT → TEXT_DELTA... → TEXT_END → AUDIO_DELTA... → RESPONSE_END(CO
 | `AUDIO_SEQUENCE_GAP` | 上行音频序号不连续或跨轮重置 |
 | `CLIENT_AUDIO_BACKPRESSURE` | 音频发送过快，网关积压超过限制 |
 | `SESSION_ID_MISMATCH` | 消息中的 `session_id` 与当前连接不一致 |
+| `SPEAKER_REGISTER_SAMPLE_RATE` | 注册音频采样率与当前 Session 不一致 |
+| `SPEAKER_REGISTER_DURATION` | 注册音频超过 10 秒 |
+| `SPEAKER_REGISTER_IN_PROGRESS` | 前一次声纹注册尚未完成又发起了新注册 |
 | `stage=ASR` | 当前尚未提交的输入失败，不会产生对应 `RESPONSE_END` |
 | `stage=TTS` | 当前轮以 `RESPONSE_END/FAILED` 结束 |
 
@@ -206,6 +277,9 @@ ASR_RESULT → TEXT_DELTA... → TEXT_END → AUDIO_DELTA... → RESPONSE_END(CO
 - 只发送 WebSocket 文本帧 JSON；
 - 音频是与会话采样率一致的单声道 PCM16；
 - `sequence` 严格递增且跨轮不重置；
+- 首次注册和更新声纹都使用 `SPEAKER_REGISTER`，每次使用新的 `request_id`；
+- 注册期间暂停普通音频，收到匹配的 `SPEAKER_REGISTER_RESULT` 后再恢复；
+- 使用 `success` 判断本次操作、使用 `registered` 判断当前会话是否已有可用声纹；
 - 说完后仍持续发送至少 2 秒静音；
 - 按 `turn_id` 管理文本、音频和打断状态；
 - 用 `TEXT_END` 落定文本，用 `RESPONSE_END` 判断服务端轮次结束。

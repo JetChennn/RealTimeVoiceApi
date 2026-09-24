@@ -17,7 +17,13 @@ from realtime_voice.clients.thinker import (
 )
 from realtime_voice.clients.tts import TtsChunk, TtsRequest, TtsStreamError
 from realtime_voice.observability.metrics import Metrics
-from realtime_voice.protocol.server_messages import TextDelta, TurnState
+from realtime_voice.protocol.decoder import DecodedSpeakerRegister
+from realtime_voice.protocol.server_messages import (
+    SpeakerRegisterResult,
+    SpeakerStatus,
+    TextDelta,
+    TurnState,
+)
 from realtime_voice.session.actor import (
     QueueAsr,
     SendOutbound,
@@ -28,6 +34,7 @@ from realtime_voice.session.actor import (
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
+    AudioSegmentDiscarded,
     SpeechSegmentReady,
     ThinkerCompleted,
     ThinkerDeltaReceived,
@@ -43,6 +50,7 @@ from realtime_voice.session.runtime import (
     SlowClient,
 )
 from realtime_voice.session.state import SessionState, TurnContext, TurnStage
+from realtime_voice.speaker.gate import SpeakerDecision, SpeakerRegistration
 from tests.helpers import sine_pcm16, valid_wav
 
 
@@ -82,6 +90,36 @@ class ReturningReceiver(BlockingWorker):
 class EmptyAsr:
     async def transcribe(self, pcm16_16k: bytes) -> str:
         return ""
+
+
+class RejectingSpeakerGate:
+    def __init__(self) -> None:
+        self.clear_called = False
+
+    async def evaluate(self, segment: SpeechSegment) -> SpeakerDecision:
+        return SpeakerDecision(
+            False,
+            "mismatch",
+            similarity=0.0,
+            registered=True,
+            voiced_ms=920,
+            min_audio_ms=800,
+            audio_eligible=True,
+        )
+
+    def clear(self) -> None:
+        self.clear_called = True
+
+
+class RegisteringSpeakerGate:
+    async def register(self, pcm16_16k: bytes) -> SpeakerRegistration:
+        return SpeakerRegistration(True, "registered", True, False, 3000, 2000)
+
+    async def evaluate(self, segment: SpeechSegment) -> SpeakerDecision:
+        return SpeakerDecision(True, "matched", registered=True)
+
+    def clear(self) -> None:
+        return None
 
 
 class ControlledAsr:
@@ -491,6 +529,127 @@ async def test_actor_queue_asr_effect_is_consumed_serially_per_session() -> None
     await asyncio.wait_for(run_task, timeout=1)
     assert asr.calls == [b"\x01\x00", b"\x02\x00"]
     assert asr.max_active == 1
+
+
+async def test_speaker_mismatch_is_not_sent_to_asr_and_is_released_from_actor_state() -> None:
+    asr = SerialAsr()
+    speaker_gate = RejectingSpeakerGate()
+    runtime, workers = make_runtime(asr=asr, speaker_gate=speaker_gate)
+    run_task = asyncio.create_task(runtime.run())
+    await asyncio.gather(*(worker.started.wait() for worker in workers))
+
+    await runtime.events.put(
+        SpeechSegmentReady(
+            session_id="s", segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x01\x00")
+        )
+    )
+    for _ in range(20):
+        if 1 not in runtime.actor.state.pending_asr_segment_ids:
+            break
+        await asyncio.sleep(0)
+
+    assert asr.calls == []
+    assert 1 not in runtime.actor.state.pending_asr_segment_ids
+    speaker_status = await runtime.outbound.get()
+    assert isinstance(speaker_status, SpeakerStatus)
+    assert speaker_status.model_dump(exclude_none=True) == {
+        "type": "SPEAKER_STATUS",
+        "user_id": "u",
+        "session_id": "s",
+        "turn_id": 0,
+        "interrupt": False,
+        "segment_id": 1,
+        "state": "mismatch",
+        "registered": True,
+        "voiced_ms": 920,
+        "min_audio_ms": 800,
+        "audio_eligible": True,
+        "similarity": 0.0,
+        "allowed": False,
+    }
+    runtime.request_close()
+    await asyncio.wait_for(run_task, timeout=1)
+    assert speaker_gate.clear_called is True
+
+
+async def test_speaker_verification_time_is_not_counted_as_asr_latency() -> None:
+    now = [0.0]
+
+    class TimedSpeakerGate:
+        async def evaluate(self, segment: SpeechSegment) -> SpeakerDecision:
+            now[0] = 5.0
+            return SpeakerDecision(True, "matched", similarity=1.0, registered=True)
+
+        def clear(self) -> None:
+            return None
+
+    class TimedAsr:
+        async def transcribe(self, pcm16_16k: bytes) -> str:
+            now[0] = 7.0
+            return "hello"
+
+    metrics = Metrics(registry=CollectorRegistry())
+    runtime, _ = make_runtime(
+        asr=TimedAsr(),
+        speaker_gate=TimedSpeakerGate(),
+        metrics=metrics,
+        clock=lambda: now[0],
+    )
+    asr_task = asyncio.create_task(runtime._asr_loop())
+    try:
+        await runtime._asr_queue.put(SpeechSegment(1, b"\x01\x00"))
+        assert isinstance(await next_event(runtime, AsrSucceeded), AsrSucceeded)
+    finally:
+        asr_task.cancel()
+        await asyncio.gather(asr_task, return_exceptions=True)
+
+    rendered = metrics.render().decode()
+    assert 'realtime_voice_stage_latency_seconds_count{stage="asr"} 1.0' in rendered
+    assert 'realtime_voice_stage_latency_seconds_sum{stage="asr"} 2.0' in rendered
+
+
+async def test_discarded_speaker_segment_does_not_record_asr_completion_latency() -> None:
+    class PassiveTurnEnd:
+        def process(self, event: object) -> list[object]:
+            return []
+
+    metrics = Metrics(registry=CollectorRegistry())
+    runtime, _ = make_runtime(metrics=metrics, clock=lambda: 20.0)
+    runtime.turn_end = PassiveTurnEnd()
+    runtime._speech_ends[1] = 10.0
+    actor_task = asyncio.create_task(runtime._actor_loop())
+    try:
+        await runtime.events.put(AudioSegmentDiscarded("s", 1, "mismatch"))
+        async with asyncio.timeout(1):
+            while 1 in runtime._speech_ends:
+                await asyncio.sleep(0)
+    finally:
+        actor_task.cancel()
+        await asyncio.gather(actor_task, return_exceptions=True)
+
+    rendered = metrics.render().decode()
+    assert "realtime_voice_speech_end_to_asr_seconds_count 0.0" in rendered
+
+
+async def test_explicit_speaker_registration_returns_correlated_result() -> None:
+    runtime, _ = make_runtime(speaker_gate=RegisteringSpeakerGate())
+
+    await runtime.register_speaker(
+        DecodedSpeakerRegister(
+            request_id="register-1",
+            pcm16=b"\x01\x00" * (24000 * 3),
+            sample_rate=24000,
+            duration_ms=3000,
+        )
+    )
+
+    result = await runtime.outbound.get()
+    assert isinstance(result, SpeakerRegisterResult)
+    assert result.request_id == "register-1"
+    assert result.success is True
+    assert result.registered is True
+    assert result.replaced is False
+    assert result.code == "REGISTERED"
 
 
 async def test_runtime_records_each_real_speech_end_milestone_exactly_once() -> None:

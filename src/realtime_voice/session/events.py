@@ -19,6 +19,15 @@ class SpeechSegmentReady:
 
 
 @dataclass(frozen=True, slots=True)
+class AudioSegmentDiscarded:
+    """A queued speech segment was intentionally filtered before ASR."""
+
+    session_id: str
+    segment_id: int
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class AsrSucceeded:
     session_id: str
     segment_id: int
@@ -139,6 +148,7 @@ class UserInputFailed:
 
 SessionEvent: TypeAlias = (
     SpeechSegmentReady
+    | AudioSegmentDiscarded
     | SpeechActivity
     | SemanticEvaluated
     | UserInputCommitted

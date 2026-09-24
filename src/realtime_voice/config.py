@@ -50,6 +50,19 @@ class Settings(BaseSettings):
     # 非空时透传给 TTS，跳过其内部 qwen-flash prompt 生成（可消除 ~18s 网络延迟）
     tts_prompt_override: str = ""
 
+    # VAD 分段中累计的有效人声最短时长；不足时不进入后续处理。
+    vad_min_speech_ms: int = Field(default=200, ge=0, le=5000)
+
+    # 会话内说话人验证。模型使用 WeSpeaker 导出的 16 kHz ONNX 格式。
+    speaker_verification_enabled: bool = False
+    speaker_model_path: str = "models/wespeaker/cnceleb_resnet34.onnx"
+    speaker_verification_threshold: float = Field(default=0.65, ge=-1, le=1)
+    speaker_register_min_audio_ms: int = Field(default=2000, ge=500, le=10000)
+    speaker_verification_min_audio_ms: int = Field(default=800, ge=100, le=10000)
+    speaker_concurrency: int = Field(default=4, ge=1, le=32)
+    speaker_max_waiters: int = Field(default=32, ge=0)
+    speaker_fail_open: bool = True
+
     turn_end_semantic_enabled: bool = True
     turn_end_candidate_silence_ms: int = Field(default=500, gt=0)
     turn_end_min_silence_ms: int = Field(default=0, ge=0)

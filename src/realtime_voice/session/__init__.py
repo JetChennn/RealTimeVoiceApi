@@ -17,6 +17,7 @@ from realtime_voice.session.actor import (
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
+    AudioSegmentDiscarded,
     SessionDisconnected,
     SessionEvent,
     SpeechSegmentReady,
@@ -44,6 +45,7 @@ __all__ = [
     "THINKER_CLEANUP_SKIPPED",
     "AsrFailed",
     "AsrSucceeded",
+    "AudioSegmentDiscarded",
     "BoundedByteQueue",
     "CloseRuntime",
     "DuplicateSession",

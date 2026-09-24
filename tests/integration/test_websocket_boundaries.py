@@ -93,6 +93,100 @@ async def test_receiver_maps_actual_65th_queued_audio_message_to_backpressure() 
         await receiver.run()
 
 
+async def test_receiver_discards_audio_received_during_speaker_registration() -> None:
+    payload = bytes(16000 * 2 * 3)
+    registration_frame = json.dumps(
+        {
+            "type": "SPEAKER_REGISTER",
+            "session_id": "s",
+            "request_id": "register-1",
+            "audio_format": "PCM16",
+            "sample_rate": 16000,
+            "channels": 1,
+            "audio_b64": base64.b64encode(payload).decode(),
+        }
+    )
+    discarded_audio = bytes(320)
+    retained_audio = bytes([1, 0]) * 160
+
+    class QueuedSocket:
+        def __init__(self) -> None:
+            self.frames: asyncio.Queue[str] = asyncio.Queue()
+            self.received = 0
+            self.second_frame_received = asyncio.Event()
+
+        async def receive_text(self) -> str:
+            frame = await self.frames.get()
+            self.received += 1
+            if self.received == 2:
+                self.second_frame_received.set()
+            return frame
+
+    socket = QueuedSocket()
+    socket.frames.put_nowait(registration_frame)
+    registration_started = asyncio.Event()
+    finish_registration = asyncio.Event()
+    captured = []
+
+    async def register(request) -> None:
+        captured.append(request)
+        registration_started.set()
+        await finish_registration.wait()
+
+    queue = BoundedByteQueue.audio(maxsize=64, max_bytes=16000 * 2 * 3)
+    closed = False
+
+    def request_close() -> None:
+        nonlocal closed
+        closed = True
+
+    receiver = WebSocketReceiver(
+        socket,
+        "s",
+        16000,
+        queue,
+        request_close,
+        register,
+    )
+    receiver_task = asyncio.create_task(receiver.run())
+
+    await asyncio.wait_for(registration_started.wait(), 1)
+    socket.frames.put_nowait(
+        json.dumps(
+            {
+                "type": "AUDIO_CHUNK",
+                "session_id": "s",
+                "sequence": 0,
+                "audio_b64": base64.b64encode(discarded_audio).decode(),
+            }
+        )
+    )
+    await asyncio.wait_for(socket.second_frame_received.wait(), 1)
+    assert queue.empty()
+
+    finish_registration.set()
+    await asyncio.sleep(0)
+    socket.frames.put_nowait(
+        json.dumps(
+            {
+                "type": "AUDIO_CHUNK",
+                "session_id": "s",
+                "sequence": 1,
+                "audio_b64": base64.b64encode(retained_audio).decode(),
+            }
+        )
+    )
+    socket.frames.put_nowait(json.dumps({"type": "CLOSE_SESSION", "session_id": "s"}))
+
+    await asyncio.wait_for(receiver_task, 1)
+
+    assert captured[0].request_id == "register-1"
+    assert captured[0].duration_ms == 3000
+    assert queue.get_nowait() == retained_audio
+    assert queue.empty()
+    assert closed is True
+
+
 @pytest.mark.parametrize("kind", ["count", "bytes"])
 async def test_runtime_reports_slow_client_without_waiting_for_outbound_capacity(kind: str) -> None:
     runtime, _ = make_runtime()

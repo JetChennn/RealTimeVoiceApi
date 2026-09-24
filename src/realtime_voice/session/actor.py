@@ -24,6 +24,7 @@ from realtime_voice.protocol.server_messages import (
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
+    AudioSegmentDiscarded,
     SessionDisconnected,
     SessionEvent,
     SpeechSegmentReady,
@@ -183,6 +184,12 @@ class SessionActor:
             self.state.registered_asr_segment_ids.add(segment_id)
             self.state.pending_asr_segment_ids.add(segment_id)
             return [QueueAsr(self.state.session_id, event.segment)]
+        if isinstance(event, AudioSegmentDiscarded):
+            stale_reason = self._asr_stale_reason(event.segment_id)
+            if stale_reason is not None:
+                return [self._stale(event, stale_reason)]
+            self.state.pending_asr_segment_ids.remove(event.segment_id)
+            return []
         if isinstance(event, UserInputCommitted):
             return self._commit_user_input(event)
         if isinstance(event, UserInputFailed):

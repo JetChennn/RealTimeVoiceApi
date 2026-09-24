@@ -11,6 +11,7 @@ from realtime_voice.audio.vad import (
     BoundedDetectorOffload,
     DetectorSnapshot,
     SileroDetector,
+    SpeechSegment,
     StreamingVadSegmenter,
     VadConfig,
     VadWorker,
@@ -139,7 +140,7 @@ def test_worker_offloads_detection_and_emits_only_completed_segments() -> None:
             session_id="session-1",
             audio_queue=audio_queue,
             event_queue=event_queue,
-            segmenter=StreamingVadSegmenter(VadConfig(min_silence_ms=500)),
+            segmenter=StreamingVadSegmenter(VadConfig(min_silence_ms=500, min_speech_ms=0)),
             detector=detector,
             detector_offload=offload,
             clock=lambda: 42.0,
@@ -177,7 +178,7 @@ async def test_worker_stamps_acoustic_speech_end_before_confirmation_silence() -
         session_id="acoustic-end",
         audio_queue=audio_queue,
         event_queue=event_queue,
-        segmenter=StreamingVadSegmenter(VadConfig(min_silence_ms=64)),
+        segmenter=StreamingVadSegmenter(VadConfig(min_silence_ms=64, min_speech_ms=0)),
         detector=FrameDetector(),
         detector_offload=offload,
         clock=lambda: 100.0,
@@ -278,7 +279,7 @@ async def test_vad_worker_records_real_processing_latency() -> None:
         session_id="metrics",
         audio_queue=audio_queue,
         event_queue=event_queue,
-        segmenter=StreamingVadSegmenter(VadConfig()),
+        segmenter=StreamingVadSegmenter(VadConfig(min_speech_ms=0)),
         detector=SileroDetector(model=lambda samples, sample_rate: 1.0),
         detector_offload=offload,
         metrics=metrics,
@@ -291,6 +292,31 @@ async def test_vad_worker_records_real_processing_latency() -> None:
 
     rendered = metrics.render().decode()
     assert 'realtime_voice_stage_latency_seconds_count{stage="vad"} 1.0' in rendered
+
+
+async def test_worker_discards_a_segment_below_minimum_voiced_duration() -> None:
+    metrics = Metrics(registry=CollectorRegistry())
+    events: asyncio.Queue[SpeechSegmentReady] = asyncio.Queue()
+    worker = VadWorker(
+        session_id="minimum-speech",
+        audio_queue=asyncio.Queue(),
+        event_queue=events,
+        segmenter=StreamingVadSegmenter(VadConfig(min_speech_ms=200)),
+        detector=object(),
+        detector_offload=object(),
+        metrics=metrics,
+    )
+
+    await worker._publish_event(
+        SpeechSegmentReady(
+            "minimum-speech", SpeechSegment(1, b"\x00\x00" * 1600, voiced_samples=1600)
+        )
+    )
+
+    assert events.empty()
+    assert 'realtime_voice_vad_segments_discarded_total{reason="too_short"} 1.0' in (
+        metrics.render().decode()
+    )
 
 
 def test_asr_zh_fixture_is_mono_16khz_pcm16() -> None:
@@ -345,7 +371,7 @@ async def run_vad_worker(
         input_sample_rate=input_sample_rate,
         audio_queue=audio_queue,
         event_queue=event_queue,
-        segmenter=StreamingVadSegmenter(VadConfig()),
+        segmenter=StreamingVadSegmenter(VadConfig(min_speech_ms=0)),
         detector=detector,
         detector_offload=offload,
     )

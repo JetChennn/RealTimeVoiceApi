@@ -8,6 +8,7 @@ from realtime_voice.observability.metrics import Metrics
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
+    AudioSegmentDiscarded,
     SemanticEvaluated,
     SpeechSegmentReady,
     UserInputCommitted,
@@ -69,6 +70,22 @@ class Harness:
         await asyncio.sleep(0)
         while not self.queue.empty():
             self.outputs.extend(self.coordinator.process(self.queue.get_nowait()))
+
+
+async def test_filtered_segment_is_removed_without_marking_the_input_as_asr_failure():
+    h = Harness()
+    h.feed(True, 10)
+    h.feed(False, 16)
+    segment = h.segments[-1]
+
+    output = h.coordinator.process(
+        AudioSegmentDiscarded("s", segment.segment.segment_id, "mismatch")
+    )
+
+    assert output == []
+    assert segment.segment.segment_id not in h.coordinator.segment_inputs
+    assert h.coordinator.inputs[segment.input_id].failed is False
+    await h.coordinator.aclose()
 
 
 async def test_resumption_combines_once_and_does_not_commit_before_minimum():

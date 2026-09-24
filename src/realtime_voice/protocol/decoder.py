@@ -7,7 +7,11 @@ from dataclasses import dataclass
 
 from pydantic import TypeAdapter, ValidationError
 
-from realtime_voice.protocol.client_messages import AudioChunkMessage, ClientMessage
+from realtime_voice.protocol.client_messages import (
+    AudioChunkMessage,
+    ClientMessage,
+    SpeakerRegister,
+)
 from realtime_voice.protocol.errors import ProtocolViolation
 
 _CLIENT_MESSAGE_ADAPTER = TypeAdapter(ClientMessage)
@@ -20,6 +24,14 @@ class DecodedAudioChunk:
     sequence: int
     timestamp_ms: int | None
     pcm16: bytes
+    duration_ms: float
+
+
+@dataclass(frozen=True, slots=True)
+class DecodedSpeakerRegister:
+    request_id: str
+    pcm16: bytes
+    sample_rate: int
     duration_ms: float
 
 
@@ -65,5 +77,35 @@ def decode_pcm16(message: AudioChunkMessage, sample_rate: int) -> DecodedAudioCh
         sequence=message.sequence,
         timestamp_ms=message.timestamp_ms,
         pcm16=payload,
+        duration_ms=duration_ms,
+    )
+
+
+def decode_speaker_register(
+    message: SpeakerRegister,
+    session_sample_rate: int,
+) -> DecodedSpeakerRegister:
+    """Decode one bounded, session-rate PCM16 speaker registration recording."""
+    if message.sample_rate != session_sample_rate:
+        raise ProtocolViolation(
+            "SPEAKER_REGISTER_SAMPLE_RATE",
+            "speaker registration sample_rate must match the session sample_rate",
+        )
+    try:
+        payload = base64.b64decode(message.audio_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ProtocolViolation("INVALID_BASE64", "audio_b64 is not valid Base64") from exc
+    if not payload or len(payload) % 2:
+        raise ProtocolViolation("PCM16_BYTE_ALIGNMENT", "PCM16 must contain complete int16 samples")
+    duration_ms = len(payload) / 2 / session_sample_rate * 1000.0
+    if duration_ms > 10_000:
+        raise ProtocolViolation(
+            "SPEAKER_REGISTER_DURATION",
+            "speaker registration audio must not exceed 10 seconds",
+        )
+    return DecodedSpeakerRegister(
+        request_id=message.request_id,
+        pcm16=payload,
+        sample_rate=session_sample_rate,
         duration_ms=duration_ms,
     )

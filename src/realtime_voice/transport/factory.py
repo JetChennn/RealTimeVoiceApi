@@ -23,6 +23,8 @@ from realtime_voice.protocol.client_messages import CreateSession
 from realtime_voice.session.registry import SessionRegistry
 from realtime_voice.session.runtime import BoundedByteQueue, SessionRuntime
 from realtime_voice.session.state import SessionState
+from realtime_voice.speaker.gate import SessionSpeakerGate
+from realtime_voice.speaker.wespeaker import WeSpeakerOnnxEmbedder
 from realtime_voice.transport.workers import WebSocketReceiver, WebSocketSender
 
 if TYPE_CHECKING:
@@ -66,6 +68,16 @@ def configure_services(services: AppServices) -> None:
     services.detector_offload = BoundedDetectorOffload(
         settings.cpu_workers, metrics=services.metrics
     )
+    services.speaker_embedder = (
+        WeSpeakerOnnxEmbedder(
+            settings.speaker_model_path,
+            concurrency=settings.speaker_concurrency,
+            max_waiters=settings.speaker_max_waiters,
+            metrics=services.metrics,
+        )
+        if settings.speaker_verification_enabled
+        else None
+    )
     runtime_factory = services.runtime_factory
     if runtime_factory is None:
         runtime_factory = lambda create, websocket: build_runtime(create, websocket, services)
@@ -96,7 +108,12 @@ def build_runtime(
     )
     runtime: SessionRuntime
     receiver = WebSocketReceiver(
-        websocket, create.session_id, create.sample_rate, audio, lambda: runtime.request_close()
+        websocket,
+        create.session_id,
+        create.sample_rate,
+        audio,
+        lambda: runtime.request_close(),
+        lambda registration: runtime.register_speaker(registration),
     )
     sender = WebSocketSender(websocket, outbound)
     turn_end_audio = None
@@ -111,7 +128,7 @@ def build_runtime(
         session_id=create.session_id,
         audio_queue=audio,
         event_queue=events,
-        segmenter=StreamingVadSegmenter(VadConfig()),
+        segmenter=StreamingVadSegmenter(VadConfig(min_speech_ms=settings.vad_min_speech_ms)),
         detector=SileroDetector(),
         detector_offload=services.detector_offload,
         input_sample_rate=create.sample_rate,
@@ -152,5 +169,10 @@ def build_runtime(
         tts_drain_timeout=settings.tts_drain_timeout_seconds,
         tts_prompt_override=settings.tts_prompt_override,
         slow_stage_warning_seconds=settings.slow_stage_warning_seconds,
+        speaker_gate=(
+            SessionSpeakerGate(settings, services.speaker_embedder)
+            if settings.speaker_verification_enabled
+            else None
+        ),
     )
     return runtime

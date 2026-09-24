@@ -28,6 +28,36 @@ class SessionCreated(ServerMessageBase):
     channels: Literal[1]
 
 
+class SpeakerStatus(ServerMessageBase):
+    """Per-segment, privacy-safe speaker-verification diagnostic state."""
+
+    type: Literal["SPEAKER_STATUS"]
+    turn_id: Literal[0]
+    interrupt: Literal[False]
+    segment_id: int = Field(ge=1)
+    state: str = Field(min_length=1)
+    registered: bool
+    voiced_ms: float = Field(ge=0)
+    min_audio_ms: float = Field(ge=0)
+    audio_eligible: bool
+    similarity: float | None = Field(default=None, ge=-1, le=1)
+    allowed: bool
+
+
+class SpeakerRegisterResult(ServerMessageBase):
+    type: Literal["SPEAKER_REGISTER_RESULT"]
+    turn_id: Literal[0]
+    interrupt: Literal[False]
+    request_id: str = Field(min_length=1, max_length=128)
+    success: bool
+    registered: bool
+    replaced: bool
+    code: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    duration_ms: float = Field(ge=0)
+    min_audio_ms: float = Field(ge=0)
+
+
 class AsrResult(ServerMessageBase):
     type: Literal["ASR_RESULT"]
     text: str = Field(min_length=1)
@@ -83,6 +113,8 @@ class ErrorMessage(ServerMessageBase):
 
 ServerMessage = Annotated[
     SessionCreated
+    | SpeakerStatus
+    | SpeakerRegisterResult
     | AsrResult
     | TextDelta
     | TextEnd

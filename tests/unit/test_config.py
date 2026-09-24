@@ -52,6 +52,10 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
     assert settings.turn_end_inference_timeout_ms == 500
     assert settings.turn_end_cpu_threads == 16
     assert settings.slow_stage_warning_seconds == 2.0
+    assert settings.vad_min_speech_ms == 200
+    assert settings.speaker_verification_enabled is False
+    assert settings.speaker_register_min_audio_ms == 2000
+    assert settings.speaker_verification_min_audio_ms == 800
 
 
 def test_env_example_covers_every_runtime_setting() -> None:
@@ -80,6 +84,7 @@ def test_thinker_fallback_texts_must_be_non_empty_and_distinct() -> None:
             thinker_fallback_text_2="同一句",
             thinker_fallback_text_3="同一句",
         )
+
 
 @pytest.mark.parametrize(
     "field",

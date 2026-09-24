@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>实时语音 · 网关测试台</title>
-  <link rel="stylesheet" href="./style.css">
-  <script type="module" src="./app.mjs"></script>
+  <link rel="stylesheet" href="./style.css?v=20260924-speaker-ui-1">
+  <script type="module" src="./app.mjs?v=20260924-speaker-ui-1"></script>
 </head>
 <body>
 <main>
@@ -26,6 +26,31 @@
     <div class="section-heading"><h2>阶段耗时</h2><span id="metrics-status">开始对话后采样</span></div>
     <div id="metrics" class="metrics"></div>
     <p class="footnote">来自 /metrics 每秒采样的增量平均值；包含网关到下游的等待与通信。全网关统计，不能归属到某一轮或某个用户。Thinker 内部 RAG 耗时包含在 LLM 首包耗时中。</p>
+  </section>
+  <section id="speaker-panel" aria-label="声纹验证" class="speaker-section" data-tone="idle">
+    <div class="section-heading"><h2>声纹验证</h2><span>仅在当前会话内生效</span></div>
+    <div class="speaker-card">
+      <div class="speaker-hero">
+        <div class="speaker-orb" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="speaker-copy"><span class="speaker-kicker">SESSION VOICEPRINT</span><h3 id="speaker-summary">当前会话尚未注册声纹</h3><p>注册后，每段语音会在进入 ASR 前完成身份验证。</p></div>
+        <strong id="speaker-state" class="speaker-pill">未注册</strong>
+      </div>
+      <div class="speaker-content">
+        <div class="speaker-score">
+          <div class="speaker-score-heading"><span>与参考声纹相似度</span><strong id="speaker-similarity">—</strong></div>
+          <div class="speaker-score-track" aria-hidden="true"><i id="speaker-similarity-fill"></i></div>
+          <div class="speaker-score-scale"><span>低</span><span>验证阈值</span><span>高</span></div>
+        </div>
+        <div class="speaker-metrics">
+          <div class="speaker-metric"><span>本段有效发声</span><strong id="speaker-audio">—</strong><small>有效时长 / 最低要求</small></div>
+          <div class="speaker-metric"><span>已过滤音频</span><strong id="speaker-filtered">0 段</strong><small>声纹不符或时长不足</small></div>
+        </div>
+      </div>
+      <div class="speaker-footer">
+        <button id="speaker-register" class="speaker-register" disabled><span class="speaker-button-icon" aria-hidden="true">◉</span><span id="speaker-register-label">录取声纹（3 秒）</span></button>
+        <div class="speaker-message"><i aria-hidden="true"></i><p id="speaker-detail">注册前不会过滤普通语音；声纹仅保存在当前会话中。</p></div>
+      </div>
+    </div>
   </section>
   <section class="conversation-section" aria-label="对话记录">
     <div class="section-heading"><h2>对话记录</h2><span id="turn-count">0 轮</span></div>

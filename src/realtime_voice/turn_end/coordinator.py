@@ -13,6 +13,7 @@ from realtime_voice.observability.logging import log_event
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
+    AudioSegmentDiscarded,
     SemanticEvaluated,
     SpeechActivity,
     SpeechSegmentReady,
@@ -92,6 +93,11 @@ class TurnEndCoordinator:
                 item.silence_ms = event.silence_ms
                 item.speech_end_at = event.speech_end_at
                 item.forced |= event.force_commit
+        elif isinstance(event, AudioSegmentDiscarded):
+            input_id = self.segment_inputs.pop(event.segment_id, None)
+            if input_id not in self.inputs:
+                return output
+            self.inputs[input_id].segments.pop(event.segment_id, None)
         elif isinstance(event, (AsrSucceeded, AsrFailed)):
             input_id = self.segment_inputs.pop(event.segment_id, None)
             if input_id not in self.inputs:

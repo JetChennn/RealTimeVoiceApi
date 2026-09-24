@@ -1071,6 +1071,7 @@ dependencies = [
     { name = "soxr" },
     { name = "tokenizers" },
     { name = "torch" },
+    { name = "torchaudio" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1098,6 +1099,7 @@ requires-dist = [
     { name = "soxr", specifier = ">=0.5,<1" },
     { name = "tokenizers", specifier = ">=0.22,<1" },
     { name = "torch", specifier = ">=2,<3" },
+    { name = "torchaudio", specifier = ">=2,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
     { name = "websockets", marker = "extra == 'dev'", specifier = ">=14,<16" },
 ]

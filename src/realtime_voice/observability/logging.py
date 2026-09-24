@@ -45,6 +45,14 @@ _SAFE = frozenset(
         "error_type",
         "probability",
         "segment_count",
+        "decision",
+        "allow",
+        "similarity",
+        "voiced_ms",
+        "min_audio_ms",
+        "audio_eligible",
+        "registered",
+        "replaced",
     }
 )
 

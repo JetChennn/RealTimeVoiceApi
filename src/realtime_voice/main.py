@@ -138,6 +138,7 @@ class AppServices:
     runtime_factory: RuntimeFactory | None = None
     metrics: Metrics | None = None
     semantic_detector: object | None = None
+    speaker_embedder: object | None = None
     downstream_health: dict[str, dict[str, str]] = field(default_factory=dict)
 
     process_snapshot: Callable[[], ProcessSnapshot] = local_process_snapshot
@@ -166,6 +167,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        if services.speaker_embedder is not None:
+            await services.speaker_embedder.start()
         if resolved.turn_end_semantic_enabled:
             from realtime_voice.turn_end.model import SemanticDetector
 
@@ -196,6 +199,8 @@ def create_app(
             await asyncio.gather(sampler, prober, return_exceptions=True)
             if services.semantic_detector is not None:
                 await services.semantic_detector.aclose()
+            if services.speaker_embedder is not None:
+                await services.speaker_embedder.aclose()
             await services.detector_offload.aclose()
 
     app = FastAPI(title="RealTimeVoiceAPI", version="1.0.0", lifespan=lifespan)

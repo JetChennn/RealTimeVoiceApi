@@ -40,6 +40,18 @@ class AudioChunkMessage(BaseModel):
     audio_b64: str = Field(min_length=1)
 
 
+class SpeakerRegister(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["SPEAKER_REGISTER"]
+    session_id: str = Field(min_length=1, max_length=128)
+    request_id: str = Field(min_length=1, max_length=128)
+    audio_format: Literal["PCM16"]
+    sample_rate: Literal[16000, 24000, 48000]
+    channels: Literal[1]
+    audio_b64: str = Field(min_length=1)
+
+
 class CloseSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -48,6 +60,6 @@ class CloseSession(BaseModel):
 
 
 ClientMessage = Annotated[
-    CreateSession | AudioChunkMessage | CloseSession,
+    CreateSession | AudioChunkMessage | SpeakerRegister | CloseSession,
     Field(discriminator="type"),
 ]

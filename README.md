@@ -1,11 +1,17 @@
 # RealTimeVoiceAPI
 
-基于异步 WebSocket 的实时语音网关，统一编排 **VAD → ASR → 语义结束判断 → Thinker（可选 RAG）→ TTS**。客户端在创建会话时决定是否使用知识检索、指定检索场景；网关只把这两个参数传给 Thinker，不再直接访问 KBService 或组装知识上下文。
+基于异步 WebSocket 的实时语音网关，统一编排 **VAD → 会话级声纹门控（可选）→ ASR → 语义结束判断 → Thinker（可选 RAG）→ TTS**。客户端在创建会话时决定是否使用知识检索、指定检索场景；网关只把这两个参数传给 Thinker，不再直接访问 KBService 或组装知识上下文。
 
 ```mermaid
 flowchart LR
     C[客户端持续发送 PCM16 音频] --> V[VAD: 500ms 静音生成候选片段]
-    V --> A[候选片段调用一次 ASR]
+    V --> G{最短有效发声时长?}
+    G -->|不足| C
+    G -->|满足| P{会话已有参考声纹?}
+    P -->|否，不过滤| A[候选片段调用一次 ASR]
+    P -->|是| Q{声纹匹配?}
+    Q -->|否| C
+    Q -->|是| A
     A --> M[合并本轮已有 ASR 文本]
     M --> B{用户恢复说话?}
     B -->|是| V
@@ -46,6 +52,7 @@ ASR 使用 16kHz 音频；候选片段只识别一次，同一段用户输入的
 
 - **WebSocket 单连接**：建连时声明音频格式与采样率，上下行共用；客户端只传 Base64 编码的 PCM16 音频。
 - **全链路编排**：VAD 静音形成候选片段，ASR 转写后由本地模型结合上下文判断用户是否说完，再按需检索知识、生成回复和语音。
+- **说话人门控（可选）**：客户端通过 `SPEAKER_REGISTER` 显式注册或替换会话参考声纹；注册推理期间收到的普通音频强制丢弃；未注册时不做过滤，注册成功后非目标说话人的片段在 ASR 前直接丢弃。声纹只存在于当前 WebSocket 会话，断开即清除。
 - **语义结束判断**：短停顿先等待；达到最短静音且语义完整时提交，模型判断继续等待、超时、失败或过载时由最长静音兜底，输入达到最大时长时强制提交。
 - **会话级 RAG 透传**：`rag_enabled` 默认关闭；开启后每轮把 0～3 个场景传给 Thinker，场景为空时由 Thinker 仅检索通用知识。
 - **流式输出**：ASR 返回最终转写，Thinker 回复文本和 TTS 音频分别流式下发。
@@ -194,6 +201,19 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_DOWNSTREAM_PROBE_TIMEOUT_SECONDS` | `2` | 同左 | 下游健康探测超时 |
 | `RTVA_SLOW_STAGE_WARNING_SECONDS` | `2` | 同左 | ASR、Thinker 首段文本、TTS 首块及相邻音频块间隔的慢请求告警阈值 |
 | `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 同左 | 非空时直接作为 TTS `prompt`；为空时依次使用 Thinker `done.output.tone` 和默认值“平和” |
+| `RTVA_VAD_MIN_SPEECH_MS` | `200` | 同左 | VAD 片段累计有效发声不足此时长时直接过滤，降低“嗯、好”和瞬态噪声误触发 |
+
+说话人验证默认关闭；开启后使用 WeSpeaker 导出的 16 kHz ONNX 模型。服务启动时只加载一个共享模型实例，每个会话最多保留一个由客户端显式注册的参考声纹，重复注册时成功结果原子覆盖旧声纹，失败时保留旧声纹，断连时立即清除。将模型文件预先放到 `RTVA_SPEAKER_MODEL_PATH`（默认 `models/wespeaker/cnceleb_resnet34.onnx`）；`start_services.sh` 会在启动前检查该文件。
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `RTVA_SPEAKER_VERIFICATION_ENABLED` | `false` | 是否启用声纹门控 |
+| `RTVA_SPEAKER_MODEL_PATH` | `models/wespeaker/cnceleb_resnet34.onnx` | WeSpeaker 16 kHz ONNX 模型文件 |
+| `RTVA_SPEAKER_VERIFICATION_THRESHOLD` | `0.65` | 普通语音与会话参考声纹的最低余弦相似度 |
+| `RTVA_SPEAKER_REGISTER_MIN_AUDIO_MS` | `2000` | `SPEAKER_REGISTER` 注册音频的最短时长 |
+| `RTVA_SPEAKER_VERIFICATION_MIN_AUDIO_MS` | `800` | 已注册后可用于声纹验证的最短有效发声时长；不足时直接过滤 |
+| `RTVA_SPEAKER_CONCURRENCY` / `RTVA_SPEAKER_MAX_WAITERS` | `4` / `32` | 共享 ONNX 声纹推理的并发与排队上限 |
+| `RTVA_SPEAKER_FAIL_OPEN` | `true` | 模型推理异常时是否放行片段；生产中建议先保持 `true` 并观察指标 |
 
 语义结束判断的配置如下。候选静音和最短静音都不能超过最长静音；这些时间由客户端持续上传的音频帧推进，停止发帧不算静音。模型输入只包含当前用户输入已经合并的候选 ASR 文本，以及上一轮已经产生的完整回复；无论该回复的 TTS 是否播放完成或被打断，都会作为上下文，但不会携带更早轮次或上一轮用户文本。用户恢复说话时，旧语义结果失效；新候选识别完成后再基于合并文本判断。
 

@@ -7,6 +7,7 @@ from realtime_voice.session.actor import CloseRuntime, QueueAsr, RecordStaleEven
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
+    AudioSegmentDiscarded,
     SessionDisconnected,
     SpeechSegmentReady,
     ThinkerCompleted,
@@ -97,6 +98,22 @@ def test_duplicate_asr_segment_is_stale_even_if_first_result_was_empty() -> None
 
     assert actor.state.turns == {}
     assert_only_stale(effects, "asr_segment")
+
+
+def test_filtered_audio_consumes_pending_asr_segment_without_client_error() -> None:
+    actor = actor_for_test()
+    actor.handle(
+        SpeechSegmentReady(
+            session_id="s", segment=SpeechSegment(segment_id=55, pcm16_16k=bytes(2))
+        )
+    )
+
+    effects = actor.handle(
+        AudioSegmentDiscarded(session_id="s", segment_id=55, reason="mismatch")
+    )
+
+    assert effects == []
+    assert 55 not in actor.state.pending_asr_segment_ids
 
 
 def test_asr_result_for_unpublished_segment_is_stale() -> None:

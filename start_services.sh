@@ -23,6 +23,7 @@
 #
 # When semantic turn-end detection is enabled, `start`/`restart` validates the
 # pinned local model and downloads missing or corrupt assets before any service starts.
+# Speaker verification, when enabled, requires a separately provisioned WeSpeaker ONNX file.
 
 set -Eeuo pipefail
 
@@ -173,6 +174,27 @@ ensure_turn_end_model() {
     "$GATEWAY_PYTHON" "$SCRIPT_DIR/scripts/download_turn_end_model.py" --output "$model_path"
     "$GATEWAY_PYTHON" "$SCRIPT_DIR/scripts/download_turn_end_model.py" \
         --output "$model_path" --check
+}
+
+ensure_speaker_model() {
+    local enabled="${RTVA_SPEAKER_VERIFICATION_ENABLED:-false}"
+    local configured_path="${RTVA_SPEAKER_MODEL_PATH:-models/wespeaker/cnceleb_resnet34.onnx}"
+    local model_path
+    enabled="${enabled,,}"
+
+    case "$enabled" in
+        false|0|no|off) return ;;
+        true|1|yes|on) ;;
+        *) die "RTVA_SPEAKER_VERIFICATION_ENABLED must be a boolean value" ;;
+    esac
+
+    if [[ "$configured_path" == /* ]]; then
+        model_path="$configured_path"
+    else
+        model_path="$SCRIPT_DIR/$configured_path"
+    fi
+    [[ -f "$model_path" ]] || die "WeSpeaker ONNX model not found: $model_path"
+    echo "WeSpeaker model is ready: $model_path"
 }
 
 start_process() {
@@ -375,6 +397,7 @@ start_all() {
     load_gateway_config
     validate_runtime
     ensure_turn_end_model
+    ensure_speaker_model
     mkdir -p "$RUN_DIR" "$LOG_DIR"
 
     trap cleanup_failed_start ERR

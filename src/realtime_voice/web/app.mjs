@@ -30,12 +30,114 @@ let active = null;
 let turns = new Map();
 let sequence = 0;
 let totalTurns = 0;
+const speakerRegisterSeconds = 3;
+const speakerStates = {
+  disabled: '未启用',
+  embedder_unavailable: '模型不可用',
+  unregistered: '未注册，不过滤',
+  matched: '声纹匹配',
+  mismatch: '声纹不匹配',
+  too_short: '音频时长不足',
+  embedding_failed: '提取失败',
+};
+function setSpeakerTone(tone) {
+  $('speaker-panel').dataset.tone = tone;
+}
+function setSpeakerButton(text) {
+  $('speaker-register-label').textContent = text;
+}
+function setSpeakerSimilarity(value) {
+  const valid = typeof value === 'number' && Number.isFinite(value);
+  $('speaker-similarity').textContent = valid ? value.toFixed(3) : '—';
+  $('speaker-similarity-fill').style.width = valid ? `${Math.max(0, Math.min(100, value * 100))}%` : '0%';
+}
+function resetSpeakerPanel() {
+  setSpeakerTone('idle');
+  $('speaker-summary').textContent = '当前会话尚未注册声纹';
+  $('speaker-state').textContent = '未注册';
+  $('speaker-filtered').textContent = '0 段';
+  $('speaker-audio').textContent = '—';
+  setSpeakerSimilarity(null);
+  setSpeakerButton(`录取声纹（${speakerRegisterSeconds} 秒）`);
+  $('speaker-register').disabled = true;
+  $('speaker-detail').textContent = '注册前不会过滤普通语音；声纹仅保存在当前会话中。';
+}
+function updateSpeakerStatus(session, message) {
+  const state = speakerStates[message.state] || message.state;
+  const result = message.allowed ? '已放行至 ASR' : '已在网关过滤';
+  const audio = `${Math.round(message.voiced_ms)} / ${Math.round(message.min_audio_ms)} ms`;
+  const eligibility = message.audio_eligible ? '满足验证时长' : '未满足验证时长';
+  if (!message.allowed) session.speakerFiltered++;
+  session.speakerRegistered = message.registered;
+  setSpeakerTone(!message.registered ? 'idle' : message.allowed ? 'success' : message.state === 'mismatch' ? 'danger' : 'warning');
+  $('speaker-state').textContent = state;
+  $('speaker-filtered').textContent = `${session.speakerFiltered} 段`;
+  $('speaker-audio').textContent = audio;
+  setSpeakerSimilarity(message.similarity);
+  $('speaker-summary').textContent = message.registered ? '当前会话已有参考声纹' : '当前会话尚未注册声纹';
+  $('speaker-detail').textContent = `第 ${message.segment_id} 段：${eligibility}；${result}。`;
+}
+function finishSpeakerRegistration(session, message) {
+  if (!session.registration || message.request_id !== session.registration.requestId) return;
+  clearTimeout(session.registration.timeout);
+  session.registration = null;
+  session.speakerRegistered = message.registered;
+  $('speaker-register').disabled = false;
+  setSpeakerButton(message.registered ? '重新录取声纹（3 秒）' : '录取声纹（3 秒）');
+  if (message.success) {
+    const state = message.replaced ? '声纹已修改' : '声纹已注册';
+    $('speaker-state').textContent = state;
+    setSpeakerTone('success');
+    $('speaker-summary').textContent = '当前会话已有参考声纹';
+    $('speaker-detail').textContent = `${state}，注册音频 ${Math.round(message.duration_ms)}ms；后续普通语音将先进行声纹验证。`;
+    notice(`${state}，现在可以继续正常对话。`);
+    return;
+  }
+  const reasons = {AUDIO_TOO_SHORT: '录音时间不足', NO_SPEECH: '没有检测到清晰有效的声音', EMBEDDING_FAILED: '声纹提取失败', EMBEDDER_UNAVAILABLE: '声纹模型不可用', SPEAKER_DISABLED: '声纹功能未启用'};
+  setSpeakerTone('danger');
+  $('speaker-state').textContent = '注册失败';
+  $('speaker-summary').textContent = message.registered ? '注册失败，继续使用原声纹' : '当前会话尚未注册声纹';
+  $('speaker-detail').textContent = `${reasons[message.code] || message.message}；${message.registered ? '原声纹未被覆盖。' : '普通语音仍不过滤。'}`;
+  notice($('speaker-detail').textContent, true);
+}
+function sendSpeakerRegistration(session) {
+  const registration = session.registration;
+  if (!registration || registration.phase !== 'capture') return;
+  const pcm = new Uint8Array(registration.samples * 2);
+  let offset = 0;
+  for (const chunk of registration.chunks) { pcm.set(chunk, offset); offset += chunk.length; }
+  registration.chunks = [];
+  registration.phase = 'processing';
+  setSpeakerTone('processing');
+  $('speaker-state').textContent = '正在计算声纹';
+  $('speaker-detail').textContent = '注册音频已发送；计算完成前普通音频保持暂停。';
+  session.socket.send(JSON.stringify({type: 'SPEAKER_REGISTER', session_id: session.id, request_id: registration.requestId, audio_format: 'PCM16', sample_rate: session.context.sampleRate, channels: 1, audio_b64: base64Pcm(pcm.buffer)}));
+  registration.timeout = setTimeout(() => {
+    if (active !== session || session.registration !== registration) return;
+    setSpeakerTone('danger');
+    $('speaker-state').textContent = '注册超时';
+    $('speaker-detail').textContent = '无法确认服务端声纹状态，本次会话已安全关闭，请重新开始。';
+    stop(session, $('speaker-detail').textContent, true);
+  }, 15000);
+}
+function startSpeakerRegistration() {
+  const session = active;
+  if (!session?.ready || session.registration || session.socket.readyState !== WebSocket.OPEN) return;
+  stopPlayback(session);
+  session.registration = {requestId: crypto.randomUUID(), phase: 'capture', chunks: [], samples: 0, targetSamples: Math.round(session.context.sampleRate * speakerRegisterSeconds), timeout: null};
+  setSpeakerTone('recording');
+  $('speaker-register').disabled = true;
+  $('speaker-state').textContent = '正在录取声纹';
+  $('speaker-detail').textContent = `请持续清晰说话 ${speakerRegisterSeconds} 秒；期间不会发送普通对话音频。`;
+  notice($('speaker-detail').textContent);
+}
 function notice(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); }
 function status(text, live = false) { $('status').textContent = text; $('status').classList.toggle('live', live); }
 function lock(locked) {
   $('start').disabled = locked; $('cancel').disabled = !locked;
   $('device').disabled = locked; $('rag').disabled = locked;
   $('scenes').disabled = locked || !$('rag').checked;
+  if (!locked) $('speaker-register').disabled = true;
 }
 $('rag').onchange = () => { $('scenes').disabled = !$('rag').checked; };
 function stopPlayback(session) {
@@ -48,6 +150,7 @@ function stop(session = active, message = '已取消，连接已关闭', error =
   if (!session || active !== session) return;
   active = null;
   clearTimeout(session.pollTimer); clearTimeout(session.connectTimer);
+  clearTimeout(session.registration?.timeout);
   session.fetchController?.abort();
   session.stream?.getTracks().forEach(track => track.stop());
   session.capture?.disconnect(); session.source?.disconnect();
@@ -144,9 +247,18 @@ function receive(session, message) {
   if (message.type === 'SESSION_CREATED') {
     if (session.ready) throw new Error('重复收到创建确认');
     if (message.sample_rate !== session.context.sampleRate || message.channels !== 1 || message.audio_format !== 'PCM16') throw new Error('服务端协商的音频格式不一致');
-    session.ready = true; clearTimeout(session.connectTimer);
+    session.ready = true; clearTimeout(session.connectTimer); resetSpeakerPanel();
+    $('speaker-register').disabled = false;
     status('对话中', true); $('mic-label').textContent = '正在聆听';
     notice('正在持续录音。说话后稍作停顿，服务端会自动切句；点击取消结束。');
+    return;
+  }
+  if (message.type === 'SPEAKER_STATUS') {
+    updateSpeakerStatus(session, message);
+    return;
+  }
+  if (message.type === 'SPEAKER_REGISTER_RESULT') {
+    finishSpeakerRegistration(session, message);
     return;
   }
   if (message.type === 'ASR_RESULT') {
@@ -209,8 +321,8 @@ async function start() {
     if (!$('device').value.trim()) throw new Error('请填写设备标识');
     scenes = $('rag').checked ? parseScenes($('scenes').value) : [];
   } catch (error) { notice(error.message, true); return; }
-  const session = {id: crypto.randomUUID(), sources: new Set(), playAt: 0, ready: false};
-  active = session; sequence = 0; clearTurns(); lock(true); status('正在连接');
+  const session = {id: crypto.randomUUID(), sources: new Set(), playAt: 0, ready: false, registration: null, speakerRegistered: false, speakerFiltered: 0};
+  active = session; sequence = 0; clearTurns(); resetSpeakerPanel(); lock(true); status('正在连接');
   $('session-label').textContent = `会话：${session.id}`; notice('请允许浏览器使用麦克风。');
   for (const stage of STAGES) { cards[stage].value.textContent = '—'; cards[stage].detail.textContent = descriptions[stage][1]; }
   try {
@@ -233,6 +345,18 @@ async function start() {
       if (active !== session) return;
       $('level').value = Math.min(1, data.rms * 7);
       if (!session.ready || session.socket.readyState !== WebSocket.OPEN) return;
+      if (session.registration) {
+        if (session.registration.phase === 'capture') {
+          const remainingBytes = (session.registration.targetSamples - session.registration.samples) * 2;
+          const chunk = new Uint8Array(data.pcm).slice(0, remainingBytes);
+          session.registration.chunks.push(chunk);
+          session.registration.samples += chunk.length / 2;
+          const remaining = Math.max(0, (session.registration.targetSamples - session.registration.samples) / session.context.sampleRate);
+          $('speaker-detail').textContent = `请持续清晰说话，剩余 ${remaining.toFixed(1)} 秒；普通音频已暂停。`;
+          if (session.registration.samples >= session.registration.targetSamples) sendSpeakerRegistration(session);
+        }
+        return;
+      }
       if (session.socket.bufferedAmount > session.context.sampleRate * 2 * 2) { stop(session, '网络发送积压，请检查连接后重试', true); return; }
       session.socket.send(JSON.stringify({type: 'AUDIO_CHUNK', session_id: session.id, sequence: sequence++, timestamp_ms: Math.floor(sentSamples / session.context.sampleRate * 1000), audio_b64: base64Pcm(data.pcm)}));
       sentSamples += data.pcm.byteLength / 2;
@@ -255,4 +379,5 @@ async function start() {
 }
 $('start').onclick = start;
 $('cancel').onclick = () => stop();
+$('speaker-register').onclick = startSpeakerRegistration;
 window.addEventListener('pagehide', () => { stop(); clearTurns(); });
