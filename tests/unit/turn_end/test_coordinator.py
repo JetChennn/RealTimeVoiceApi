@@ -72,6 +72,30 @@ class Harness:
             self.outputs.extend(self.coordinator.process(self.queue.get_nowait()))
 
 
+def test_turn_end_audio_keeps_exact_pre_and_post_speech_padding() -> None:
+    settings = Settings(
+        _env_file=None,
+        turn_end_semantic_enabled=True,
+        speaker_verification_enabled=True,
+    )
+    audio = TurnEndAudio("s", settings)
+    silence = b"\x00\x00" * 512
+    speech = b"\x01\x00" * 512
+
+    for _ in range(4):
+        assert audio.push(silence, False) == []
+    events = []
+    for _ in range(16):
+        events.extend(audio.push(speech, True))
+    for _ in range(16):
+        events.extend(audio.push(silence, False))
+
+    ready = next(event for event in events if isinstance(event, SpeechSegmentReady))
+    assert ready.segment.voiced_samples == 16 * 512
+    assert ready.segment.padded_voiced_samples == (100 + 16 * 32 + 150) * 16
+    assert ready.segment.pcm16_16k.startswith(b"\x00\x00" * (100 * 16))
+
+
 async def test_filtered_segment_is_removed_without_marking_the_input_as_asr_failure():
     h = Harness()
     h.feed(True, 10)

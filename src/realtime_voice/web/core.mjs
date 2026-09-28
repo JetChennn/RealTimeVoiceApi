@@ -36,6 +36,14 @@ export function base64Pcm(buffer) {
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return btoa(binary);
 }
+
+export function isStaleAudioChunk(capturedAtMs, currentAudioTimeMs, maxAgeMs) {
+  return Number.isFinite(capturedAtMs)
+    && Number.isFinite(currentAudioTimeMs)
+    && Number.isFinite(maxAgeMs)
+    && maxAgeMs >= 0
+    && currentAudioTimeMs - capturedAtMs > maxAgeMs;
+}
 export function decodePcm(base64) {
   const binary = atob(base64);
   if (!binary.length || binary.length % 2) throw new Error('收到不完整的 PCM16 音频');

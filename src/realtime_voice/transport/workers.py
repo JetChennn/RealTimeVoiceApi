@@ -32,6 +32,7 @@ class WebSocketReceiver:
         audio_queue: Any,
         request_close: Callable[[], None],
         register_speaker: Callable[[DecodedSpeakerRegister], Awaitable[None]] | None = None,
+        report_audio_backpressure: Callable[[str, int, int, int], None] | None = None,
     ) -> None:
         self._websocket = websocket
         self._session_id = session_id
@@ -39,6 +40,7 @@ class WebSocketReceiver:
         self._audio_queue = audio_queue
         self._request_close = request_close
         self._register_speaker = register_speaker
+        self._report_audio_backpressure = report_audio_backpressure
         self._next_sequence = 0
 
     async def run(self) -> None:
@@ -70,9 +72,25 @@ class WebSocketReceiver:
                 try:
                     self._audio_queue.put_nowait(chunk.pcm16)
                 except (asyncio.QueueFull, SessionQueueOverloaded) as error:
-                    raise ProtocolViolation(
-                        "CLIENT_AUDIO_BACKPRESSURE", "client audio backlog exceeds three seconds"
-                    ) from error
+                    # The sequence was valid and has been consumed even though its
+                    # payload was dropped. Keeping the expected sequence moving lets
+                    # a realtime client recover without reconnecting or replaying old
+                    # audio. A runtime-owned callback reports the recoverable loss via
+                    # the normal outbound queue; custom receivers retain the legacy
+                    # fail-closed behavior unless they explicitly opt in.
+                    self._next_sequence += 1
+                    if self._report_audio_backpressure is None:
+                        raise ProtocolViolation(
+                            "CLIENT_AUDIO_BACKPRESSURE",
+                            "client audio backlog exceeds the session limit",
+                        ) from error
+                    self._report_audio_backpressure(
+                        "items" if isinstance(error, asyncio.QueueFull) else "bytes",
+                        self._audio_queue.qsize(),
+                        getattr(self._audio_queue, "queued_bytes", 0),
+                        len(chunk.pcm16),
+                    )
+                    continue
                 self._next_sequence += 1
         except KeyError as error:
             raise ProtocolViolation(

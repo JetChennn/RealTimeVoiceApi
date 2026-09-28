@@ -6,8 +6,8 @@ from realtime_voice.config import Settings
 from realtime_voice.main import create_app
 
 
-def test_websocket_closes_when_one_audio_chunk_exceeds_the_time_budget() -> None:
-    """Removing byte-budget admission would let an over-budget client audio chunk through."""
+def test_websocket_drops_chunk_and_stays_recoverable_when_it_exceeds_time_budget() -> None:
+    """An over-budget chunk is rejected without terminating the realtime session."""
     app = create_app(Settings(_env_file=None, session_audio_queue_max_seconds=0.005))
     create = {
         "type": "CREATE_SESSION",
@@ -33,5 +33,7 @@ def test_websocket_closes_when_one_audio_chunk_exceeds_the_time_budget() -> None
             }
         )
         error = websocket.receive_json()
+        websocket.send_json({"type": "CLOSE_SESSION", "session_id": "session-1"})
 
     assert error["code"] == "CLIENT_AUDIO_BACKPRESSURE"
+    assert error["recoverable"] is True

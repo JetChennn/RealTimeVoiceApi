@@ -114,6 +114,9 @@ def build_runtime(
         audio,
         lambda: runtime.request_close(),
         lambda registration: runtime.register_speaker(registration),
+        lambda limit, items, queued_bytes, chunk_bytes: runtime.report_audio_backpressure(
+            limit, items, queued_bytes, chunk_bytes
+        ),
     )
     sender = WebSocketSender(websocket, outbound)
     turn_end_audio = None
@@ -128,7 +131,21 @@ def build_runtime(
         session_id=create.session_id,
         audio_queue=audio,
         event_queue=events,
-        segmenter=StreamingVadSegmenter(VadConfig(min_speech_ms=settings.vad_min_speech_ms)),
+        segmenter=StreamingVadSegmenter(
+            VadConfig(
+                min_speech_ms=settings.vad_min_speech_ms,
+                speech_pre_padding_ms=(
+                    settings.speaker_vad_pre_padding_ms
+                    if settings.speaker_verification_enabled
+                    else 0
+                ),
+                speech_post_padding_ms=(
+                    settings.speaker_vad_post_padding_ms
+                    if settings.speaker_verification_enabled
+                    else 0
+                ),
+            )
+        ),
         detector=SileroDetector(),
         detector_offload=services.detector_offload,
         input_sample_rate=create.sample_rate,

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import fs from 'node:fs';
-import {parseMetrics, metricDelta, parseScenes, decodePcm, base64Pcm, wavBlob} from '../../src/realtime_voice/web/core.mjs';
+import {parseMetrics, metricDelta, parseScenes, decodePcm, base64Pcm, wavBlob, isStaleAudioChunk} from '../../src/realtime_voice/web/core.mjs';
 const empty = '# HELP realtime_voice_stage_latency_seconds Stage duration\n';
 const metrics = (count, sum) => `${empty}realtime_voice_stage_latency_seconds_count{stage="thinker"} ${count}\nrealtime_voice_stage_latency_seconds_sum{stage="thinker"} ${sum}\n`;
 test('metrics subtract cumulative histograms and distinguish resets and absent samples', () => {
@@ -34,10 +34,15 @@ test('PCM16 roundtrip and WAV header preserve sample rate, signs and payload', a
   assert.equal(view.getUint32(40, true), 6);
   assert.deepEqual(new Uint8Array(result, 44), bytes);
 });
+test('stale capture detection drops only audio older than the configured budget', () => {
+  assert.equal(isStaleAudioChunk(1000, 2000, 1000), false);
+  assert.equal(isStaleAudioChunk(999, 2000, 1000), true);
+  assert.equal(isStaleAudioChunk(undefined, 2000, 1000), false);
+});
 test('worklet emits continuous 40ms little-endian audio including silence', () => {
   let Processor;
   const messages = [];
-  const sandbox = {sampleRate: 24000, AudioWorkletProcessor: class { constructor() { this.port = {postMessage: msg => messages.push(msg)}; } }, registerProcessor: (_, value) => { Processor = value; }};
+  const sandbox = {sampleRate: 24000, currentTime: 12.5, AudioWorkletProcessor: class { constructor() { this.port = {postMessage: msg => messages.push(msg)}; } }, registerProcessor: (_, value) => { Processor = value; }};
   vm.runInNewContext(fs.readFileSync(new URL('../../src/realtime_voice/web/audio-worklet.js', import.meta.url), 'utf8'), sandbox);
   const capture = new Processor();
   for (let n = 0; n < 15; n++) capture.process([[new Float32Array(128).fill(n < 8 ? -.5 : 0)]]);
@@ -45,5 +50,6 @@ test('worklet emits continuous 40ms little-endian audio including silence', () =
   assert.equal(messages[0].pcm.byteLength, 1920);
   assert.equal(new DataView(messages[0].pcm).getInt16(0, true), -16384);
   assert.equal(new DataView(messages[1].pcm).getInt16(1918, true), 0);
+  assert.equal(messages[0].capturedAtMs, 12500);
   assert.equal(capture.offset, 0);
 });

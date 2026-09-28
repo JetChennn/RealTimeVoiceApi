@@ -1,4 +1,4 @@
-import {STAGES, parseMetrics, metricDelta, parseScenes, base64Pcm, decodePcm, wavBlob} from './core.mjs';
+import {STAGES, parseMetrics, metricDelta, parseScenes, base64Pcm, decodePcm, wavBlob, isStaleAudioChunk} from './core.mjs';
 
 const $ = id => document.getElementById(id);
 const url = new URL('/v1/realtime', location.href);
@@ -14,6 +14,7 @@ const descriptions = {
 };
 // 按 code 前置一句友好提示，便于理解超时/会话忙类错误；原文案仍完整展示。
 const errorHints = {
+  CLIENT_AUDIO_BACKPRESSURE: '服务端已丢弃部分音频，本句可能不完整，请停顿后重说',
   THINKER_TIMEOUT: '本轮思考超时，请说下一句',
   THINKER_REPLY_TIMEOUT: '回复超时未完成，请说下一句',
   THINKER_SESSION_BUSY: '上一轮仍在收尾，请稍后重试',
@@ -31,6 +32,7 @@ let turns = new Map();
 let sequence = 0;
 let totalTurns = 0;
 const speakerRegisterSeconds = 3;
+const maxCapturedAudioAgeMs = 1000;
 const speakerStates = {
   disabled: '未启用',
   embedder_unavailable: '模型不可用',
@@ -345,6 +347,20 @@ async function start() {
       if (active !== session) return;
       $('level').value = Math.min(1, data.rms * 7);
       if (!session.ready || session.socket.readyState !== WebSocket.OPEN) return;
+      const currentAudioTimeMs = session.context.currentTime * 1000;
+      if (isStaleAudioChunk(data.capturedAtMs, currentAudioTimeMs, maxCapturedAudioAgeMs)) {
+        session.staleAudioChunks = (session.staleAudioChunks || 0) + 1;
+        if (!session.droppingStaleAudio) {
+          session.droppingStaleAudio = true;
+          notice('检测到录音采集延迟，已丢弃陈旧音频；请停顿一下再重说。', true);
+        }
+        return;
+      }
+      if (session.droppingStaleAudio) {
+        session.droppingStaleAudio = false;
+        notice(`已丢弃 ${session.staleAudioChunks} 个陈旧音频块，实时发送已恢复；请重说刚才那句。`, true);
+        session.staleAudioChunks = 0;
+      }
       if (session.registration) {
         if (session.registration.phase === 'capture') {
           const remainingBytes = (session.registration.targetSamples - session.registration.samples) * 2;

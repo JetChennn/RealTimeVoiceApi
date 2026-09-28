@@ -30,6 +30,7 @@ from realtime_voice.clients.thinker import (
 from realtime_voice.clients.tts import TTS_SAMPLE_RATE, TtsClient, TtsRequest, TtsStreamError
 from realtime_voice.protocol.decoder import DecodedSpeakerRegister
 from realtime_voice.protocol.server_messages import (
+    ErrorMessage,
     ServerMessage,
     SpeakerRegisterResult,
     SpeakerStatus,
@@ -352,6 +353,7 @@ class SessionRuntime:
         self._metrics = metrics
         self._clock = clock
         self._speaker_gate = speaker_gate
+        self._last_audio_backpressure_notice_at: float | None = None
 
         self._close_requested = asyncio.Event()
         self._long_tasks: dict[str, asyncio.Task[None]] = {}
@@ -427,6 +429,50 @@ class SessionRuntime:
     def request_close(self) -> None:
         """请求有序清理并关闭 TaskGroup。"""
         self._close_requested.set()
+
+    def report_audio_backpressure(
+        self,
+        limit: str,
+        queue_items: int,
+        queued_bytes: int,
+        chunk_bytes: int,
+    ) -> None:
+        """Report a dropped inbound chunk without terminating the session.
+
+        Repeated drops are coalesced to at most one client warning per second. The
+        queue's own overload metric still counts every rejected chunk.
+        """
+        now = self._clock()
+        previous = self._last_audio_backpressure_notice_at
+        if previous is not None and now - previous < 1.0:
+            return
+        self._last_audio_backpressure_notice_at = now
+        self._observe(
+            "client_audio_dropped",
+            level=logging.WARNING,
+            stage="TRANSPORT",
+            error_code="CLIENT_AUDIO_BACKPRESSURE",
+            queue_limit=limit,
+            queue_items=queue_items,
+            queued_bytes=queued_bytes,
+            chunk_bytes=chunk_bytes,
+        )
+        message = ErrorMessage(
+            type="ERROR",
+            user_id=self.user_id,
+            session_id=self.session_id,
+            turn_id=0,
+            interrupt=False,
+            stage="TRANSPORT",
+            code="CLIENT_AUDIO_BACKPRESSURE",
+            message="server audio queue is full; this audio chunk was dropped and the current utterance may be incomplete",
+            recoverable=True,
+        )
+        try:
+            self.outbound.put_nowait(message)
+        except (asyncio.QueueFull, SessionQueueOverloaded) as error:
+            self.request_close()
+            raise SlowClient(str(error)) from error
 
     async def run(self) -> None:
         """在单个 TaskGroup 中并行运行 Receiver/VAD/ASR/Actor/Sender 五个长任务。"""

@@ -58,7 +58,9 @@ class Settings(BaseSettings):
     speaker_model_path: str = "models/wespeaker/cnceleb_resnet34.onnx"
     speaker_verification_threshold: float = Field(default=0.65, ge=-1, le=1)
     speaker_register_min_audio_ms: int = Field(default=2000, ge=500, le=10000)
-    speaker_verification_min_audio_ms: int = Field(default=800, ge=100, le=10000)
+    speaker_verification_min_audio_ms: int = Field(default=600, ge=100, le=10000)
+    speaker_vad_pre_padding_ms: int = Field(default=100, ge=0, le=500)
+    speaker_vad_post_padding_ms: int = Field(default=150, ge=0, le=500)
     speaker_concurrency: int = Field(default=4, ge=1, le=32)
     speaker_max_waiters: int = Field(default=32, ge=0)
     speaker_fail_open: bool = True

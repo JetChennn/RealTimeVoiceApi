@@ -110,6 +110,9 @@ def _controlled_runtime_factory(
             create.sample_rate,
             audio,
             lambda: runtime.request_close(),
+            report_audio_backpressure=lambda limit, items, queued_bytes, chunk_bytes: runtime.report_audio_backpressure(
+                limit, items, queued_bytes, chunk_bytes
+            ),
         )
         producer = (
             BlockingWorker()
@@ -156,7 +159,9 @@ def _controlled_runtime_factory(
     [(65, 10), (7, 500)],
     ids=["64-message-count", "3-second-duration"],
 )
-def test_websocket_closes_at_actual_inbound_audio_boundaries(chunks: int, duration_ms: int) -> None:
+def test_websocket_reports_recoverable_error_at_actual_inbound_audio_boundaries(
+    chunks: int, duration_ms: int
+) -> None:
     settings = Settings(_env_file=None)
     app = create_app(settings, runtime_factory=_controlled_runtime_factory(settings))
 
@@ -166,11 +171,10 @@ def test_websocket_closes_at_actual_inbound_audio_boundaries(chunks: int, durati
         for sequence in range(chunks):
             actual_duration = 10 if duration_ms == 500 and sequence == chunks - 1 else duration_ms
             websocket.send_json(_audio(sequence, actual_duration))
-        assert websocket.receive_json()["code"] == "CLIENT_AUDIO_BACKPRESSURE"
-        with pytest.raises(WebSocketDisconnect) as closed:
-            websocket.receive_json()
-
-    assert closed.value.code == 1008
+        error = websocket.receive_json()
+        assert error["code"] == "CLIENT_AUDIO_BACKPRESSURE"
+        assert error["recoverable"] is True
+        websocket.send_json({"type": "CLOSE_SESSION", "session_id": "session-1"})
 
 
 @pytest.mark.parametrize("kind", ["count", "bytes"])

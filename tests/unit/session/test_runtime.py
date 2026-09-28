@@ -19,6 +19,7 @@ from realtime_voice.clients.tts import TtsChunk, TtsRequest, TtsStreamError
 from realtime_voice.observability.metrics import Metrics
 from realtime_voice.protocol.decoder import DecodedSpeakerRegister
 from realtime_voice.protocol.server_messages import (
+    ErrorMessage,
     SpeakerRegisterResult,
     SpeakerStatus,
     TextDelta,
@@ -1170,6 +1171,24 @@ async def test_audio_queue_records_byte_overload_at_real_runtime_boundary() -> N
 
     rendered = metrics.render().decode()
     assert 'realtime_voice_queue_overload_total{limit="bytes",queue="audio"} 1.0' in rendered
+
+
+def test_audio_backpressure_reports_recoverable_coalesced_error() -> None:
+    now = [10.0]
+    runtime, _ = make_runtime(clock=lambda: now[0])
+
+    runtime.report_audio_backpressure("items", 64, 64000, 1920)
+    first = runtime.outbound.get_nowait()
+    assert isinstance(first, ErrorMessage)
+    assert first.code == "CLIENT_AUDIO_BACKPRESSURE"
+    assert first.recoverable is True
+
+    runtime.report_audio_backpressure("items", 64, 64000, 1920)
+    assert runtime.outbound.empty()
+
+    now[0] += 1.0
+    runtime.report_audio_backpressure("bytes", 63, 96000, 1920)
+    assert isinstance(runtime.outbound.get_nowait(), ErrorMessage)
 
 
 async def test_slow_client_close_is_recorded_only_on_real_outbound_overload() -> None:

@@ -237,6 +237,6 @@ sequenceDiagram
 
 ## 背压机制
 
-- **audio 队列**：item 数 + 字节数双重上限（[runtime.py](../src/realtime_voice/session/runtime.py) 中的 `BoundedByteQueue`），满则 `CLIENT_AUDIO_BACKPRESSURE`。
+- **audio 队列**：item 数 + 字节数双重上限（[runtime.py](../src/realtime_voice/session/runtime.py) 中的 `BoundedByteQueue`）。队列满时丢弃当前入站音频块、继续消费序号，并通过出站队列返回可恢复的 `CLIENT_AUDIO_BACKPRESSURE`；同类通知最多每秒一条，连接不会因此关闭。
 - **outbound 队列**：满则 `SlowClient` 触发会话关闭。
 - **下游准入**：`BoundedAdmission`（[limits.py](../src/realtime_voice/clients/limits.py)）限制并发并设有等待队列上限，超限抛 `AdmissionOverloaded`，转为 `AsrFailed/ThinkerFailed/TtsFailed` 事件。

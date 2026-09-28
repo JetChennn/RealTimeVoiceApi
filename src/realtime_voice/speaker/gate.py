@@ -47,6 +47,7 @@ class SessionSpeakerGate:
         self._verify_threshold = settings.speaker_verification_threshold
         self._register_min_samples = settings.speaker_register_min_audio_ms * 16
         self._verify_min_samples = settings.speaker_verification_min_audio_ms * 16
+        self._post_padding_samples = settings.speaker_vad_post_padding_ms * 16
         self._fail_open = settings.speaker_fail_open
         self._reference: np.ndarray | None = None
         # Registration and verification are serialized per session, so replacing the
@@ -93,7 +94,7 @@ class SessionSpeakerGate:
             )
 
     async def evaluate(self, segment: SpeechSegment) -> SpeakerDecision:
-        voiced_samples = segment.voiced_samples or max(
+        voiced_samples = segment.padded_voiced_samples or segment.voiced_samples or max(
             0, len(segment.pcm16_16k) // 2 - segment.trailing_silence_samples
         )
         voiced_ms = voiced_samples / 16
@@ -118,7 +119,7 @@ class SessionSpeakerGate:
                 return self._decision(False, "too_short", voiced_ms, minimum_ms, False)
             try:
                 embedding = await self._normalized_embedding(
-                    self._trim_trailing_silence(segment)
+                    self._trim_excess_trailing_silence(segment)
                 )
             except Exception:  # noqa: BLE001 - embedding backends expose heterogeneous failures
                 return self._decision(
@@ -209,9 +210,9 @@ class SessionSpeakerGate:
             and peak >= cls._REGISTER_MIN_PEAK
         )
 
-    @staticmethod
-    def _trim_trailing_silence(segment: SpeechSegment) -> bytes:
-        """Keep acoustic speech only; ASR and turn-end retain the original segment."""
+    def _trim_excess_trailing_silence(self, segment: SpeechSegment) -> bytes:
+        """Retain boundary padding while removing endpoint-confirmation silence."""
         sample_count = len(segment.pcm16_16k) // 2
         trailing_samples = min(max(segment.trailing_silence_samples, 0), sample_count)
-        return segment.pcm16_16k[: (sample_count - trailing_samples) * 2]
+        trim_samples = max(0, trailing_samples - self._post_padding_samples)
+        return segment.pcm16_16k[: (sample_count - trim_samples) * 2]

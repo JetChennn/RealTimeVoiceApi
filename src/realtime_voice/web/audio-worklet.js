@@ -17,7 +17,10 @@ class PcmCapture extends AudioWorkletProcessor {
         const pcm = new ArrayBuffer(this.buffer.length * 2);
         const view = new DataView(pcm);
         for (let i = 0; i < this.buffer.length; i++) view.setInt16(i * 2, this.buffer[i], true);
-        this.port.postMessage({ pcm, rms: Math.sqrt(this.energy / this.offset) }, [pcm]);
+        // `currentTime` belongs to the audio rendering clock, so the page can
+        // detect MessagePort deliveries that were delayed while its main thread
+        // was suspended. Delayed realtime audio must be dropped, not replayed.
+        this.port.postMessage({ pcm, rms: Math.sqrt(this.energy / this.offset), capturedAtMs: currentTime * 1000 }, [pcm]);
         this.offset = 0;
         this.energy = 0;
       }

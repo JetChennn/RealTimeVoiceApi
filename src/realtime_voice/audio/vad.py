@@ -32,6 +32,8 @@ class VadConfig:
     min_silence_ms: int = 500
     max_speech_seconds: int = 30
     min_speech_ms: int = 200
+    speech_pre_padding_ms: int = 100
+    speech_post_padding_ms: int = 150
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,7 @@ class SpeechSegment:
     pcm16_16k: bytes
     trailing_silence_samples: int = 0
     voiced_samples: int = 0
+    padded_voiced_samples: int = 0
 
 
 class SpeechDetector(Protocol):
@@ -71,7 +74,9 @@ class StreamingVadSegmenter:
         self.active = False
         self.silence_ms = 0.0
         self._trailing_silence_samples = 0
-        self._voiced_samples = 0
+        self._raw_voiced_samples = 0
+        self._effective_speech_samples = 0
+        self._pre_roll = bytearray()
         self._chunks: list[bytes] = []
         self._next_segment_id = 1
         self._ready: deque[SpeechSegment] = deque()
@@ -85,9 +90,14 @@ class StreamingVadSegmenter:
         while remaining:  # 一次输入可能跨多个分段边界（达上限即切段），故循环消耗
             if not self.active:
                 if not has_speech:
+                    self._remember_pre_roll(remaining)
                     break  # 静默态且无语音则丢弃剩余，等待下一段语音再激活
                 self.active = True
                 self.silence_ms = 0.0
+                if self._pre_roll:
+                    self._chunks.append(bytes(self._pre_roll))
+                    self._effective_speech_samples += len(self._pre_roll) // 2
+                    self._pre_roll.clear()
 
             capacity = self._max_samples - self._sample_count()
             if capacity <= 0:  # 已达最大语音长度，强制切段防止分段无限增长
@@ -97,13 +107,30 @@ class StreamingVadSegmenter:
             remaining = remaining[len(chunk) :]
             self._chunks.append(chunk)
             if has_speech:
+                if self._trailing_silence_samples:
+                    counted_post = min(
+                        self._trailing_silence_samples, self._post_padding_samples
+                    )
+                    self._effective_speech_samples += min(
+                        self._pre_padding_samples,
+                        max(0, self._trailing_silence_samples - counted_post),
+                    )
                 self.silence_ms = 0.0  # 激活态检测到语音则重置静默计时
                 self._trailing_silence_samples = 0
-                self._voiced_samples += len(chunk) // 2
+                self._raw_voiced_samples += len(chunk) // 2
+                self._effective_speech_samples += len(chunk) // 2
+                self._pre_roll.clear()
             else:
                 # 累积尾部静默时长与采样数，用于推算语音段结束时刻 speech_end_at
+                previous_trailing = self._trailing_silence_samples
                 self.silence_ms += self._duration_ms(chunk)
                 self._trailing_silence_samples += len(chunk) // 2
+                self._effective_speech_samples += max(
+                    0,
+                    min(self._trailing_silence_samples, self._post_padding_samples)
+                    - min(previous_trailing, self._post_padding_samples),
+                )
+                self._remember_pre_roll(chunk)
 
             reached_silence = self.silence_ms >= self.config.min_silence_ms
             reached_limit = self._sample_count() >= self._max_samples
@@ -122,6 +149,23 @@ class StreamingVadSegmenter:
     def _duration_ms(self, pcm16_16k: bytes) -> float:
         return len(pcm16_16k) / 2 / self.config.sample_rate * 1000
 
+    @property
+    def _pre_padding_samples(self) -> int:
+        return self.config.speech_pre_padding_ms * self.config.sample_rate // 1000
+
+    @property
+    def _post_padding_samples(self) -> int:
+        return self.config.speech_post_padding_ms * self.config.sample_rate // 1000
+
+    def _remember_pre_roll(self, pcm16_16k: bytes) -> None:
+        maximum_bytes = self._pre_padding_samples * 2
+        if maximum_bytes <= 0:
+            self._pre_roll.clear()
+            return
+        self._pre_roll.extend(pcm16_16k)
+        if len(self._pre_roll) > maximum_bytes:
+            del self._pre_roll[: len(self._pre_roll) - maximum_bytes]
+
     def pop_ready(self) -> SpeechSegment | None:
         return self._ready.popleft() if self._ready else None
 
@@ -130,13 +174,15 @@ class StreamingVadSegmenter:
             self._next_segment_id,
             b"".join(self._chunks),
             trailing_silence_samples=self._trailing_silence_samples,
-            voiced_samples=self._voiced_samples,
+            voiced_samples=self._raw_voiced_samples,
+            padded_voiced_samples=self._effective_speech_samples,
         )
         self._next_segment_id += 1
         self.active = False
         self.silence_ms = 0.0
         self._trailing_silence_samples = 0
-        self._voiced_samples = 0
+        self._raw_voiced_samples = 0
+        self._effective_speech_samples = 0
         self._chunks.clear()
         return segment
 

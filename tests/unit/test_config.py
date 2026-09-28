@@ -55,7 +55,9 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
     assert settings.vad_min_speech_ms == 200
     assert settings.speaker_verification_enabled is False
     assert settings.speaker_register_min_audio_ms == 2000
-    assert settings.speaker_verification_min_audio_ms == 800
+    assert settings.speaker_verification_min_audio_ms == 600
+    assert settings.speaker_vad_pre_padding_ms == 100
+    assert settings.speaker_vad_post_padding_ms == 150
 
 
 def test_env_example_covers_every_runtime_setting() -> None:

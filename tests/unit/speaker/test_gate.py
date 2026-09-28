@@ -210,7 +210,7 @@ async def test_short_audio_is_filtered_only_after_registration() -> None:
     assert after.reason == "too_short"
 
 
-async def test_gate_trims_vad_trailing_silence_before_verification() -> None:
+async def test_gate_keeps_post_padding_and_trims_excess_trailing_silence() -> None:
     embedder = FakeEmbedder([np.array([1.0, 0.0]), np.array([1.0, 0.0])])
     gate = SessionSpeakerGate(
         Settings(_env_file=None, speaker_verification_enabled=True), embedder
@@ -229,4 +229,4 @@ async def test_gate_trims_vad_trailing_silence_before_verification() -> None:
     )
 
     assert decision.reason == "matched"
-    assert embedder.inputs == [audio(2500), speech]
+    assert embedder.inputs == [audio(2500), speech + trailing_silence[: 150 * 16 * 2]]

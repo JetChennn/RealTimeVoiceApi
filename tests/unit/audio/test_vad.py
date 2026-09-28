@@ -50,6 +50,31 @@ def test_segment_ends_after_configured_silence() -> None:
     assert segmenter.active is False
 
 
+def test_segment_tracks_raw_speech_separately_from_boundary_padding() -> None:
+    segmenter = StreamingVadSegmenter(
+        VadConfig(
+            sample_rate=16000,
+            min_silence_ms=500,
+            speech_pre_padding_ms=100,
+            speech_post_padding_ms=150,
+        )
+    )
+    silence = pcm_chunk(16000, 100)
+    speech = pcm_chunk(16000, 100, value=1000)
+
+    segmenter.push(silence * 2, has_speech=False)
+    for _ in range(6):
+        assert segmenter.push(speech, has_speech=True) is None
+    for _ in range(4):
+        assert segmenter.push(silence, has_speech=False) is None
+    segment = segmenter.push(silence, has_speech=False)
+
+    assert segment is not None
+    assert segment.voiced_samples == 600 * 16
+    assert segment.padded_voiced_samples == 850 * 16
+    assert len(segment.pcm16_16k) == (100 + 600 + 500) * 16 * 2
+
+
 def test_vad_state_is_session_local() -> None:
     first = StreamingVadSegmenter(VadConfig())
     second = StreamingVadSegmenter(VadConfig())

@@ -59,7 +59,7 @@ ASR 使用 16kHz 音频；候选片段只识别一次，同一段用户输入的
 - **打断能力**：新的完整用户输入提交后可以打断上一轮未完成的回复；同一输入中的短停顿和续说不会触发打断。服务端下发 `TURN_STATE/INTERRUPTED`，旧 TTS 在后台排空并丢弃。
 - **并发与背压**：多会话并行；语义模型有界并发；事件、音频和出站队列有界；Thinker 请求统一使用并发准入。
 - **可观测性**：`/health` 聚合健康检查（含后台周期探测的下游真实状态）、`/metrics` 暴露 Prometheus 指标、结构化日志。
-- **一键启停**：`start_services.sh` 统一拉起 ASR / Thinker / TTS / 网关全栈并做就绪等待。
+- **统一服务管理**：`start_services.sh` 可单独或整体启停 ASR / KBService / Thinker / TTS vLLM / TTS main / 网关，并做就绪等待。
 - **压测工具**：内置联调客户端、链路延迟测试和多并发压测脚本（见 [第 7 节](#7-快速联调)）。
 
 ## 2. 目录结构
@@ -69,7 +69,7 @@ RealTimeVoiceAPI/
 ├── pyproject.toml            # 项目定义、依赖、pytest/ruff 配置
 ├── .env.example              # 环境变量示例（RTVA_ 前缀）
 ├── .env                      # 实际生效配置（不入库）
-├── start_services.sh         # 全栈一键启停（asr/thinker/tts/gateway）
+├── start_services.sh         # 全栈或单服务启停与健康检查
 ├── src/realtime_voice/       # 主要源码包
 │   ├── main.py               # FastAPI 应用：/health、/metrics、/v1/realtime 路由 + 下游健康探测
 │   ├── config.py             # 配置加载（pydantic-settings，RTVA_ 前缀）
@@ -120,30 +120,39 @@ RealTimeVoiceAPI/
 |------|----------|------|----------|
 | ASR（Qwen3-ASR） | `http://127.0.0.1:8001` | 语音转文本 | `POST /v1/chat/completions` |
 | Thinker（LLM） | `http://127.0.0.1:8002` | LLM 回复、记忆及可选 RAG | `/api/v1/reply`（纯文本流式）、`/api/v1/interrupt`、`DELETE /api/v1/sessions/{…}` |
-| TTS | `http://127.0.0.1:9000` | 文本合成语音 | `POST /v1/dialogue-tts/stream` |
+| KBService | `http://127.0.0.1:8003` | Thinker 可选知识检索 | `GET /health`、`POST /retrieve` |
+| TTS vLLM | `http://127.0.0.1:9001` | TTS 语音 token 推理 | `GET /health`、`POST /v1/generate/stream` |
+| TTS main | `http://127.0.0.1:9000` | 文本合成语音 | `POST /v1/dialogue-tts/stream` |
 
-`start_services.sh` 管理 ASR、Thinker、TTS 和网关，**不直接管理 KBService**。KBService 的地址、超时和召回参数由 BerryThinker 配置；网关没有 KBService 客户端，也不负责检索、拼装知识上下文或检索降级。
+`start_services.sh` 管理表中的全部服务。KBService 仍是网关启动的可选依赖：`start all` 会尝试启动它，但其失败不会阻止核心语音链路和网关启动，命令最终以 `DEGRADED` 和非零状态报告。网关没有 KBService 客户端，也不负责检索、拼装知识上下文或检索降级。
 
 语义结束模型不是独立服务。网关通过 ONNX Runtime 在本进程内加载一份固定的 `livekit/turn-detector v0.4.1-intl` 量化模型，所有会话共享该模型。模型文件约 389MB，不需要 GPU；默认最多并发执行 30 个语义推理任务，ONNX Runtime 单次推理最多使用 16 个 CPU 线程。模型目录 `models/` 被 Git 忽略，不随提交或推送上传。
 
-运行环境：**Python 3.11+**，推荐使用 [`uv`](https://docs.astral.sh/uv/)。GPU 要求：ASR 与 TTS 必须使用不同 GPU（启动脚本会校验）。
+运行环境：**Python 3.11+**，推荐使用 [`uv`](https://docs.astral.sh/uv/)。部署默认使用 ASR GPU 0、TTS main GPU 1～6、TTS vLLM GPU 7，均可通过脚本头部列出的环境变量覆盖。
 
 ## 4. 快速开始
 
 ### 方式一：一键拉起全栈（推荐用于联调/部署）
 
 ```bash
-cd /root/RealTimeVoiceApi
-./start_services.sh start     # 依次拉起 ASR → Thinker → TTS → 网关，并等待全部就绪
-./start_services.sh status    # 查看各服务运行状态
-./start_services.sh stop      # 全部停止
+cd /root/voiceAPI/RealTimeVoiceApi
+./start_services.sh start all       # 拉起完整服务栈；省略 all 与此等价
+./start_services.sh status all      # 查看全部服务状态
+./start_services.sh restart gateway # 只重启网关，不重载 GPU 模型
+./start_services.sh start tts       # 依次启动 TTS vLLM 和 TTS main
+./start_services.sh stop asr        # 单独停止 ASR
+./start_services.sh stop all        # 按依赖反序停止全部服务
 ```
 
 - 网关监听 `0.0.0.0:8000`，对外提供 WebSocket 与 HTTP 接口。
+- 可操作的服务名为 `asr`、`kbservice`、`thinker`、`tts-vllm`、`tts-main`、`gateway`；`tts` 同时管理两个 TTS 进程。
+- KBService 固定监听 `127.0.0.1:8003`，不对外部网络开放。
+- 单独启动网关只执行依赖检查，不会自动拉起依赖；ASR、Thinker、TTS vLLM 和 TTS main 全部健康后才能启动网关，KBService 不参与该准入检查。
+- 启动失败或启动过程中按 `Ctrl+C` 时，脚本只会反序停止本次命令新建的进程；启动前已经健康并被复用的服务不受影响。
 - 启动脚本会检查固定版本的语义结束模型；新部署缺失或文件损坏时自动下载，已有正确模型时直接复用。
 - GPU 模型加载耗时较长（默认就绪等待上限 900s，可用 `STARTUP_TIMEOUT_SECONDS` 覆盖）。
-- PID 文件在 `.run/`，日志在 `logs/`。
-- 并发规格可用环境变量覆盖：`GATEWAY_MAX_SESSIONS`（默认 30）、`GATEWAY_CPU_WORKERS`（默认 8）、`ASR_MAX_NUM_SEQS`（默认 30，同时决定 ASR 准入并发）等，详见脚本头部注释。
+- PID 文件在 `.run/`。每次新建进程都会在 `logs/` 创建独立的 `服务名_YYYYMMDD_HHMMSS_mmm.log`，不会追加或覆盖旧日志。
+- ASR 默认使用 1.7B 模型、`ASR_MAX_NUM_SEQS=64`；网关会使用同一数值配置 ASR 准入并发。其他规格详见脚本头部。
 
 ### 方式二：仅启动网关（开发调试）
 
@@ -161,7 +170,7 @@ cp .env.example .env
 uv run uvicorn realtime_voice.main:app --host 0.0.0.0 --port 8000
 ```
 
-下载脚本只获取 `livekit/turn-detector` 的固定 `v0.4.1-intl` 修订文件。使用 `start_services.sh start|restart` 时会自动检查并按需下载，无需单独执行；直接运行 Uvicorn 时仍需先执行上述模型下载命令。网关启动期间不会下载，模型缺失、版本不匹配或加载失败时会明确报错并拒绝启动。需要临时回退旧 VAD 直接切句流程时设置 `RTVA_TURN_END_SEMANTIC_ENABLED=false`，启动脚本也会跳过模型检查。
+下载脚本只获取 `livekit/turn-detector` 的固定 `v0.4.1-intl` 修订文件。使用 `start_services.sh start|restart all` 或操作 `gateway` 时会自动检查并按需下载，无需单独执行；直接运行 Uvicorn 时仍需先执行上述模型下载命令。网关进程自身启动期间不会下载，模型缺失、版本不匹配或加载失败时会明确报错并拒绝启动。需要临时回退旧 VAD 直接切句流程时设置 `RTVA_TURN_END_SEMANTIC_ENABLED=false`，启动脚本也会跳过模型检查。
 
 > **CWD 注意事项**：`Settings` 通过 pydantic-settings 加载 `env_file=".env"`，该路径**相对进程当前工作目录解析**，而非 config.py 所在目录。请务必从项目根目录启动（或使用绝对路径的 env 文件），否则 `.env` 会被跳过，未由环境变量指定的设置回退到代码默认值。直接运行 Uvicorn 时，监听地址以命令行 `--host`、`--port` 为准；`Settings.port` 不会自行修改 Uvicorn 监听端口。
 
@@ -176,7 +185,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 
 ## 5. 配置项
 
-网关通过 `Settings` 加载配置，统一使用 `RTVA_` 前缀，优先级为 **环境变量 > 当前工作目录的 `.env` > 代码默认值**。`start_services.sh` 则先将 `.env`（不存在时用 `.env.example`）作为 shell 配置加载，再覆盖会话、CPU 和 ASR 容量参数；脚本还校验固定端口约定。下表区分代码默认和脚本部署约定。
+网关通过 `Settings` 加载配置，统一使用 `RTVA_` 前缀，优先级为 **环境变量 > 当前工作目录的 `.env` > 代码默认值**。`start_services.sh` 在启动网关或全栈时先将 `.env`（不存在时用 `.env.example`）作为 shell 配置加载，再覆盖会话、CPU 和 ASR 容量参数；脚本还校验固定端口约定。下表区分代码默认和脚本部署约定。
 
 | 变量 | 代码默认 | 脚本部署值 | 说明 |
 |------|----------|------------|------|
@@ -188,7 +197,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_MAX_SESSIONS` | `30` | 同左 | 最大并发会话数 |
 | `RTVA_CPU_WORKERS` | `8` | 同左 | VAD 等 CPU 任务线程池大小 |
 | `RTVA_CPU_PENDING_JOBS` | `256` | 同左 | CPU 线程池待处理任务上限 |
-| `RTVA_ASR_CONCURRENCY` / `RTVA_ASR_MAX_WAITERS` | `30` / `30` | 同左 | ASR 请求的并发上限与等待队列上限 |
+| `RTVA_ASR_CONCURRENCY` / `RTVA_ASR_MAX_WAITERS` | `30` / `30` | `64` / `30` | ASR 请求的并发上限与等待队列上限 |
 | `RTVA_THINKER_STREAM_TIMEOUT_SECONDS` | `5` | 同左 | Thinker 回复首字超时；超时后触发网关保底回复 |
 | `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS` | `20` | 同左 | Thinker 回复总时长上限；超时后触发网关保底回复 |
 | `RTVA_THINKER_CONCURRENCY` / `RTVA_THINKER_MAX_WAITERS` | `30` / `64` | 同左 | Thinker 回复流的并发上限与等待队列上限 |
@@ -203,7 +212,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 同左 | 非空时直接作为 TTS `prompt`；为空时依次使用 Thinker `done.output.tone` 和默认值“平和” |
 | `RTVA_VAD_MIN_SPEECH_MS` | `200` | 同左 | VAD 片段累计有效发声不足此时长时直接过滤，降低“嗯、好”和瞬态噪声误触发 |
 
-说话人验证默认关闭；开启后使用 WeSpeaker 导出的 16 kHz ONNX 模型。服务启动时只加载一个共享模型实例，每个会话最多保留一个由客户端显式注册的参考声纹，重复注册时成功结果原子覆盖旧声纹，失败时保留旧声纹，断连时立即清除。将模型文件预先放到 `RTVA_SPEAKER_MODEL_PATH`（默认 `models/wespeaker/cnceleb_resnet34.onnx`）；`start_services.sh` 会在启动前检查该文件。
+说话人验证默认关闭；开启后使用 WeSpeaker 导出的 16 kHz ONNX 模型。服务启动时只加载一个共享模型实例，每个会话最多保留一个由客户端显式注册的参考声纹，重复注册时成功结果原子覆盖旧声纹，失败时保留旧声纹，断连时立即清除。将模型文件预先放到 `RTVA_SPEAKER_MODEL_PATH`（默认 `models/wespeaker/cnceleb_resnet34.onnx`）；`start_services.sh` 会在启动网关前检查该文件。
 
 | 变量 | 默认值 | 说明 |
 |---|---:|---|
@@ -211,7 +220,8 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_SPEAKER_MODEL_PATH` | `models/wespeaker/cnceleb_resnet34.onnx` | WeSpeaker 16 kHz ONNX 模型文件 |
 | `RTVA_SPEAKER_VERIFICATION_THRESHOLD` | `0.65` | 普通语音与会话参考声纹的最低余弦相似度 |
 | `RTVA_SPEAKER_REGISTER_MIN_AUDIO_MS` | `2000` | `SPEAKER_REGISTER` 注册音频的最短时长 |
-| `RTVA_SPEAKER_VERIFICATION_MIN_AUDIO_MS` | `800` | 已注册后可用于声纹验证的最短有效发声时长；不足时直接过滤 |
+| `RTVA_SPEAKER_VERIFICATION_MIN_AUDIO_MS` | `600` | 已注册后可用于声纹验证的最短有效发声时长；不足时直接过滤 |
+| `RTVA_SPEAKER_VAD_PRE_PADDING_MS` / `RTVA_SPEAKER_VAD_POST_PADDING_MS` | `100` / `150` | 声纹验证保留的人声前后边界缓冲；内部短停顿按区间并集计算，不重复累加 |
 | `RTVA_SPEAKER_CONCURRENCY` / `RTVA_SPEAKER_MAX_WAITERS` | `4` / `32` | 共享 ONNX 声纹推理的并发与排队上限 |
 | `RTVA_SPEAKER_FAIL_OPEN` | `true` | 模型推理异常时是否放行片段；生产中建议先保持 `true` 并观察指标 |
 
@@ -270,7 +280,7 @@ KBService 连接和上下文限制均由 BerryThinker 配置，当前变量如�
 | BerryThinker 变量 | 默认值 | 含义 |
 |---|---:|---|
 | `MIO_RAG_ENABLED` | `true` | Thinker 进程级 RAG 总开关 |
-| `MIO_RAG_BASE_URL` | `http://127.0.0.1:1111` | KBService 地址 |
+| `MIO_RAG_BASE_URL` | `http://127.0.0.1:8003` | KBService 地址 |
 | `MIO_RAG_TIMEOUT_S` | `30` | Thinker 调用 KBService 的超时 |
 | `MIO_RAG_MAX_CONTEXT_CHARS` | `6000` | 注入回复链路的知识上下文总字符上限 |
 | `MIO_RAG_MAX_SNIPPET_CHARS` | `1600` | 单个知识片段字符上限 |
@@ -439,7 +449,7 @@ uv run python scripts/load_test.py --url ws://127.0.0.1:8000/v1/realtime \
 
 ### 结构化日志
 
-网关业务日志为单行 JSON，并由独立的 `realtime_voice` INFO handler 输出；通过 `start_services.sh` 启动时写入 `logs/gateway.log`。每条 JSON 都包含 UTC `timestamp`、`level` 和 `logger`。正常生命周期使用 INFO，超时、过载、慢客户端和慢阶段使用 WARNING，下游失败与未预期异常使用 ERROR。未预期异常只记录不含异常消息的代码位置 `stack_trace`，避免下游响应正文绕过隐私过滤。主要事件包括会话创建/关闭，以及 ASR、Thinker、TTS 的开始、首包、完成和失败；TTS 不逐块打印 INFO，仅当相邻音频块间隔达到 `RTVA_SLOW_STAGE_WARNING_SECONDS` 时记录 `tts_chunk_gap_slow`。RAG 的检索日志由 Thinker 记录。
+网关业务日志为单行 JSON，并由独立的 `realtime_voice` INFO handler 输出；通过 `start_services.sh` 启动时写入本次启动对应的 `logs/gateway_YYYYMMDD_HHMMSS_mmm.log`。每条 JSON 都包含 UTC `timestamp`、`level` 和 `logger`。正常生命周期使用 INFO，超时、过载、慢客户端和慢阶段使用 WARNING，下游失败与未预期异常使用 ERROR。未预期异常只记录不含异常消息的代码位置 `stack_trace`，避免下游响应正文绕过隐私过滤。主要事件包括会话创建/关闭，以及 ASR、Thinker、TTS 的开始、首包、完成和失败；TTS 不逐块打印 INFO，仅当相邻音频块间隔达到 `RTVA_SLOW_STAGE_WARNING_SECONDS` 时记录 `tts_chunk_gap_slow`。RAG 的检索日志由 Thinker 记录。
 
 会话建立后的业务日志同时包含 `device_id`、兼容字段 `user_id` 和 `session_id`；轮次事件还包含 `turn_id` 与 `trace_id`，因此可以直接按设备或会话检索。握手完成前无法得知这些标识，字段值为 `unknown`。日志不会记录音频、完整 ASR 文本、完整模型回复、TTS 文本或密钥。
 
@@ -480,17 +490,16 @@ RAG 专项验证覆盖协议参数校验、网关到 Thinker 的请求映射、�
 
 ## 10. 部署与运维
 
-- **本机全栈**：使用 `./start_services.sh start|stop|status|restart`（见 [第 4 节](#4-快速开始)）。脚本会校验 `.env` 中的端口约定（网关 8000、ASR 8001、Thinker 8002、TTS 9000），做 GPU 隔离校验，并在启用语义结束判断时校验或自动下载固定版本模型。
-- **RAG/KBService**：由 BerryThinker 配置和管理。修改 `MIO_RAG_*` 后按 Thinker 的部署方式重启 Thinker；网关无需配置 KBService 地址。每个新会话仍由客户端参数选择是否检索。
-- **单独重启网关**（不动 GPU 服务）：`restart` 会连 ASR/Thinker/TTS 一起重启（模型重新加载耗时数分钟）。只需重启网关时，先停止网关 PID，再执行 `start`；脚本会复用健康的 ASR、Thinker 和 TTS，只重新启动网关：
+- **本机全栈**：使用 `./start_services.sh <start|stop|restart|status> [目标]`（见 [第 4 节](#4-快速开始)）。脚本校验固定端口约定，并按 ASR GPU 0、TTS main GPU 1～6、TTS vLLM GPU 7 的默认布局启动。
+- **RAG/KBService**：`kbservice` 可由脚本单独或随 `all` 管理，但不属于网关启动的强依赖。修改 `MIO_RAG_*` 后通常还需重启 Thinker；每个新会话仍由客户端参数选择是否检索。
+- **单独重启网关**（不动 GPU 服务）：直接使用目标参数；脚本会先检查 ASR、Thinker、TTS vLLM 和 TTS main 的健康状态：
   ```bash
-  kill "$(cat .run/gateway.pid)"
-  cd /root/RealTimeVoiceApi
-  ./start_services.sh start
+  cd /root/voiceAPI/RealTimeVoiceApi
+  ./start_services.sh restart gateway
   ```
 - **其他环境**：生产可用 systemd 或 supervisord 守护单进程异步服务，模板见
   [deploy/realtime-voice-api.service](deploy/realtime-voice-api.service) 与 [deploy/supervisord.conf](deploy/supervisord.conf)，使用前请替换其中的用户、目录与虚拟环境路径。ASR / TTS 的多实例负载均衡由各自 Nginx 负责，网关不感知实例列表。
-- **日志轮转**：`start_services.sh` 将四个服务的标准输出追加到 `logs/*.log`。生产环境应安装 [deploy/realtime-voice-api.logrotate](deploy/realtime-voice-api.logrotate)，先将 `/path/to/RealTimeVoiceApi` 替换为实际目录，再复制到 `/etc/logrotate.d/realtime-voice-api`；模板按日或达到 100 MiB 轮转，保留 7 份并压缩，`copytruncate` 同时覆盖网关业务 JSON 和 Uvicorn 访问/错误日志。
+- **日志归档**：每次新建进程都会创建带启动时间的独立日志文件，脚本不自动删除历史日志。若长期运行，应另行配置按保留天数或磁盘占用清理 `logs/*_YYYYMMDD_HHMMSS_mmm.log`。
 
 ## 11. 已知限制
 

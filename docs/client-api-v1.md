@@ -249,7 +249,7 @@ ASR_RESULT → TEXT_DELTA... → TEXT_END → AUDIO_DELTA... → RESPONSE_END(CO
 | `DUPLICATE_SESSION` | `session_id` 已被活跃连接占用 |
 | `SESSION_CAPACITY_EXCEEDED` | 网关会话容量已满 |
 | `AUDIO_SEQUENCE_GAP` | 上行音频序号不连续或跨轮重置 |
-| `CLIENT_AUDIO_BACKPRESSURE` | 音频发送过快，网关积压超过限制 |
+| `CLIENT_AUDIO_BACKPRESSURE` | 音频发送过快，网关已丢弃当前音频块；`recoverable=true` 时连接保持可用，当前话语可能不完整，客户端应提示用户停顿后重说 |
 | `SESSION_ID_MISMATCH` | 消息中的 `session_id` 与当前连接不一致 |
 | `SPEAKER_REGISTER_SAMPLE_RATE` | 注册音频采样率与当前 Session 不一致 |
 | `SPEAKER_REGISTER_DURATION` | 注册音频超过 10 秒 |

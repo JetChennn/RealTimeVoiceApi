@@ -167,6 +167,9 @@ class FakeServiceHarness:
             create.sample_rate,
             audio,
             lambda: runtime.request_close(),
+            report_audio_backpressure=lambda limit, items, queued_bytes, chunk_bytes: runtime.report_audio_backpressure(
+                limit, items, queued_bytes, chunk_bytes
+            ),
         )
         runtime = SessionRuntime(
             state=SessionState(create.device_id, create.session_id, create.sample_rate),
