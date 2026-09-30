@@ -26,24 +26,28 @@ class AsrClient:
         self.http = http
         self.admission = admission
 
-    async def transcribe(self, pcm16_16k: bytes) -> str:
+    async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
         """返回 16 kHz 单声道 PCM16 音频的归一化转写文本。"""
         wav = pcm16_wav_bytes(pcm16_16k, 16000)
-        payload = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_audio",
-                            "input_audio": {
-                                "data": base64.b64encode(wav).decode("ascii"),
-                                "format": "wav",
-                            },
+        messages: list[dict[str, object]] = []
+        if context:
+            messages.append({"role": "system", "content": context})
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": base64.b64encode(wav).decode("ascii"),
+                            "format": "wav",
                         },
-                    ],
-                },
-            ],
+                    },
+                ],
+            }
+        )
+        payload = {
+            "messages": messages,
         }
 
         async def operation() -> str:

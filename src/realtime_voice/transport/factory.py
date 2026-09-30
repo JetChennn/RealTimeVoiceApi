@@ -173,6 +173,7 @@ def build_runtime(
         event_queue=events,
         audio_queue=audio,
         outbound_queue=outbound,
+        asr_context_enabled=settings.asr_context_enabled,
         thinker_cleanup_timeout=settings.thinker_cleanup_timeout_seconds,
         thinker_stream_timeout=settings.thinker_stream_timeout_seconds,
         thinker_reply_total_timeout=settings.thinker_reply_total_timeout_seconds,

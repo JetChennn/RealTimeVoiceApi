@@ -29,9 +29,11 @@ class FakeAsr:
         self.texts = deque(texts)
         self.fail = fail
         self.calls = 0
+        self.contexts: list[str] = []
 
-    async def transcribe(self, pcm16_16k: bytes) -> str:
+    async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
         self.calls += 1
+        self.contexts.append(context)
         if self.fail:
             raise RuntimeError("fake ASR failure")
         return self.texts.popleft() if self.texts else ""

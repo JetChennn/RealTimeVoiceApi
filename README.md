@@ -198,6 +198,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_CPU_WORKERS` | `8` | 同左 | VAD 等 CPU 任务线程池大小 |
 | `RTVA_CPU_PENDING_JOBS` | `256` | 同左 | CPU 线程池待处理任务上限 |
 | `RTVA_ASR_CONCURRENCY` / `RTVA_ASR_MAX_WAITERS` | `30` / `30` | `64` / `30` | ASR 请求的并发上限与等待队列上限 |
+| `RTVA_ASR_CONTEXT_ENABLED` | `true` | 同左 | 是否将本会话最近一条正常、完整且未被打断的 Thinker 回复原文作为下一次 ASR context；无合格回复时保持原请求格式 |
 | `RTVA_THINKER_STREAM_TIMEOUT_SECONDS` | `5` | 同左 | Thinker 回复首字超时；超时后触发网关保底回复 |
 | `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS` | `20` | 同左 | Thinker 回复总时长上限；超时后触发网关保底回复 |
 | `RTVA_THINKER_CONCURRENCY` / `RTVA_THINKER_MAX_WAITERS` | `30` / `64` | 同左 | Thinker 回复流的并发上限与等待队列上限 |
@@ -451,7 +452,7 @@ uv run python scripts/load_test.py --url ws://127.0.0.1:8000/v1/realtime \
 
 网关业务日志为单行 JSON，并由独立的 `realtime_voice` INFO handler 输出；通过 `start_services.sh` 启动时写入本次启动对应的 `logs/gateway_YYYYMMDD_HHMMSS_mmm.log`。每条 JSON 都包含 UTC `timestamp`、`level` 和 `logger`。正常生命周期使用 INFO，超时、过载、慢客户端和慢阶段使用 WARNING，下游失败与未预期异常使用 ERROR。未预期异常只记录不含异常消息的代码位置 `stack_trace`，避免下游响应正文绕过隐私过滤。主要事件包括会话创建/关闭，以及 ASR、Thinker、TTS 的开始、首包、完成和失败；TTS 不逐块打印 INFO，仅当相邻音频块间隔达到 `RTVA_SLOW_STAGE_WARNING_SECONDS` 时记录 `tts_chunk_gap_slow`。RAG 的检索日志由 Thinker 记录。
 
-会话建立后的业务日志同时包含 `device_id`、兼容字段 `user_id` 和 `session_id`；轮次事件还包含 `turn_id` 与 `trace_id`，因此可以直接按设备或会话检索。握手完成前无法得知这些标识，字段值为 `unknown`。日志不会记录音频、完整 ASR 文本、完整模型回复、TTS 文本或密钥。
+会话建立后的业务日志同时包含 `device_id`、兼容字段 `user_id` 和 `session_id`；轮次事件还包含 `turn_id` 与 `trace_id`，因此可以直接按设备或会话检索。握手完成前无法得知这些标识，字段值为 `unknown`。`asr_started` 通过 `context_status` 区分 `provided`、`unavailable` 和 `disabled`，并在携带上下文时记录 `context_chars` 与 `context_turn_id`。日志不会记录音频、ASR context 正文、完整 ASR 文本、完整模型回复、TTS 文本或密钥。
 
 例如 TTS 下游返回 `idle_timeout` 时会产生如下 WARNING，可由前端的 device/session/turn 信息直接关联：
 
@@ -471,6 +472,8 @@ Prometheus 格式，包含会话数、各队列水位、限流器占用、执行
 | `realtime_voice_semantic_jobs` | 正在运行和排队的语义任务数 |
 | `realtime_voice_semantic_results_total{status="..."}` | `end`、`wait`、`timeout`、`overloaded`、`failed`、`cancelled` 结果数 |
 | `realtime_voice_turn_end_commits_total{reason="..."}` | 按 `semantic_end`、`max_silence`、`max_utterance` 统计提交原因 |
+| `realtime_voice_asr_context_requests_total{status="..."}` | 按 `provided`、`unavailable`、`disabled` 统计 ASR context 使用情况 |
+| `realtime_voice_asr_context_chars` | 实际传入 ASR 的非空 context 字符数直方图 |
 
 语义结果的 `status` 为 `end`、`wait`、`timeout`、`overloaded`、`failed` 或 `cancelled`。`semantic` 统计调用方看到的总等待，`semantic_queue` 统计进入工作线程前的等待，`semantic_inference` 只统计实际执行。结构化日志 `semantic_evaluated` 记录耗时、状态和概率；`user_input_committed` 记录提交原因和候选片段数量，不记录识别正文。
 

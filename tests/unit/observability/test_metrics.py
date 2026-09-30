@@ -24,6 +24,24 @@ def test_metrics_expose_activity_latency_and_discarded_tts_audio():
     assert "realtime_voice_discarded_tts_bytes_total 24.0" in rendered
 
 
+def test_metrics_expose_asr_context_status_without_turn_labels():
+    metrics = Metrics(registry=CollectorRegistry())
+
+    metrics.record_asr_context("provided", char_count=12)
+    metrics.record_asr_context("unavailable", char_count=0)
+    metrics.record_asr_context("disabled", char_count=0)
+
+    rendered = metrics.render().decode()
+    assert 'realtime_voice_asr_context_requests_total{status="provided"} 1.0' in rendered
+    assert 'realtime_voice_asr_context_requests_total{status="unavailable"} 1.0' in rendered
+    assert 'realtime_voice_asr_context_requests_total{status="disabled"} 1.0' in rendered
+    assert "realtime_voice_asr_context_chars_count 1.0" in rendered
+    assert "realtime_voice_asr_context_chars_sum 12.0" in rendered
+    assert "turn_id" not in "\n".join(
+        line for line in rendered.splitlines() if "asr_context" in line
+    )
+
+
 def test_metrics_export_required_runtime_state_families():
     metrics = Metrics(registry=CollectorRegistry())
 

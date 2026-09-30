@@ -53,6 +53,9 @@ _SAFE = frozenset(
         "audio_eligible",
         "registered",
         "replaced",
+        "context_status",
+        "context_chars",
+        "context_turn_id",
     }
 )
 

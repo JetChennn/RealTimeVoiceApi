@@ -50,7 +50,7 @@ class OrderedAsr:
         self.cancelled_asr = cancelled_asr
         self.started = asyncio.Event()
 
-    async def transcribe(self, pcm16_16k: bytes) -> str:
+    async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
         self.started.set()
         try:
             await asyncio.Event().wait()
@@ -313,7 +313,7 @@ async def test_asr_cancellation_releases_admission_before_registry_removal() -> 
     started = asyncio.Event()
 
     class AdmittedAsr:
-        async def transcribe(self, pcm16_16k: bytes) -> str:
+        async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
             async with admission.slot():
                 started.set()
                 await asyncio.Event().wait()

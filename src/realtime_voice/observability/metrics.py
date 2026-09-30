@@ -51,6 +51,17 @@ class Metrics:
         self.speech_end_to_asr = Histogram(
             "realtime_voice_speech_end_to_asr_seconds", "Speech end to ASR", registry=r
         )
+        self.asr_context_requests = Counter(
+            "realtime_voice_asr_context_requests",
+            "ASR requests grouped by context availability",
+            ["status"],
+            registry=r,
+        )
+        self.asr_context_chars = Histogram(
+            "realtime_voice_asr_context_chars",
+            "Characters supplied to ASR as context",
+            registry=r,
+        )
         self.speech_end_to_first_llm = Histogram(
             "realtime_voice_speech_end_to_first_llm_seconds", "Speech end to LLM", registry=r
         )
@@ -140,6 +151,11 @@ class Metrics:
 
     def observe_speech_end_to_asr(self, seconds: float) -> None:
         self._safe(self.speech_end_to_asr.observe, seconds)
+
+    def record_asr_context(self, status: str, *, char_count: int) -> None:
+        self._safe(self.asr_context_requests.labels(status).inc)
+        if status == "provided":
+            self._safe(self.asr_context_chars.observe, char_count)
 
     def observe_speech_end_to_first_llm(self, seconds: float) -> None:
         self._safe(self.speech_end_to_first_llm.observe, seconds)

@@ -89,7 +89,7 @@ class ReturningReceiver(BlockingWorker):
 
 
 class EmptyAsr:
-    async def transcribe(self, pcm16_16k: bytes) -> str:
+    async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
         return ""
 
 
@@ -128,7 +128,7 @@ class ControlledAsr:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def transcribe(self, pcm16_16k: bytes) -> str:
+    async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
         self.started.set()
         await self.release.wait()
         return "hello"
@@ -177,7 +177,7 @@ class SerialAsr:
         self.active = 0
         self.max_active = 0
 
-    async def transcribe(self, pcm16_16k: bytes) -> str:
+    async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
         self.calls.append(pcm16_16k)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -309,7 +309,7 @@ class SignallingAsr:
     def __init__(self) -> None:
         self.started = asyncio.Event()
 
-    async def transcribe(self, pcm16_16k: bytes) -> str:
+    async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
         self.started.set()
         return ""
 
@@ -415,6 +415,61 @@ def test_semantic_context_only_contains_the_previous_reply() -> None:
     ]
 
 
+def test_asr_context_uses_latest_eligible_reply_and_skips_ineligible_turns() -> None:
+    runtime, _ = make_runtime()
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="older user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.COMPLETED,
+        reply_text="older normal reply",
+    )
+    runtime.actor.state.turns[2] = TurnContext(
+        turn_id=2,
+        asr_text="interrupted user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.INTERRUPTED,
+        interrupted=True,
+        reply_text="interrupted reply",
+    )
+    runtime.actor.state.turns[3] = TurnContext(
+        turn_id=3,
+        asr_text="fallback user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_TTS,
+        reply_text="private fallback reply",
+        thinker_fallback_used=True,
+        thinker_failure_code="THINKER_TIMEOUT",
+    )
+    runtime.actor.state.turns[4] = TurnContext(
+        turn_id=4,
+        asr_text="current user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_LLM,
+    )
+
+    assert runtime._asr_context() == ("provided", "older normal reply", 1)
+
+
+def test_asr_context_reports_unavailable_or_disabled_without_reusing_other_sessions() -> None:
+    first, _ = make_runtime()
+    second, _ = make_runtime()
+    first.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="user input",
+        audio_wav=valid_wav(),
+        stage=TurnStage.COMPLETED,
+        reply_text="session-local secret reply",
+    )
+
+    assert first._asr_context() == ("provided", "session-local secret reply", 1)
+    assert second._asr_context() == ("unavailable", "", None)
+
+    disabled, _ = make_runtime(asr_context_enabled=False)
+    disabled.actor.state.turns.update(first.actor.state.turns)
+    assert disabled._asr_context() == ("disabled", "", None)
+
+
 def test_semantic_context_includes_reply_while_previous_tts_is_streaming() -> None:
     runtime, _ = make_runtime()
     runtime.actor.state.turns[1] = TurnContext(
@@ -469,6 +524,70 @@ async def next_event(runtime: SessionRuntime, event_type: type[object]) -> objec
         event = await asyncio.wait_for(runtime.events.get(), timeout=1)
         if isinstance(event, event_type):
             return event
+
+
+@pytest.mark.parametrize(
+    ("enabled", "with_reply", "expected_status", "expected_context", "expected_turn_id"),
+    [
+        (True, True, "provided", "private context reply", 1),
+        (True, False, "unavailable", "", None),
+        (False, True, "disabled", "", None),
+    ],
+)
+async def test_asr_dispatch_records_context_metadata_without_logging_reply(
+    caplog,
+    enabled: bool,
+    with_reply: bool,
+    expected_status: str,
+    expected_context: str,
+    expected_turn_id: int | None,
+) -> None:
+    class CapturingAsr:
+        def __init__(self) -> None:
+            self.contexts: list[str] = []
+
+        async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
+            self.contexts.append(context)
+            return "hello"
+
+    asr = CapturingAsr()
+    logger = logging.getLogger(f"test.asr.context.{expected_status}")
+    runtime, _ = make_runtime(
+        asr=asr,
+        asr_context_enabled=enabled,
+        logger=logger,
+    )
+    if with_reply:
+        runtime.actor.state.turns[1] = TurnContext(
+            turn_id=1,
+            asr_text="previous input",
+            audio_wav=valid_wav(),
+            stage=TurnStage.COMPLETED,
+            reply_text="private context reply",
+        )
+
+    asr_task = asyncio.create_task(runtime._asr_loop())
+    try:
+        with caplog.at_level(logging.INFO, logger=logger.name):
+            await runtime._asr_queue.put(SpeechSegment(1, b"\x01\x00"))
+            assert isinstance(await next_event(runtime, AsrSucceeded), AsrSucceeded)
+    finally:
+        asr_task.cancel()
+        await asyncio.gather(asr_task, return_exceptions=True)
+
+    assert asr.contexts == [expected_context]
+    started = next(
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "asr_started"
+    )
+    assert started["context_status"] == expected_status
+    assert started["context_chars"] == len(expected_context)
+    if expected_turn_id is None:
+        assert "context_turn_id" not in started
+    else:
+        assert started["context_turn_id"] == expected_turn_id
+    assert "private context reply" not in "\n".join(record.message for record in caplog.records)
 
 
 async def test_run_supervises_receiver_vad_asr_actor_and_sender_together() -> None:
@@ -585,7 +704,7 @@ async def test_speaker_verification_time_is_not_counted_as_asr_latency() -> None
             return None
 
     class TimedAsr:
-        async def transcribe(self, pcm16_16k: bytes) -> str:
+        async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
             now[0] = 7.0
             return "hello"
 
@@ -770,7 +889,7 @@ async def test_runtime_retains_speech_end_for_a_turn_queued_behind_active_llm() 
 
 async def test_real_asr_thinker_and_tts_failure_boundaries_record_one_error_each() -> None:
     class FailingAsr:
-        async def transcribe(self, pcm16_16k: bytes) -> str:
+        async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
             raise RuntimeError("asr failed")
 
     class FailingThinker(ControlledThinker):
@@ -1046,7 +1165,7 @@ async def test_remote_thinker_timeout_is_logged_as_warning(caplog) -> None:
 
 async def test_asr_failure_without_metrics_still_publishes_failure_event() -> None:
     class FailingAsr:
-        async def transcribe(self, pcm16_16k: bytes) -> str:
+        async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
             raise RuntimeError("asr failed")
 
     runtime, _ = make_runtime(asr=FailingAsr())
@@ -1592,7 +1711,7 @@ async def test_injected_queues_connect_receiver_vad_actor_and_sender() -> None:
             await asyncio.Event().wait()
 
     class Asr:
-        async def transcribe(self, pcm16_16k: bytes) -> str:
+        async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str:
             return "hello"
 
     class Sender:

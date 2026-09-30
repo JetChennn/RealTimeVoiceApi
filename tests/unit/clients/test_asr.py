@@ -25,10 +25,30 @@ async def test_asr_sends_wav_and_cleans_tagged_text() -> None:
 
     assert text == "你好"
     payload = json.loads(captured["request"].content)
+    assert [message["role"] for message in payload["messages"]] == ["user"]
     input_audio = payload["messages"][0]["content"][0]["input_audio"]
     assert input_audio["format"] == "wav"
     with wave.open(io.BytesIO(base64.b64decode(input_audio["data"]))) as audio:
         assert audio.getframerate() == 16000
+
+
+async def test_asr_prepends_non_empty_context_as_system_message() -> None:
+    response = {"choices": [{"message": {"content": "你好"}}]}
+    transport, captured = stream_transport([json.dumps(response).encode("utf-8")])
+    admission = BoundedAdmission("asr", concurrency=1, max_waiters=0)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://asr") as http:
+        await AsrClient(http, admission).transcribe(
+            b"\x00\x00",
+            context="上一轮 Thinker 回复原文",
+        )
+
+    payload = json.loads(captured["request"].content)
+    assert [message["role"] for message in payload["messages"]] == ["system", "user"]
+    assert payload["messages"][0] == {
+        "role": "system",
+        "content": "上一轮 Thinker 回复原文",
+    }
 
 
 @pytest.mark.parametrize("content", ["", "none", "NULL", " undefined "])

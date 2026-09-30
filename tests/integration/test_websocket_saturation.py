@@ -23,7 +23,7 @@ class BlockingWorker:
 
 
 class NoopAsr:
-    async def transcribe(self, _: bytes) -> str:
+    async def transcribe(self, _: bytes, *, context: str = "") -> str:
         return ""
 
 

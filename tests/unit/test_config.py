@@ -21,6 +21,7 @@ def test_settings_defaults():
     assert settings.cpu_pending_jobs == 256
     assert settings.asr_concurrency == 30
     assert settings.asr_max_waiters == 30
+    assert settings.asr_context_enabled is True
 
 
 def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:

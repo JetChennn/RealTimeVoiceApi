@@ -227,7 +227,7 @@ class AsyncWorker(Protocol):
 
 
 class AsrClientProtocol(Protocol):
-    async def transcribe(self, pcm16_16k: bytes) -> str: ...
+    async def transcribe(self, pcm16_16k: bytes, *, context: str = "") -> str: ...
 
 
 class RegistryProtocol(Protocol):
@@ -263,6 +263,7 @@ class SessionRuntime:
         event_queue: asyncio.Queue[SessionEvent] | None = None,
         audio_queue: BoundedByteQueue[bytes | None] | None = None,
         outbound_queue: BoundedByteQueue[ServerMessage] | None = None,
+        asr_context_enabled: bool = True,
         thinker_cleanup_timeout: float = 120.0,
         thinker_stream_timeout: float = 5.0,
         thinker_reply_total_timeout: float = 20.0,
@@ -337,6 +338,7 @@ class SessionRuntime:
         self._thinker_rag_enabled = rag_enabled
         self._thinker_rag_scenes = tuple(scenes)
         self._asr_client = asr_client
+        self._asr_context_enabled = asr_context_enabled
         self._thinker_client = thinker_client
         self._tts_client = tts_client
         self._receiver = receiver
@@ -690,6 +692,21 @@ class SessionRuntime:
             return []
         return [{"role": "assistant", "content": previous.reply_text}]
 
+    def _asr_context(self) -> tuple[str, str, int | None]:
+        """返回调用 ASR 当下最近一条合格的完整 Thinker 回复。"""
+        if not self._asr_context_enabled:
+            return "disabled", "", None
+        for turn in reversed(self.actor.state.turns.values()):
+            if (
+                turn.reply_text
+                and turn.stage in {TurnStage.STREAMING_TTS, TurnStage.COMPLETED, TurnStage.FAILED}
+                and not turn.interrupted
+                and not turn.thinker_fallback_used
+                and turn.thinker_failure_code is None
+            ):
+                return "provided", turn.reply_text, turn.turn_id
+        return "unavailable", "", None
+
     async def _actor_loop(self) -> None:
         while True:
             event = await self.events.get()
@@ -787,14 +804,23 @@ class SessionRuntime:
                         )
                     continue
             started = self._clock()
+            context_status, context, context_turn_id = self._asr_context()
             self._observe(
                 "asr_started",
                 stage="ASR",
                 segment_id=segment.segment_id,
                 trace_id=trace_id,
+                context_status=context_status,
+                context_chars=len(context),
+                context_turn_id=context_turn_id,
             )
+            if self._metrics is not None:
+                self._metrics.record_asr_context(context_status, char_count=len(context))
             try:
-                text = await self._asr_client.transcribe(segment.pcm16_16k)
+                text = await self._asr_client.transcribe(
+                    segment.pcm16_16k,
+                    context=context,
+                )
                 event: SessionEvent = AsrSucceeded(
                     session_id=self.session_id,
                     segment_id=segment.segment_id,

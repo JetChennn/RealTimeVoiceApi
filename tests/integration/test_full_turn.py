@@ -23,6 +23,17 @@ def test_full_turn_emits_asr_text_and_audio() -> None:
     assert messages[-1]["status"] == "COMPLETED"
 
 
+def test_second_turn_asr_receives_previous_thinker_reply_as_context() -> None:
+    harness = FakeServiceHarness(["first", "second"])
+    with connected_session(harness) as (websocket, _):
+        send_audio(websocket, 0)
+        receive_until(websocket, "RESPONSE_END")
+        send_audio(websocket, 1000)
+        receive_until(websocket, "RESPONSE_END")
+
+    assert harness.asr.contexts == ["", "reply:first"]
+
+
 def test_websocket_rag_configuration_reaches_thinker_request() -> None:
     harness = FakeServiceHarness(["农业社会如何生产？"])
     with connected_session(
