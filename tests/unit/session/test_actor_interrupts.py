@@ -94,7 +94,7 @@ def test_interrupted_tts_chunk_is_counted_and_not_sent() -> None:
     assert (discarded.turn_id, discarded.byte_count) == (1, 2)
 
 
-def test_new_llm_starts_without_waiting_for_interrupted_tts_to_drain() -> None:
+def test_new_llm_starts_without_waiting_for_interrupted_tts_cancellation() -> None:
     actor = actor_with_tts_turn()
 
     effects = recognize(actor, 2, "new")

@@ -31,7 +31,13 @@ class TurnContext:
     reply_text: str = ""
     thinker_fallback_used: bool = False
     thinker_failure_code: str | None = None
+    # bistream 允许 LLM 与 TTS 同时活动；这些字段把 TTS 生命周期从 stage 中拆开表示。
+    tts_started: bool = False
+    tts_input_closed: bool = False
+    tts_failure: tuple[str, str] | None = None
     next_audio_sequence: int = 0
+    # 当前用户输入被提交前已经确认的尾部静音，用于首帧 TTS 时延的展示口径。
+    trailing_silence_ms: float = 0.0
 
 
 @dataclass

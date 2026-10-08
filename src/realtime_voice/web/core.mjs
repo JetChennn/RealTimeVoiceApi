@@ -1,4 +1,7 @@
-export const STAGES = ['asr', 'semantic', 'semantic_inference', 'semantic_queue', 'thinker', 'tts'];
+export const STAGES = ['asr', 'semantic', 'semantic_inference', 'semantic_queue', 'thinker', 'tts', 'speech_end_to_first_tts_excluding_silence'];
+const DIRECT_HISTOGRAMS = {
+  speech_end_to_first_tts_excluding_silence: 'realtime_voice_speech_end_to_first_tts_excluding_silence_seconds',
+};
 export function parseMetrics(text) {
   const values = Object.fromEntries(STAGES.map(stage => [stage, {sum: 0, count: 0}]));
   let found = false;
@@ -12,8 +15,22 @@ export function parseMetrics(text) {
       found = true;
     }
   }
+  for (const [stage, metric] of Object.entries(DIRECT_HISTOGRAMS)) {
+    const expression = new RegExp(`^${metric}_(sum|count)\\s+([^\\s]+)$`);
+    for (const line of text.split('\n')) {
+      const match = line.match(expression);
+      if (!match) continue;
+      const value = Number(match[2]);
+      if (Number.isFinite(value) && value >= 0) {
+        values[stage][match[1]] = value;
+        found = true;
+      }
+    }
+  }
   // A fresh process has no labelled stage samples yet.
-  if (!found && !text.includes('# HELP realtime_voice_stage_latency_seconds ')) {
+  if (!found
+    && !text.includes('# HELP realtime_voice_stage_latency_seconds ')
+    && !text.includes('# HELP realtime_voice_speech_end_to_first_tts_excluding_silence_seconds ')) {
     throw new Error('响应不是本网关的阶段指标');
   }
   return values;
@@ -43,6 +60,9 @@ export function isStaleAudioChunk(capturedAtMs, currentAudioTimeMs, maxAgeMs) {
     && Number.isFinite(maxAgeMs)
     && maxAgeMs >= 0
     && currentAudioTimeMs - capturedAtMs > maxAgeMs;
+}
+export function shouldDropAudioDelta(turnInterrupted, messageInterrupt) {
+  return Boolean(turnInterrupted || messageInterrupt);
 }
 export function decodePcm(base64) {
   const binary = atob(base64);

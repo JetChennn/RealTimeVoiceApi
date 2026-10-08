@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -19,7 +20,9 @@ from realtime_voice.clients.tts import TtsChunk, TtsRequest, TtsStreamError
 from realtime_voice.observability.metrics import Metrics
 from realtime_voice.protocol.decoder import DecodedSpeakerRegister
 from realtime_voice.protocol.server_messages import (
+    AudioDelta,
     ErrorMessage,
+    ResponseEnd,
     SpeakerRegisterResult,
     SpeakerStatus,
     TextDelta,
@@ -28,6 +31,7 @@ from realtime_voice.protocol.server_messages import (
 from realtime_voice.session.actor import (
     QueueAsr,
     SendOutbound,
+    StartBistreamTts,
     StartNextThinker,
     StartThinker,
     StartTts,
@@ -370,8 +374,6 @@ def make_runtime(
     sender: BlockingWorker | None = None,
     sample_rate: int = 16000,
     registry: RecordingRegistry | None = None,
-    thinker_cleanup_timeout: float = 0.2,
-    tts_drain_timeout: float = 0.2,
     **runtime_options: object,
 ) -> tuple[SessionRuntime, tuple[BlockingWorker, BlockingWorker, BlockingWorker]]:
     resolved_receiver = receiver or BlockingWorker()
@@ -386,11 +388,133 @@ def make_runtime(
         vad_worker=vad,
         sender=resolved_sender,
         registry=registry,
-        thinker_cleanup_timeout=thinker_cleanup_timeout,
-        tts_drain_timeout=tts_drain_timeout,
         **runtime_options,
     )
     return runtime, (resolved_receiver, vad, resolved_sender)
+
+
+async def test_interrupt_purges_only_that_turns_queued_audio_and_fixes_byte_count() -> None:
+    runtime, _ = make_runtime()
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="old",
+        audio_wav=valid_wav(),
+        stage=TurnStage.INTERRUPTED,
+        interrupted=True,
+        tts_generation=3,
+    )
+    old_audio = AudioDelta(
+        type="AUDIO_DELTA",
+        user_id="u",
+        session_id="s",
+        turn_id=1,
+        interrupt=False,
+        sequence=0,
+        audio_format="PCM16",
+        sample_rate=16000,
+        channels=1,
+        audio_b64=base64.b64encode(b"\x00\x00" * 4).decode(),
+    )
+    retained = TextDelta(
+        type="TEXT_DELTA",
+        user_id="u",
+        session_id="s",
+        turn_id=2,
+        interrupt=False,
+        delta="new",
+    )
+    runtime.outbound.put_nowait(old_audio)
+    runtime.outbound.put_nowait(old_audio.model_copy(update={"sequence": 1}))
+    runtime.outbound.put_nowait(retained)
+
+    await runtime.execute_effect(
+        SendOutbound(
+            TurnState(
+                type="TURN_STATE",
+                user_id="u",
+                session_id="s",
+                turn_id=1,
+                interrupt=True,
+                state="INTERRUPTED",
+            )
+        )
+    )
+
+    first = runtime.outbound.get_nowait()
+    second = runtime.outbound.get_nowait()
+    assert first == retained
+    assert isinstance(second, TurnState)
+    assert runtime.outbound.queued_bytes == 0
+
+
+async def test_failed_turn_purges_queued_audio_and_sender_filter_rejects_it() -> None:
+    runtime, _ = make_runtime()
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="failed",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_TTS,
+        tts_generation=1,
+    )
+    audio = AudioDelta(
+        type="AUDIO_DELTA",
+        user_id="u",
+        session_id="s",
+        turn_id=1,
+        interrupt=False,
+        sequence=0,
+        audio_format="PCM16",
+        sample_rate=16000,
+        channels=1,
+        audio_b64=base64.b64encode(b"\x00\x00" * 4).decode(),
+    )
+    runtime.outbound.put_nowait(audio)
+    runtime.actor.state.turns[1].stage = TurnStage.FAILED
+
+    await runtime.execute_effect(
+        SendOutbound(
+            ResponseEnd(
+                type="RESPONSE_END",
+                user_id="u",
+                session_id="s",
+                turn_id=1,
+                interrupt=False,
+                status="FAILED",
+            )
+        )
+    )
+
+    assert runtime.outbound.get_nowait().type == "RESPONSE_END"
+    assert runtime.outbound.empty()
+    assert runtime.should_send_outbound(audio) is False
+
+
+async def test_prestart_bistream_cancellation_cleans_all_per_turn_maps() -> None:
+    class BistreamTts:
+        bistream_enabled = True
+
+        async def stream_bistream(self, request, inputs):
+            if False:
+                yield TtsChunk(0, b"\x00\x00", True)
+
+    runtime, _ = make_runtime(tts=BistreamTts())
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="old",
+        audio_wav=valid_wav(),
+        stage=TurnStage.INTERRUPTED,
+        interrupted=True,
+        tts_generation=1,
+    )
+    key = (1, 1)
+
+    await runtime.execute_effect(StartBistreamTts(turn_id=1, generation=1))
+    async with asyncio.timeout(1):
+        while key in runtime._tts_tasks_by_key:
+            await asyncio.sleep(0)
+
+    assert key not in runtime._tts_interrupt_signals
+    assert key not in runtime._bistream_inputs
 
 
 def test_semantic_context_only_contains_the_previous_reply() -> None:
@@ -792,7 +916,11 @@ async def test_runtime_records_each_real_speech_end_milestone_exactly_once() -> 
         await runtime.events.put(
             SpeechSegmentReady(
                 session_id="s",
-                segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x01\x00"),
+                segment=SpeechSegment(
+                    segment_id=1,
+                    pcm16_16k=b"\x01\x00",
+                    trailing_silence_samples=16000,
+                ),
                 speech_end_at=10.0,
             )
         )
@@ -827,6 +955,8 @@ async def test_runtime_records_each_real_speech_end_milestone_exactly_once() -> 
     assert "realtime_voice_speech_end_to_first_llm_seconds_sum 3.0" in rendered
     assert "realtime_voice_speech_end_to_first_tts_seconds_count 1.0" in rendered
     assert "realtime_voice_speech_end_to_first_tts_seconds_sum 4.0" in rendered
+    assert "realtime_voice_speech_end_to_first_tts_excluding_silence_seconds_count 1.0" in rendered
+    assert "realtime_voice_speech_end_to_first_tts_excluding_silence_seconds_sum 3.0" in rendered
 
 
 async def test_runtime_retains_speech_end_for_a_turn_queued_behind_active_llm() -> None:
@@ -1602,7 +1732,7 @@ async def test_tts_slow_chunk_gap_emits_one_warning(caplog) -> None:
     assert warnings[0]["sequence"] == 1
 
 
-async def test_interrupted_tts_drains_while_new_turn_completes_independently() -> None:
+async def test_interrupted_tts_is_cancelled_while_new_turn_completes_independently() -> None:
     source = sine_pcm16(sample_rate=24000, seconds=0.04, frequency=440)
     tts = ConcurrentTts(source)
     runtime, _ = make_runtime(tts=tts, sample_rate=24000)
@@ -1611,7 +1741,6 @@ async def test_interrupted_tts_drains_while_new_turn_completes_independently() -
         asr_text="old",
         audio_wav=valid_wav(),
         stage=TurnStage.STREAMING_TTS,
-        interrupted=True,
         tts_generation=1,
     )
     runtime.actor.state.turns[2] = TurnContext(
@@ -1626,6 +1755,19 @@ async def test_interrupted_tts_drains_while_new_turn_completes_independently() -
         StartTts(turn_id=1, generation=1, user_input="old", reply_text="old reply", tone="测试语气 prompt")
     )
     await asyncio.wait_for(tts.first_started.wait(), timeout=1)
+    runtime.actor.state.turns[1].interrupted = True
+    await runtime.execute_effect(
+        SendOutbound(
+            TurnState(
+                type="TURN_STATE",
+                user_id="u",
+                session_id="s",
+                turn_id=1,
+                interrupt=True,
+                state="INTERRUPTED",
+            )
+        )
+    )
     await runtime.execute_effect(
         StartTts(turn_id=2, generation=1, user_input="new", reply_text="new reply", tone="测试语气 prompt")
     )
@@ -1635,11 +1777,6 @@ async def test_interrupted_tts_drains_while_new_turn_completes_independently() -
     second_completed = await next_event(runtime, TtsCompleted)
     assert (second_chunk.turn_id, second_completed.turn_id) == (2, 2)
     assert tts.consumed == ["u/s/turn-2"]
-
-    tts.release_first.set()
-    first_completed = await next_event(runtime, TtsCompleted)
-    assert first_completed.turn_id == 1
-    assert tts.consumed == ["u/s/turn-2", "u/s/turn-1"]
 
 
 async def test_worker_failure_cancels_siblings_and_releases_registry() -> None:
@@ -1758,9 +1895,9 @@ class NeverEndingTts:
             yield TtsChunk(chunk_index=0, pcm16_24k=b"\x00\x00", finalize=True)
 
 
-async def test_live_interrupted_tts_has_a_per_turn_drain_deadline() -> None:
+async def test_live_interrupted_tts_is_cancelled_immediately() -> None:
     tts = NeverEndingTts()
-    runtime, workers = make_runtime(tts=tts, tts_drain_timeout=0.01)
+    runtime, workers = make_runtime(tts=tts)
     runtime.actor.state.turns[1] = TurnContext(
         turn_id=1,
         asr_text="old",

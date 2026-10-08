@@ -56,6 +56,7 @@ class FakeThinker:
         self.release_first = threading.Event()
         self.first_done = threading.Event()
         self.deleted = threading.Event()
+        self.interrupted = threading.Event()
 
     async def stream_reply(self, request):
         self.requests.append(request)
@@ -80,6 +81,7 @@ class FakeThinker:
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
         self.calls.append("interrupt")
+        self.interrupted.set()
 
     async def delete_session(self, user_id: str, session_id: str) -> DeleteResult:
         self.calls.append("delete")
@@ -94,7 +96,7 @@ class FakeTts:
         self.calls: list[str] = []
         self.first_started = threading.Event()
         self.release_first = threading.Event()
-        self.first_drained = threading.Event()
+        self.first_stopped = threading.Event()
         self.second_started = threading.Event()
         self.audio = b"\x00\x00" * 4800
         self.requests = []
@@ -107,12 +109,14 @@ class FakeTts:
             raise RuntimeError("fake TTS failure")
         if self.block_first and turn == "1":
             self.first_started.set()
-            yield TtsChunk(chunk_index=0, pcm16_24k=self.audio, finalize=False)
-            released = await asyncio.to_thread(self.release_first.wait, 2)
-            if not released:
-                raise TimeoutError("fake TTS release timed out")
-            yield TtsChunk(chunk_index=1, pcm16_24k=self.audio, finalize=True)
-            self.first_drained.set()
+            try:
+                yield TtsChunk(chunk_index=0, pcm16_24k=self.audio, finalize=False)
+                released = await asyncio.to_thread(self.release_first.wait, 2)
+                if not released:
+                    raise TimeoutError("fake TTS release timed out")
+                yield TtsChunk(chunk_index=1, pcm16_24k=self.audio, finalize=True)
+            finally:
+                self.first_stopped.set()
             return
         if turn == "2":
             self.second_started.set()
@@ -186,11 +190,9 @@ class FakeServiceHarness:
             event_queue=events,
             audio_queue=audio,
             outbound_queue=outbound,
-            thinker_cleanup_timeout=2,
             thinker_fallback_enabled=True,
             thinker_fallback_texts=("保底一", "保底二", "保底三"),
             thinker_fallback_tone="平和",
-            tts_drain_timeout=2,
         )
         self.runtime = runtime
         return runtime

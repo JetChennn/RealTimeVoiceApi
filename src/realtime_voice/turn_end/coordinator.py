@@ -189,6 +189,7 @@ class TurnEndCoordinator:
                         pcm16_wav_bytes(b"".join(pcm), 16000),
                         item.speech_end_at,
                         reason,
+                        item.silence_ms,
                     )
                 )
                 self.metrics.turn_end_commits.labels(reason).inc()

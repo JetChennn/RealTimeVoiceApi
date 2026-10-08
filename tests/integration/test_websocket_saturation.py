@@ -144,8 +144,6 @@ def _controlled_runtime_factory(
             outbound_queue_max_bytes=settings.session_outbound_queue_max_bytes,
             audio_queue=audio,
             outbound_queue=outbound,
-            thinker_cleanup_timeout=settings.thinker_cleanup_timeout_seconds,
-            tts_drain_timeout=settings.tts_drain_timeout_seconds,
         )
         if isinstance(producer, SaturateOutbound):
             producer.runtime = runtime

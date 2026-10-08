@@ -34,7 +34,6 @@ from realtime_voice.session.registry import (
     SessionRegistry,
 )
 from realtime_voice.session.runtime import (
-    THINKER_CLEANUP_SKIPPED,
     BoundedByteQueue,
     SessionQueueOverloaded,
     SessionRuntime,
@@ -42,7 +41,6 @@ from realtime_voice.session.runtime import (
 from realtime_voice.session.state import SessionState, TurnContext, TurnStage
 
 __all__ = [
-    "THINKER_CLEANUP_SKIPPED",
     "AsrFailed",
     "AsrSucceeded",
     "AudioSegmentDiscarded",

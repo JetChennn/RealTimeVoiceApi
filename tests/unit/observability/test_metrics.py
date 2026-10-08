@@ -15,11 +15,13 @@ def test_metrics_expose_activity_latency_and_discarded_tts_audio():
 
     metrics.set_active_sessions(3)
     metrics.observe_speech_end_to_first_tts(0.25)
+    metrics.observe_speech_end_to_first_tts_excluding_silence(0.1)
     metrics.record_discarded_tts_chunk(byte_count=24)
 
     rendered = metrics.render().decode()
     assert "realtime_voice_active_sessions 3.0" in rendered
     assert "realtime_voice_speech_end_to_first_tts_seconds_bucket" in rendered
+    assert "realtime_voice_speech_end_to_first_tts_excluding_silence_seconds_bucket" in rendered
     assert "realtime_voice_discarded_tts_chunks_total 1.0" in rendered
     assert "realtime_voice_discarded_tts_bytes_total 24.0" in rendered
 

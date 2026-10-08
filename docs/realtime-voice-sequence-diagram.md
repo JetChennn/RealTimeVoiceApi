@@ -87,7 +87,7 @@ sequenceDiagram
     participant SActor as SessionActor
     participant Sender as Sender
     participant Thinker as run_thinker
-    participant TTS as run_tts
+    participant TTS as run_tts / run_bistream_tts
     participant DThinker as 下游Thinker
     participant KB as KBService
     participant DTTS as 下游TTS
@@ -117,9 +117,10 @@ sequenceDiagram
             DThinker-->>Thinker: ThinkerTextDelta
             Thinker->>ActorLoop: events.put ThinkerDeltaReceived
             ActorLoop->>SActor: handle ThinkerDeltaReceived
-            SActor-->>ActorLoop: SendOutbound TextDelta
+            SActor-->>ActorLoop: SendOutbound TextDelta + 首段时 StartBistreamTts + SendBistreamText
             ActorLoop->>Sender: outbound.put TextDelta
             Sender->>Client: TEXT_DELTA
+            ActorLoop->>TTS: 首个 delta 建立 bistream；后续 delta 原样写入
         end
         DThinker-->>Thinker: ThinkerDone reply_text + tone
         Thinker->>ActorLoop: events.put ThinkerCompleted
@@ -128,7 +129,7 @@ sequenceDiagram
         Thinker->>DThinker: fire-and-forget interrupt POST /api/v1/interrupt
         Thinker->>ActorLoop: events.put ThinkerFailed THINKER_TIMEOUT
         ActorLoop->>SActor: handle ThinkerFailed
-        SActor-->>ActorLoop: SendOutbound TextEnd(随机保底文案) + StartTts
+        SActor-->>ActorLoop: SendOutbound TextEnd(随机保底文案) + StartBistreamTts
         ActorLoop->>Sender: outbound.put TEXT_END
         Sender->>Client: TEXT_END
     else 首字已到但整轮超过 reply_total_timeout（默认 20s）（总时长超时）
@@ -136,26 +137,26 @@ sequenceDiagram
         Thinker->>DThinker: fire-and-forget interrupt POST /api/v1/interrupt
         Thinker->>ActorLoop: events.put ThinkerFailed THINKER_REPLY_TIMEOUT
         ActorLoop->>SActor: handle ThinkerFailed
-        SActor-->>ActorLoop: SendOutbound TextEnd(随机保底文案) + StartTts
+        SActor-->>ActorLoop: SendOutbound TextEnd(随机保底文案) + StartBistreamTts
         ActorLoop->>Sender: outbound.put TEXT_END
         Sender->>Client: TEXT_END（替换此前未完成的增量文本）
     end
 
-    Note over Client,DTTS: 阶段7 Thinker完成启动TTS
+    Note over Client,DTTS: 阶段7 Thinker完成并收尾TTS输入
     ActorLoop->>SActor: handle ThinkerCompleted
-    SActor->>SActor: 存reply_text和tone，释放活跃LLM槽
+    SActor->>SActor: 存reply_text，释放活跃LLM槽
     SActor->>SActor: stage切到STREAMING_TTS
     SActor-->>ActorLoop: SendOutbound TextEnd
-    SActor-->>ActorLoop: StartTts
+    SActor-->>ActorLoop: EndBistreamTts（无 delta 时依次 Start、发送完整 reply_text、End）
     ActorLoop->>Sender: outbound.put TextEnd
     Sender->>Client: TEXT_END
-    ActorLoop->>TTS: spawn _run_tts
+    ActorLoop->>TTS: 输入收尾；TTS 已在首个 delta 时启动
 
     Note over Client,DTTS: 阶段8 TTS流式合成
-    Note over TTS: prompt优先级为配置覆盖 > Thinker tone > “平和”
-    TTS->>DTTS: stream POST /v1/dialogue-tts/stream（model_reply + prompt）
-    Note over TTS: 重采样24k到客户端采样率 收到中断信号给宽限期
-    loop 流式NDJSON音频块
+    Note over TTS: 固定 prompt=RTVA_TTS_PROMPT_OVERRIDE（空值为“平和”）
+    TTS->>DTTS: WS /v1/tts/bistream：start 后持续 text，最后 end_turn
+    Note over TTS: 重采样24k到客户端采样率 中断时发cancel并立即abort
+    loop 全双工音频事件
         DTTS-->>TTS: TtsChunk pcm16_24k
         TTS->>TTS: 重采样到客户端采样率
         TTS->>ActorLoop: events.put TtsChunkReceived
@@ -175,11 +176,13 @@ sequenceDiagram
     Sender->>Client: RESPONSE_END
 ```
 
+`RTVA_TTS_MODE=dialogue_stream` 是人工回滚开关：此时保留旧的 HTTP 调用顺序，即 Thinker 完整结束后再调用 `POST /v1/dialogue-tts/stream`。网关不会在 bistream 失败时自动切换到旧接口，避免同一轮文本被重复合成。
+
 ### Thinker 流超时与中断通知
 
 阶段 6 的回复流受两段式超时保护：`RTVA_THINKER_STREAM_TIMEOUT_SECONDS`（默认 5s）限制首事件等待，`RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS`（默认 20s）限制整轮总时长。任一超时都会取消本轮消费，并以 fire-and-forget 方式调用 Thinker `POST /api/v1/interrupt`。默认开启保底时，状态机从三条固定文案中随机选择一条，向客户端发送 `TEXT_END` 并把同一文本交给 TTS；TTS 完成后本轮为 `RESPONSE_END/COMPLETED`。连接失败、远端错误、未知异常和空回复使用同一路径。原始失败码仅保留在服务端日志和指标中。
 
-若用户已打断该轮，状态机仍发送带 `interrupt=true` 的保底 `TEXT_END`，但不启动 TTS，并以 `RESPONSE_END/INTERRUPTED` 收尾；若保底 TTS 已启动后才发生打断，则继续沿用现有排空和音频丢弃机制。
+若用户已打断该轮，状态机仍发送带 `interrupt=true` 的保底 `TEXT_END`，但不启动 TTS，并以 `RESPONSE_END/INTERRUPTED` 收尾；若保底 TTS 已启动后才发生打断，则立即取消 TTS 并隔离所有后续旧轮音频。
 
 Thinker 侧自身还有会话锁、RAG 和回复流预算（详见 BerryThinker 文档）。Thinker 内部 RAG 耗时计入网关首事件与总时长预算；部署时应让 Thinker 的 RAG 超时小于网关首事件预算，或相应调大网关预算。
 
@@ -209,11 +212,12 @@ sequenceDiagram
     Note over RT: 2 _cancel_asr取消asr并清空队列
     RT->>Audio: cancel并gather
     RT->>ASR: cancel并gather
-    Note over RT: 3 _wait_thinker等待thinker任务 超时则cancel
-    RT->>Thinker: 等待 thinker_cleanup_timeout
-    Note over RT: 4 _drain_tts等待tts任务 超时则cancel
-    RT->>TTS: 等待 tts_drain_timeout
-    Note over RT: 5 若thinker_safe则_delete_thinker_session
+    Note over RT: 3 _cancel_thinker与_cancel_tts并发执行，不等待Thinker自然结束
+    RT->>DThinker: POST /api/v1/interrupt（尽力发送，不等待响应）
+    RT->>Thinker: cancel并gather本地回复流任务
+    Note over RT: 4 _cancel_tts设置取消信号并取消tts任务
+    RT->>TTS: bistream尽力发cancel 随后立即abort连接
+    Note over RT: 5 仅在没有进行中的Thinker任务时才_delete_thinker_session
     RT->>DThinker: delete_session DELETE /api/v1/sessions
     Note over RT: finally 无论成败registry.remove释放准入
     RT->>Reg: remove session_id
@@ -226,9 +230,10 @@ sequenceDiagram
 
 1. **Actor 标记中断**：[actor.py](../src/realtime_voice/session/actor.py) 的 `_interrupt_unfinished_turns` 对所有非终态 turn 置 `interrupted=True`，产出 `SendOutbound(TurnState INTERRUPTED)`。
 2. **Runtime 通知 TTS**：[runtime.py](../src/realtime_voice/session/runtime.py) 的 `execute_effect` 收到 `TurnState` 时调用 `_signal_tts_interruption(turn_id)`，`set()` 对应的 `interrupt_signal`。
-3. **TTS 排空宽限**：[runtime.py](../src/realtime_voice/session/runtime.py) 的 `_arm_tts_drain_timeout` 监听到信号后，把 `drain_timeout` 重设为 `_tts_drain_timeout` 秒宽限期，让 TTS 尽量消费并丢弃尾部音频后再结束。
-4. **Thinker 中断**：[runtime.py](../src/realtime_voice/session/runtime.py) 中若 `StartNextThinker(interrupt_first=True)`，先调 `thinker_client.interrupt` 再发起新请求。
-5. **流超时中断**：Thinker 回复流首字超过 `RTVA_THINKER_STREAM_TIMEOUT_SECONDS`（默认 5s）未到达，或首字已到但整轮超过 `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS`（默认 20s）未完成时，网关取消本轮消费，并向 Thinker 发送 fire-and-forget 的 interrupt 通知（不等待结果）；随后按是否已被用户打断，进入保底 TTS 或仅返回保底文本。
+3. **TTS 立即取消**：[runtime.py](../src/realtime_voice/session/runtime.py) 设置独立取消信号并取消旧轮任务。bistream 最多用固定 50 ms 尽力写入 `cancel`，随后不等待服务端回应或 WebSocket 关闭握手，直接 abort 底层连接；旧 HTTP 模式则直接关闭响应流。
+4. **旧轮音频隔离**：运行时丢弃中断后到达的 TTS 块，清除出站队列中该轮的 `AUDIO_DELTA`，Sender 在真正写入设备 WebSocket 前再校验一次轮次状态。
+5. **Thinker 中断**：[runtime.py](../src/realtime_voice/session/runtime.py) 中若 `StartNextThinker(interrupt_first=True)`，先调 `thinker_client.interrupt` 再发起新请求。
+6. **流超时中断**：Thinker 回复流首字超过 `RTVA_THINKER_STREAM_TIMEOUT_SECONDS`（默认 5s）未到达，或首字已到但整轮超过 `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS`（默认 20s）未完成时，网关取消本轮消费，并向 Thinker 发送 fire-and-forget 的 interrupt 通知（不等待结果）；随后按是否已被用户打断，进入保底 TTS 或仅返回保底文本。
 
 ## 采样率转换
 

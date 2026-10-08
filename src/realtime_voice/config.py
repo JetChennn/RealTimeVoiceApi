@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,6 +15,12 @@ class Settings(BaseSettings):
     asr_base_url: AnyHttpUrl = "http://127.0.0.1:8001"
     thinker_base_url: AnyHttpUrl = "http://127.0.0.1:8002"
     tts_base_url: AnyHttpUrl = "http://127.0.0.1:9000"
+    # TTS 调用协议。bistream 为默认的双向流式模式；dialogue_stream 仅用于人工回滚。
+    tts_mode: Literal["bistream", "dialogue_stream"] = "bistream"
+    # /v1/tts/bistream 首帧必填的参考音色。路径相对于 PromptTTSD 服务进程的工作目录。
+    tts_ref_audio: str = "ref_audio/tongtong.wav"
+    # 与 tts_ref_audio 严格对应的参考文本；修改音频时必须同步修改此项。
+    tts_ref_text: str = "在一座美丽的森林里，住着许多动物。"
     allowed_sample_rates: tuple[int, ...] = (16000, 24000, 48000)
     max_sessions: int = Field(default=30, ge=1)
     cpu_workers: int = Field(default=8, ge=1)
@@ -27,7 +35,6 @@ class Settings(BaseSettings):
     session_outbound_queue_size: int = Field(default=256, ge=1)
     session_audio_queue_max_seconds: float = Field(default=3.0, gt=0)
     session_outbound_queue_max_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
-    thinker_cleanup_timeout_seconds: float = Field(default=25.0, gt=0)
     thinker_stream_timeout_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     thinker_reply_total_timeout_seconds: float = Field(
         default=20.0, gt=0, allow_inf_nan=False
@@ -43,13 +50,12 @@ class Settings(BaseSettings):
     tts_max_waiters: int = Field(default=64, ge=0)
     tts_first_audio_timeout_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     tts_idle_timeout_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
-    tts_drain_timeout_seconds: float = Field(default=0.01, gt=0, allow_inf_nan=False)
     # 下游 /health 后台探测：周期刷新缓存，避免 /health 路由产生网络等待
     downstream_probe_interval_seconds: float = Field(default=10.0, gt=0)
     downstream_probe_timeout_seconds: float = Field(default=2.0, gt=0)
     slow_stage_warning_seconds: float = Field(default=2.0, gt=0, allow_inf_nan=False)
-    # 非空时透传给 TTS，跳过其内部 qwen-flash prompt 生成（可消除 ~18s 网络延迟）
-    tts_prompt_override: str = ""
+    # bistream 在 start 帧就需要 prompt。空值统一回退为“平和”，不再等待 Thinker done.tone。
+    tts_prompt_override: str = "平和"
 
     # VAD 分段中累计的有效人声最短时长；不足时不进入后续处理。
     vad_min_speech_ms: int = Field(default=200, ge=0, le=5000)
@@ -91,6 +97,20 @@ class Settings(BaseSettings):
         if not value:
             raise ValueError("thinker fallback text and tone must not be empty")
         return value
+
+    @field_validator("tts_ref_audio", "tts_ref_text")
+    @classmethod
+    def validate_tts_reference(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("bistream TTS reference audio and text must not be empty")
+        return value
+
+    @field_validator("tts_prompt_override")
+    @classmethod
+    def normalize_tts_prompt(cls, value: str) -> str:
+        # 兼容既有 .env 中的空配置，同时保证 bistream start 一定带非空 prompt。
+        return value.strip() or "平和"
 
     @model_validator(mode="after")
     def validate_turn_end(self):

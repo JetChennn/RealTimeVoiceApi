@@ -64,6 +64,9 @@ def configure_services(services: AppServices) -> None:
         ),
         first_audio_timeout=settings.tts_first_audio_timeout_seconds,
         idle_timeout=settings.tts_idle_timeout_seconds,
+        mode=settings.tts_mode,
+        ref_audio=settings.tts_ref_audio,
+        ref_text=settings.tts_ref_text,
     )
     services.detector_offload = BoundedDetectorOffload(
         settings.cpu_workers, metrics=services.metrics
@@ -118,7 +121,12 @@ def build_runtime(
             limit, items, queued_bytes, chunk_bytes
         ),
     )
-    sender = WebSocketSender(websocket, outbound)
+    sender = WebSocketSender(
+        websocket,
+        outbound,
+        lambda message: runtime.should_send_outbound(message),
+        lambda message: runtime.report_outbound_discard(message),
+    )
     turn_end_audio = None
     if settings.turn_end_semantic_enabled:
         from realtime_voice.turn_end.audio import TurnEndAudio
@@ -174,7 +182,6 @@ def build_runtime(
         audio_queue=audio,
         outbound_queue=outbound,
         asr_context_enabled=settings.asr_context_enabled,
-        thinker_cleanup_timeout=settings.thinker_cleanup_timeout_seconds,
         thinker_stream_timeout=settings.thinker_stream_timeout_seconds,
         thinker_reply_total_timeout=settings.thinker_reply_total_timeout_seconds,
         thinker_fallback_enabled=settings.thinker_fallback_enabled,
@@ -184,7 +191,6 @@ def build_runtime(
             settings.thinker_fallback_text_3,
         ),
         thinker_fallback_tone=settings.thinker_fallback_tone,
-        tts_drain_timeout=settings.tts_drain_timeout_seconds,
         tts_prompt_override=settings.tts_prompt_override,
         slow_stage_warning_seconds=settings.slow_stage_warning_seconds,
         speaker_gate=(

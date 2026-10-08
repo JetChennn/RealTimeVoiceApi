@@ -1,4 +1,4 @@
-import {STAGES, parseMetrics, metricDelta, parseScenes, base64Pcm, decodePcm, wavBlob, isStaleAudioChunk} from './core.mjs';
+import {STAGES, parseMetrics, metricDelta, parseScenes, base64Pcm, decodePcm, wavBlob, isStaleAudioChunk, shouldDropAudioDelta} from './core.mjs?v=20261008-tts-cancel-1';
 
 const $ = id => document.getElementById(id);
 const url = new URL('/v1/realtime', location.href);
@@ -10,7 +10,9 @@ const descriptions = {
   semantic_inference: ['语义模型执行', '实际预处理与推理耗时'],
   semantic_queue: ['语义排队', '提交 → 开始执行'],
   asr: ['ASR 识别', '转写调用 → 识别完成'],
-  thinker: ['LLM 首包', '回复调用 → 首段文本'], tts: ['TTS 首音频', '合成调用 → 首块可发送音频'],
+  thinker: ['LLM 首包', '回复调用 → 首段文本'],
+  tts: ['TTS 首音频', '合成调用 → 首块可发送音频'],
+  speech_end_to_first_tts_excluding_silence: ['说完话 → TTS 首帧', '末段有效语音结束 → 首块音频；已扣除实际尾部静音'],
 };
 // 按 code 前置一句友好提示，便于理解超时/会话忙类错误；原文案仍完整展示。
 const errorHints = {
@@ -221,7 +223,7 @@ function finishTurn(turn, label) {
   turn.chunks = [];
 }
 function playChunk(session, turn, message) {
-  if (turn.interrupted || message.interrupt) return;
+  if (shouldDropAudioDelta(turn.interrupted, message.interrupt)) return;
   if (message.sequence !== turn.next || message.audio_format !== 'PCM16' || message.channels !== 1 || ![16000, 24000, 48000].includes(message.sample_rate)) throw new Error('下行音频格式或序号异常');
   if (turn.rate !== null && turn.rate !== message.sample_rate) throw new Error('同一轮音频采样率发生变化');
   const {bytes, samples} = decodePcm(message.audio_b64);
@@ -281,7 +283,9 @@ function receive(session, message) {
       turn.reply.textContent = turn.text; if (!turn.interrupted) turn.state.textContent = '回复中'; break;
     case 'TEXT_END': turn.text = message.text; turn.reply.textContent = message.text; if (!turn.interrupted) turn.state.textContent = '语音合成中'; break;
     case 'AUDIO_DELTA': playChunk(session, turn, message); break;
-    case 'RESPONSE_END': finishTurn(turn, {COMPLETED: '已完成', INTERRUPTED: '已打断', FAILED: '失败'}[message.status] || message.status); break;
+    case 'RESPONSE_END':
+      if (message.status === 'FAILED') stopPlayback(session);
+      finishTurn(turn, {COMPLETED: '已完成', INTERRUPTED: '已打断', FAILED: '失败'}[message.status] || message.status); break;
   }
 }
 async function sampleMetrics(session) {

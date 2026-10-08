@@ -4,8 +4,12 @@ from copy import deepcopy
 import pytest
 
 from realtime_voice.session.actor import (
+    CancelBistreamTts,
+    EndBistreamTts,
     RecordThinkerFallback,
+    SendBistreamText,
     SendOutbound,
+    StartBistreamTts,
     StartThinker,
     StartTts,
 )
@@ -99,6 +103,98 @@ def test_uninterrupted_turn_streams_text_then_audio_and_completes() -> None:
     assert base64.b64decode(audio.audio_b64) == b"\x01\x00"
     assert (ended.status, ended.interrupt) == ("COMPLETED", False)
     assert actor.state.turns[1].stage is TurnStage.COMPLETED
+
+
+def test_bistream_starts_on_first_delta_and_ends_after_thinker_done() -> None:
+    actor = actor_for_test(bistream_enabled=True)
+    recognize(actor, 7, "问题")
+
+    first = actor.handle(
+        ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="答")
+    )
+    second = actor.handle(
+        ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="案")
+    )
+    done = actor.handle(
+        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="答案", tone="动态语调")
+    )
+
+    start = next(effect for effect in first if isinstance(effect, StartBistreamTts))
+    assert (start.turn_id, start.generation) == (1, 1)
+    assert [effect.delta for effect in first if isinstance(effect, SendBistreamText)] == ["答"]
+    assert not any(isinstance(effect, StartBistreamTts) for effect in second)
+    assert [effect.delta for effect in second if isinstance(effect, SendBistreamText)] == ["案"]
+    assert any(isinstance(effect, EndBistreamTts) for effect in done)
+    assert not any(isinstance(effect, StartTts) for effect in done)
+    assert outbound_of_type(done, "TEXT_END").text == "答案"
+
+
+def test_bistream_thinker_failure_after_delta_cancels_without_fallback() -> None:
+    actor = actor_for_test(bistream_enabled=True)
+    recognize(actor, 7, "问题")
+    actor.handle(ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="半句"))
+
+    effects = actor.handle(
+        ThinkerFailed(session_id="s", turn_id=1, generation=1, code="THINKER_FAILED", message="bad")
+    )
+
+    assert any(isinstance(effect, CancelBistreamTts) for effect in effects)
+    assert outbound_of_type(effects, "ERROR").stage == "LLM"
+    assert outbound_of_type(effects, "RESPONSE_END").status == "FAILED"
+    assert not any(isinstance(effect, RecordThinkerFallback) for effect in effects)
+
+
+def test_interrupted_bistream_thinker_failure_ends_as_interrupted_without_error() -> None:
+    actor = actor_for_test(bistream_enabled=True)
+    recognize(actor, 7, "问题")
+    actor.handle(ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="半句"))
+    recognize(actor, 8, "新问题")
+
+    effects = actor.handle(
+        ThinkerFailed(session_id="s", turn_id=1, generation=1, code="THINKER_FAILED", message="bad")
+    )
+
+    assert any(isinstance(effect, CancelBistreamTts) for effect in effects)
+    assert outbound_of_type(effects, "RESPONSE_END").status == "INTERRUPTED"
+    assert not any(
+        isinstance(effect, SendOutbound) and effect.message.type == "ERROR"
+        for effect in effects
+    )
+
+
+def test_bistream_tts_failure_during_thinker_is_deferred_until_thinker_done() -> None:
+    actor = actor_for_test(bistream_enabled=True)
+    recognize(actor, 7, "问题")
+    actor.handle(ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="答"))
+
+    during_llm = actor.handle(
+        TtsFailed(session_id="s", turn_id=1, generation=1, code="TTS_FIRST_AUDIO_TIMEOUT", message="timeout")
+    )
+    done = actor.handle(
+        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="答案", tone="动态语调")
+    )
+
+    assert during_llm == []
+    assert outbound_of_type(done, "ERROR").code == "TTS_FIRST_AUDIO_TIMEOUT"
+    assert outbound_of_type(done, "RESPONSE_END").status == "FAILED"
+
+
+def test_interrupted_bistream_tts_failure_does_not_preempt_thinker_cleanup() -> None:
+    actor = actor_for_test(bistream_enabled=True)
+    recognize(actor, 7, "问题")
+    actor.handle(ThinkerDeltaReceived(session_id="s", turn_id=1, generation=1, delta="答"))
+    actor.state.turns[1].interrupted = True
+
+    effects = actor.handle(
+        TtsFailed(session_id="s", turn_id=1, generation=1, code="TTS_STREAM_FAILED", message="cancelled")
+    )
+    done = actor.handle(
+        ThinkerCompleted(session_id="s", turn_id=1, generation=1, reply_text="答案", tone="动态语调")
+    )
+
+    assert effects == []
+    assert outbound_of_type(done, "RESPONSE_END").status == "INTERRUPTED"
+    assert actor.state.active_llm_turn_id is None
 
 
 def test_asr_failure_emits_session_level_recoverable_error_without_turn() -> None:

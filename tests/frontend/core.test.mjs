@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import fs from 'node:fs';
-import {parseMetrics, metricDelta, parseScenes, decodePcm, base64Pcm, wavBlob, isStaleAudioChunk} from '../../src/realtime_voice/web/core.mjs';
+import {parseMetrics, metricDelta, parseScenes, decodePcm, base64Pcm, wavBlob, isStaleAudioChunk, shouldDropAudioDelta} from '../../src/realtime_voice/web/core.mjs';
 const empty = '# HELP realtime_voice_stage_latency_seconds Stage duration\n';
 const metrics = (count, sum) => `${empty}realtime_voice_stage_latency_seconds_count{stage="thinker"} ${count}\nrealtime_voice_stage_latency_seconds_sum{stage="thinker"} ${sum}\n`;
+const speechEndToTts = (count, sum) => `${empty}realtime_voice_speech_end_to_first_tts_excluding_silence_seconds_count ${count}\nrealtime_voice_speech_end_to_first_tts_excluding_silence_seconds_sum ${sum}\n`;
 test('metrics subtract cumulative histograms and distinguish resets and absent samples', () => {
   const baseline = parseMetrics(metrics(10, 2));
   const result = metricDelta(baseline, parseMetrics(metrics(12, 2.6)));
@@ -15,6 +16,12 @@ test('metrics subtract cumulative histograms and distinguish resets and absent s
   assert.equal(metricDelta(baseline, parseMetrics(metrics(1, .1))).reset, true);
   assert.equal(metricDelta(parseMetrics(empty), parseMetrics(metrics(1, .08))).samples.thinker.ms, 80);
   assert.throws(() => parseMetrics('<html>not metrics</html>'));
+});
+test('speech-end-to-first-TTS histogram excluding silence is included in cumulative metric deltas', () => {
+  const baseline = parseMetrics(speechEndToTts(3, 2.4));
+  const result = metricDelta(baseline, parseMetrics(speechEndToTts(5, 4)));
+  assert.equal(result.samples.speech_end_to_first_tts_excluding_silence.count, 2);
+  assert.ok(Math.abs(result.samples.speech_end_to_first_tts_excluding_silence.ms - 800) < .0001);
 });
 test('scene input normalizes whitespace, duplicates and Chinese commas', () => {
   assert.deepEqual(parseScenes(' 农业社会，渔猎社会,农业社会 '), ['农业社会', '渔猎社会']);
@@ -38,6 +45,11 @@ test('stale capture detection drops only audio older than the configured budget'
   assert.equal(isStaleAudioChunk(1000, 2000, 1000), false);
   assert.equal(isStaleAudioChunk(999, 2000, 1000), true);
   assert.equal(isStaleAudioChunk(undefined, 2000, 1000), false);
+});
+test('audio arriving after a turn interruption is always dropped', () => {
+  assert.equal(shouldDropAudioDelta(true, false), true);
+  assert.equal(shouldDropAudioDelta(false, true), true);
+  assert.equal(shouldDropAudioDelta(false, false), false);
 });
 test('worklet emits continuous 40ms little-endian audio including silence', () => {
   let Processor;

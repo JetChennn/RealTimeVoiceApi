@@ -33,6 +33,8 @@ class AsrSucceeded:
     segment_id: int
     text: str
     audio_wav: bytes
+    # VAD 在这段用户输入末尾已经确认的静音；用于首音指标扣除静音等待。
+    trailing_silence_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +139,8 @@ class UserInputCommitted:
     audio_wav: bytes
     speech_end_at: float
     reason: str
+    # 语义结束器已观测到的真实尾部静音；不包含 ASR、语义推理或队列等待。
+    trailing_silence_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

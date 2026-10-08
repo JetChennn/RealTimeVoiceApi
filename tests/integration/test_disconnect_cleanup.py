@@ -1,5 +1,3 @@
-import threading
-
 from fastapi.testclient import TestClient
 
 from tests.integration.fake_services import (
@@ -9,7 +7,7 @@ from tests.integration.fake_services import (
 )
 
 
-def test_disconnect_waits_for_thinker_before_delete() -> None:
+def test_disconnect_immediately_interrupts_active_thinker() -> None:
     harness = FakeServiceHarness(["first"], block_first_thinker=True)
     with (
         TestClient(harness.app()) as client,
@@ -31,7 +29,6 @@ def test_disconnect_waits_for_thinker_before_delete() -> None:
         send_audio(websocket, 0)
         receive_until(websocket, "TEXT_DELTA", turn_id=1)
         assert harness.thinker.first_delta.wait(timeout=1)
-        threading.Timer(0.05, harness.thinker.release_first.set).start()
         websocket.close()
-        assert harness.thinker.deleted.wait(timeout=1)
-    assert harness.thinker.calls.index("done:first") < harness.thinker.calls.index("delete")
+        assert harness.thinker.interrupted.wait(timeout=1)
+    assert "delete" not in harness.thinker.calls

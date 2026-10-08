@@ -37,6 +37,7 @@ FALLBACK_TEXTS = ("保底一", "保底二", "保底三")
 def actor_for_test(
     *,
     fallback_enabled: bool = True,
+    bistream_enabled: bool = False,
     fallback_selector=lambda texts: texts[0],
 ) -> SessionActor:
     return SessionActor(
@@ -46,6 +47,7 @@ def actor_for_test(
             texts=FALLBACK_TEXTS,
             tone="平和",
         ),
+        bistream_enabled=bistream_enabled,
         fallback_selector=fallback_selector,
     )
 

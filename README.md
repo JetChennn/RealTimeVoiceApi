@@ -56,7 +56,7 @@ ASR 使用 16kHz 音频；候选片段只识别一次，同一段用户输入的
 - **语义结束判断**：短停顿先等待；达到最短静音且语义完整时提交，模型判断继续等待、超时、失败或过载时由最长静音兜底，输入达到最大时长时强制提交。
 - **会话级 RAG 透传**：`rag_enabled` 默认关闭；开启后每轮把 0～3 个场景传给 Thinker，场景为空时由 Thinker 仅检索通用知识。
 - **流式输出**：ASR 返回最终转写，Thinker 回复文本和 TTS 音频分别流式下发。
-- **打断能力**：新的完整用户输入提交后可以打断上一轮未完成的回复；同一输入中的短停顿和续说不会触发打断。服务端下发 `TURN_STATE/INTERRUPTED`，旧 TTS 在后台排空并丢弃。
+- **打断能力**：新的完整用户输入提交后可以打断上一轮未完成的回复；同一输入中的短停顿和续说不会触发打断。服务端下发 `TURN_STATE/INTERRUPTED`，立即取消旧 TTS 并丢弃所有迟到音频。
 - **并发与背压**：多会话并行；语义模型有界并发；事件、音频和出站队列有界；Thinker 请求统一使用并发准入。
 - **可观测性**：`/health` 聚合健康检查（含后台周期探测的下游真实状态）、`/metrics` 暴露 Prometheus 指标、结构化日志。
 - **统一服务管理**：`start_services.sh` 可单独或整体启停 ASR / KBService / Thinker / TTS vLLM / TTS main / 网关，并做就绪等待。
@@ -96,7 +96,7 @@ RealTimeVoiceAPI/
 │   ├── clients/              # ASR / Thinker / TTS 客户端 + 并发控制
 │   │   ├── asr.py            # ASR（POST /v1/chat/completions）
 │   │   ├── thinker.py        # Thinker/LLM（stream + interrupt + delete）
-│   │   ├── tts.py            # TTS（POST /v1/dialogue-tts/stream）
+│   │   ├── tts.py            # TTS（默认 WS /v1/tts/bistream；可回滚旧 HTTP）
 │   │   ├── limits.py         # BoundedAdmission：有界并发准入
 │   │   └── ndjson.py         # NDJSON 流式响应解析
 │   └── observability/        # 结构化日志与 Prometheus 指标
@@ -122,7 +122,7 @@ RealTimeVoiceAPI/
 | Thinker（LLM） | `http://127.0.0.1:8002` | LLM 回复、记忆及可选 RAG | `/api/v1/reply`（纯文本流式）、`/api/v1/interrupt`、`DELETE /api/v1/sessions/{…}` |
 | KBService | `http://127.0.0.1:8003` | Thinker 可选知识检索 | `GET /health`、`POST /retrieve` |
 | TTS vLLM | `http://127.0.0.1:9001` | TTS 语音 token 推理 | `GET /health`、`POST /v1/generate/stream` |
-| TTS main | `http://127.0.0.1:9000` | 文本合成语音 | `POST /v1/dialogue-tts/stream` |
+| TTS main | `http://127.0.0.1:9000` | 文本合成语音 | 默认 `WS /v1/tts/bistream`；人工回滚时 `POST /v1/dialogue-tts/stream` |
 
 `start_services.sh` 管理表中的全部服务。KBService 仍是网关启动的可选依赖：`start all` 会尝试启动它，但其失败不会阻止核心语音链路和网关启动，命令最终以 `DEGRADED` 和非零状态报告。网关没有 KBService 客户端，也不负责检索、拼装知识上下文或检索降级。
 
@@ -193,6 +193,9 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_ASR_BASE_URL` | `http://127.0.0.1:8001` | 同左 | ASR 服务地址 |
 | `RTVA_THINKER_BASE_URL` | `http://127.0.0.1:8002` | 同左 | Thinker 服务地址 |
 | `RTVA_TTS_BASE_URL` | `http://127.0.0.1:9000` | 同左 | TTS 服务地址 |
+| `RTVA_TTS_MODE` | `bistream` | 同左 | TTS 调用协议。`bistream` 使用 `WS /v1/tts/bistream` 并在 Thinker 首个文本增量时开始合成；`dialogue_stream` 仅用于人工回滚到旧的 `POST /v1/dialogue-tts/stream`。修改后需滚动重启，运行中不会自动切换或降级。 |
+| `RTVA_TTS_REF_AUDIO` | `ref_audio/tongtong.wav` | 同左 | bistream 首帧的参考音色路径；该路径由 PromptTTSD 服务进程解析，不是网关本地文件路径。更换音色时必须同步配置参考文本。 |
+| `RTVA_TTS_REF_TEXT` | `在一座美丽的森林里，住着许多动物。` | 同左 | `RTVA_TTS_REF_AUDIO` 对应的原始参考文本；为空会导致网关启动失败。 |
 | `RTVA_ALLOWED_SAMPLE_RATES` | `[16000,24000,48000]` | 同左 | 保留设置；当前协议模型固定接受这三种采样率，不由此项动态扩展或收窄 |
 | `RTVA_MAX_SESSIONS` | `30` | 同左 | 最大并发会话数 |
 | `RTVA_CPU_WORKERS` | `8` | 同左 | VAD 等 CPU 任务线程池大小 |
@@ -210,7 +213,7 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_DOWNSTREAM_PROBE_INTERVAL_SECONDS` | `10` | 同左 | 下游健康探测周期 |
 | `RTVA_DOWNSTREAM_PROBE_TIMEOUT_SECONDS` | `2` | 同左 | 下游健康探测超时 |
 | `RTVA_SLOW_STAGE_WARNING_SECONDS` | `2` | 同左 | ASR、Thinker 首段文本、TTS 首块及相邻音频块间隔的慢请求告警阈值 |
-| `RTVA_TTS_PROMPT_OVERRIDE` | 空 | 同左 | 非空时直接作为 TTS `prompt`；为空时依次使用 Thinker `done.output.tone` 和默认值“平和” |
+| `RTVA_TTS_PROMPT_OVERRIDE` | `平和` | 同左 | 所有 TTS 轮次使用的固定 prompt。空值自动回退为“平和”；bistream 必须在首帧提供 prompt，因此网关不再等待 Thinker `done.output.tone`。 |
 | `RTVA_VAD_MIN_SPEECH_MS` | `200` | 同左 | VAD 片段累计有效发声不足此时长时直接过滤，降低“嗯、好”和瞬态噪声误触发 |
 
 说话人验证默认关闭；开启后使用 WeSpeaker 导出的 16 kHz ONNX 模型。服务启动时只加载一个共享模型实例，每个会话最多保留一个由客户端显式注册的参考声纹，重复注册时成功结果原子覆盖旧声纹，失败时保留旧声纹，断连时立即清除。将模型文件预先放到 `RTVA_SPEAKER_MODEL_PATH`（默认 `models/wespeaker/cnceleb_resnet34.onnx`）；`start_services.sh` 会在启动网关前检查该文件。
@@ -254,8 +257,6 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_SESSION_ASR_QUEUE_SIZE` | `64` | 待转写语音段队列条数 |
 | `RTVA_SESSION_OUTBOUND_QUEUE_SIZE` | `256` | 下行消息队列条数 |
 | `RTVA_SESSION_OUTBOUND_QUEUE_MAX_BYTES` | `8388608` | 下行队列字节预算 |
-| `RTVA_THINKER_CLEANUP_TIMEOUT_SECONDS` | `25` | 关闭会话时等待进行中 Thinker 轮次收尾的上限（总超时 20s 后轮次最长约 20s，留余量） |
-| `RTVA_TTS_DRAIN_TIMEOUT_SECONDS` | `0.01` | TTS 被打断后允许排空并丢弃后续音频的宽限期 |
 
 ### RAG 配置与调用约定
 
@@ -297,9 +298,9 @@ Thinker 的内部检索时间包含在网关 `RTVA_THINKER_STREAM_TIMEOUT_SECOND
 - 已被新输入打断的 Thinker 轮次仍返回带 `interrupt=true` 的保底 `TEXT_END`，但不启动 TTS，并以 `RESPONSE_END/INTERRUPTED` 收尾；保底 TTS 已启动后发生打断时，沿用现有机制丢弃后续音频。
 - Thinker 调用使用独立并发准入：`RTVA_THINKER_CONCURRENCY`（默认 30）限制同时进行的回复流，`RTVA_THINKER_MAX_WAITERS`（默认 64）为等待名额上限；interrupt / delete_session 等辅助 HTTP 调用超时均为 5s。
 - BerryThinker 在回复流中产出 `error` 事件时，远端错误码（如 `THINKER_SESSION_BUSY`、`THINKER_TIMEOUT`）保留在网关日志和 metrics 中；远端已经收尾时，网关不会重复调用 interrupt。
-- Thinker 的 `text_delta` 会立即转成 WebSocket `TEXT_DELTA`；`done.output.reply_text` 作为完整回复，`done.output.tone` 作为候选 TTS prompt。
-- Thinker 未返回 `tone` 时网关使用“平和”，也可用 `RTVA_TTS_PROMPT_OVERRIDE` 全局覆盖。
-- 网关调用 TTS `POST /v1/dialogue-tts/stream` 时发送 `model_reply`、非空 `prompt`、`trace_id` 和 `include_prompt_event=false`；TTS 不再负责调用外部模型生成 prompt。
+- Thinker 的 `text_delta` 会立即转成 WebSocket `TEXT_DELTA`；默认 bistream 模式下，同一个 delta 也会原样写入 TTS，因此客户端可能在 `TEXT_END` 前收到 `AUDIO_DELTA`。
+- 网关使用固定的 `RTVA_TTS_PROMPT_OVERRIDE`（空值自动回退为“平和”）和配置的参考音色建立 `WS /v1/tts/bistream`；Thinker `done.output.tone` 不再参与 TTS prompt 选择。
+- `RTVA_TTS_MODE=dialogue_stream` 时，网关只在 Thinker 完成后调用旧 `POST /v1/dialogue-tts/stream`，用于人工回滚；不会自动回退到旧接口。
 - Thinker 的独立 `/api/v1/tts/prompt` 可供其他调用方生成或预览 prompt，但不是当前网关主链路的必经接口。
 
 ## 6. 对外调用指南（WebSocket 协议 V1）
@@ -344,7 +345,7 @@ Thinker 的内部检索时间包含在网关 `RTVA_THINKER_STREAM_TIMEOUT_SECOND
 | 旧轮所处阶段 | 旧轮处理 | 新轮处理 |
 |---|---|---|
 | Thinker 流式回复 | 继续消费旧文本，后续消息带 `interrupt=true`；不进入 TTS | 等旧文本收尾，先调用 Thinker interrupt 再接续 |
-| TTS 合成 | 排空并丢弃旧音频，不再下发；旧轮终态可能较晚到达 | 可开始本轮处理，和旧 TTS 排空交错 |
+| TTS 合成 | bistream 尽力发送 `cancel` 后立即 abort 连接；旧音频在接收、队列和发送前三层丢弃 | 立即开始本轮处理，不等待旧 TTS 取消完成 |
 
 整个会话结束时发送 `CLOSE_SESSION` 或断开连接。网关停止音频及 ASR 工作，等待 Thinker（包括其内部 RAG）和 TTS 清理，再在安全条件下删除 Thinker 会话。没有 `SESSION_CLOSED` 业务回执，也不支持断线恢复。
 

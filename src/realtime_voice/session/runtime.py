@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass
 from math import isfinite
 from time import monotonic
@@ -27,24 +28,39 @@ from realtime_voice.clients.thinker import (
     ThinkerStreamError,
     ThinkerTextDelta,
 )
-from realtime_voice.clients.tts import TTS_SAMPLE_RATE, TtsClient, TtsRequest, TtsStreamError
+from realtime_voice.clients.tts import (
+    TTS_SAMPLE_RATE,
+    TtsClient,
+    TtsEndTurn,
+    TtsInput,
+    TtsRequest,
+    TtsStreamCancelled,
+    TtsStreamError,
+    TtsText,
+)
 from realtime_voice.protocol.decoder import DecodedSpeakerRegister
 from realtime_voice.protocol.server_messages import (
+    AudioDelta,
     ErrorMessage,
+    ResponseEnd,
     ServerMessage,
     SpeakerRegisterResult,
     SpeakerStatus,
     TurnState,
 )
 from realtime_voice.session.actor import (
+    CancelBistreamTts,
     CloseRuntime,
+    EndBistreamTts,
     QueueAsr,
     RecordDiscardedAudio,
     RecordStaleEvent,
     RecordThinkerFallback,
+    SendBistreamText,
     SendOutbound,
     SessionActor,
     SessionEffect,
+    StartBistreamTts,
     StartNextThinker,
     StartThinker,
     StartTts,
@@ -68,7 +84,6 @@ from realtime_voice.session.events import (
 from realtime_voice.session.registry import SessionRegistry
 from realtime_voice.session.state import TERMINAL_TURN_STAGES, SessionState, TurnStage
 
-THINKER_CLEANUP_SKIPPED = "THINKER_CLEANUP_SKIPPED"
 DEFAULT_AUDIO_QUEUE_MAX_SECONDS = 3.0
 DEFAULT_OUTBOUND_QUEUE_MAX_BYTES = 8 * 1024 * 1024
 DEFAULT_SLOW_STAGE_WARNING_SECONDS = 2.0
@@ -219,6 +234,26 @@ class BoundedByteQueue(asyncio.Queue[QueueItem], Generic[QueueItem]):
                 max_bytes=self.max_bytes,
             )
 
+    def discard(self, predicate: Callable[[QueueItem], bool]) -> tuple[int, int]:
+        """同步移除匹配条目并保持队列字节计数准确。"""
+        retained: list[QueueItem] = []
+        removed_items = 0
+        removed_bytes = 0
+        while self._queue:  # type: ignore[attr-defined]  # asyncio.Queue 的事件循环私有 deque
+            item = self._queue.popleft()  # type: ignore[attr-defined]
+            if predicate(item):
+                removed_items += 1
+                removed_bytes += self._item_size(item)
+            else:
+                retained.append(item)
+        self._queue.extend(retained)  # type: ignore[attr-defined]
+        self._queued_bytes -= removed_bytes
+        # 防御性保护，避免观测计数因异常 predicate 漂移。
+        self._queued_bytes = max(self._queued_bytes, 0)
+        if removed_items:
+            self._wakeup_next(self._putters)  # type: ignore[attr-defined]
+        return removed_items, removed_bytes
+
 
 class AsyncWorker(Protocol):
     """由会话 TaskGroup 监督的长驻工作协程。"""
@@ -264,14 +299,12 @@ class SessionRuntime:
         audio_queue: BoundedByteQueue[bytes | None] | None = None,
         outbound_queue: BoundedByteQueue[ServerMessage] | None = None,
         asr_context_enabled: bool = True,
-        thinker_cleanup_timeout: float = 120.0,
         thinker_stream_timeout: float = 5.0,
         thinker_reply_total_timeout: float = 20.0,
         thinker_fallback_enabled: bool = False,
         thinker_fallback_texts: tuple[str, ...] = (),
         thinker_fallback_tone: str = "",
         metrics: Metrics | None = None,
-        tts_drain_timeout: float = 120.0,
         tts_prompt_override: str = "",
         slow_stage_warning_seconds: float = DEFAULT_SLOW_STAGE_WARNING_SECONDS,
         logger: logging.Logger | None = None,
@@ -292,8 +325,6 @@ class SessionRuntime:
             raise ValueError("audio queue duration must be positive and finite")
         if outbound_queue_max_bytes < 1:
             raise ValueError("outbound queue byte limit must be at least 1")
-        if thinker_cleanup_timeout <= 0 or tts_drain_timeout <= 0:
-            raise ValueError("session cleanup timeouts must be positive")
         if not isfinite(slow_stage_warning_seconds) or slow_stage_warning_seconds <= 0:
             raise ValueError("slow stage warning threshold must be positive and finite")
 
@@ -304,6 +335,8 @@ class SessionRuntime:
                 texts=thinker_fallback_texts,
                 tone=thinker_fallback_tone,
             ),
+            # 测试和外部注入的轻量 TTS fake 不必实现双向能力，默认按旧模式处理。
+            bistream_enabled=bool(getattr(tts_client, "bistream_enabled", False)),
         )
         self.events = event_queue or asyncio.Queue(maxsize=event_queue_size)
         audio_max_bytes = int(state.sample_rate * 2 * audio_queue_max_seconds)
@@ -345,10 +378,8 @@ class SessionRuntime:
         self._vad_worker = vad_worker
         self._sender = sender
         self._registry = registry
-        self._thinker_cleanup_timeout = thinker_cleanup_timeout
         self._thinker_stream_timeout = thinker_stream_timeout
         self._thinker_reply_total_timeout = thinker_reply_total_timeout
-        self._tts_drain_timeout = tts_drain_timeout
         self._tts_prompt_override = str(tts_prompt_override or "").strip()
         self._slow_stage_warning_seconds = slow_stage_warning_seconds
         self._logger = logger or logging.getLogger(__name__)
@@ -365,7 +396,9 @@ class SessionRuntime:
         self._turn_speech_ends: dict[int, float] = {}
         self._llm_milestones: set[int] = set()
         self._tts_tasks: set[asyncio.Task[None]] = set()
+        self._tts_tasks_by_key: dict[tuple[int, int], asyncio.Task[None]] = {}
         self._tts_interrupt_signals: dict[tuple[int, int], asyncio.Event] = {}
+        self._bistream_inputs: dict[tuple[int, int], asyncio.Queue[TtsInput]] = {}
         self._thinker_lock = asyncio.Lock()
         self._thinker_cleanup_safe = True
         self._closing = False
@@ -476,6 +509,35 @@ class SessionRuntime:
             self.request_close()
             raise SlowClient(str(error)) from error
 
+    def should_send_outbound(self, message: ServerMessage) -> bool:
+        """在真正写入设备 WebSocket 前做最后一次旧轮音频隔离。"""
+        if not isinstance(message, AudioDelta):
+            return True
+        turn = self.actor.state.turns.get(message.turn_id)
+        return (
+            turn is not None
+            and not turn.interrupted
+            and turn.stage in {TurnStage.STREAMING_LLM, TurnStage.STREAMING_TTS}
+        )
+
+    def report_outbound_discard(self, message: ServerMessage) -> None:
+        """记录 Sender 已取出、但在写入前被中断状态拦截的音频。"""
+        if not isinstance(message, AudioDelta):
+            return
+        try:
+            byte_count = len(base64.b64decode(message.audio_b64, validate=True))
+        except ValueError:
+            byte_count = 0
+        turn = self.actor.state.turns.get(message.turn_id)
+        generation = turn.tts_generation if turn is not None else 0
+        self._observe_discarded_tts_audio(
+            message.turn_id,
+            generation,
+            self._turn_trace_id(message.turn_id),
+            byte_count,
+            source="websocket_sender",
+        )
+
     async def run(self) -> None:
         """在单个 TaskGroup 中并行运行 Receiver/VAD/ASR/Actor/Sender 五个长任务。"""
         if self._is_running:
@@ -522,11 +584,15 @@ class SessionRuntime:
         """执行 Actor 产出的一条 Effect，避免工作协程直接修改 Actor 状态。"""
         if isinstance(effect, SendOutbound):
             if isinstance(effect.message, TurnState):
-                # TurnState 表示轮次切换，需中断上一轮未完成的 TTS 输出
+                # 先启用输出抑制并移除尚未发给设备的旧音频，再异步取消下游。
+                self._discard_queued_turn_audio(effect.message.turn_id)
                 self._signal_tts_interruption(effect.message.turn_id)
                 self._observe("turn_interrupted", turn_id=effect.message.turn_id, interrupt=True)
                 if self._metrics is not None:
                     self._metrics.record_interruption()
+            elif isinstance(effect.message, ResponseEnd) and effect.message.status == "FAILED":
+                # 失败不是用户打断，也不能让已排队的旧音频在 FAILED 之后继续抵达设备。
+                self._discard_queued_turn_audio(effect.message.turn_id)
             if not self._closing:
                 try:
                     self.outbound.put_nowait(effect.message)
@@ -562,14 +628,47 @@ class SessionRuntime:
                 key = (effect.turn_id, effect.generation)
                 interrupt_signal = asyncio.Event()
                 self._tts_interrupt_signals[key] = interrupt_signal
-                # 若该轮 TTS 启动前即被判定为应抑制，立即置位信号以触发排空宽限
+                # 若该轮 TTS 启动前即被判定为应抑制，立即取消。
                 if self._tts_output_suppressed(effect):
                     interrupt_signal.set()
-                self._spawn_background(
+                task = self._spawn_background(
                     self._run_tts(effect, interrupt_signal),
                     tasks=self._tts_tasks,
                     name=f"{self.session_id}:tts:{effect.turn_id}:{effect.generation}",
                 )
+                self._track_tts_task(key, task)
+                if interrupt_signal.is_set():
+                    task.cancel()
+            return
+        if isinstance(effect, StartBistreamTts):
+            if not self._closing:
+                key = (effect.turn_id, effect.generation)
+                if key in self._bistream_inputs:
+                    return
+                inputs: asyncio.Queue[TtsInput] = asyncio.Queue(maxsize=256)
+                self._bistream_inputs[key] = inputs
+                interrupt_signal = asyncio.Event()
+                self._tts_interrupt_signals[key] = interrupt_signal
+                task = self._spawn_background(
+                    self._run_bistream_tts(effect, inputs, interrupt_signal),
+                    tasks=self._tts_tasks,
+                    name=f"{self.session_id}:tts-bistream:{effect.turn_id}:{effect.generation}",
+                )
+                self._track_tts_task(key, task)
+                if self._tts_output_suppressed(effect):
+                    interrupt_signal.set()
+                    task.cancel()
+            return
+        if isinstance(effect, SendBistreamText):
+            self._put_bistream_input(
+                effect.turn_id, effect.generation, TtsText(effect.delta)
+            )
+            return
+        if isinstance(effect, EndBistreamTts):
+            self._put_bistream_input(effect.turn_id, effect.generation, TtsEndTurn())
+            return
+        if isinstance(effect, CancelBistreamTts):
+            self._signal_tts_interruption(effect.turn_id)
             return
         if isinstance(effect, CloseRuntime):
             if effect.session_id == self.session_id:
@@ -826,6 +925,7 @@ class SessionRuntime:
                     segment_id=segment.segment_id,
                     text=text,
                     audio_wav=pcm16_wav_bytes(segment.pcm16_16k, 16000),
+                    trailing_silence_ms=segment.trailing_silence_samples / 16,
                 )
             except AdmissionOverloaded as error:
                 self._observe(
@@ -906,7 +1006,7 @@ class SessionRuntime:
         tasks: set[asyncio.Task[None]],
         name: str,
         marks_thinker: bool = False,
-    ) -> None:
+    ) -> asyncio.Task[None]:
         task = asyncio.create_task(coroutine, name=name)
         tasks.add(task)
         self._background_tasks.add(task)
@@ -918,6 +1018,22 @@ class SessionRuntime:
                 self._thinker_cleanup_safe = False
 
         task.add_done_callback(finished)
+        return task
+
+    def _track_tts_task(
+        self,
+        key: tuple[int, int],
+        task: asyncio.Task[None],
+    ) -> None:
+        self._tts_tasks_by_key[key] = task
+
+        def forget(done: asyncio.Task[None]) -> None:
+            if self._tts_tasks_by_key.get(key) is done:
+                self._tts_tasks_by_key.pop(key, None)
+                self._tts_interrupt_signals.pop(key, None)
+                self._bistream_inputs.pop(key, None)
+
+        task.add_done_callback(forget)
 
     async def _run_thinker(self, effect: StartThinker | StartNextThinker) -> None:
         first_event_seen = False
@@ -1222,8 +1338,8 @@ class SessionRuntime:
         chunk_count = 0
         trace_id = self._turn_trace_id(effect.turn_id)
         resampler = StreamingResampler(TTS_SAMPLE_RATE, self.sample_rate)
-        # prompt 优先级：显式覆盖 > Thinker 回复携带的 tone > BerryThinker 默认语调
-        prompt = self._tts_prompt_override or effect.tone.strip() or "平和"
+        # 新旧模式统一使用网关固定 prompt；不再等待 Thinker done.tone。
+        prompt = self._tts_prompt_override or "平和"
         request = TtsRequest(
             model_reply=effect.reply_text,
             prompt=prompt,
@@ -1237,95 +1353,69 @@ class SessionRuntime:
             trace_id=trace_id,
         )
         try:
-            try:
-                # drain_timeout 初始无超时；收到中断信号后由 _arm_tts_drain_timeout
-                # 重设为 _tts_drain_timeout 宽限期，给 TTS 一段排空缓冲再终止
-                async with asyncio.timeout(None) as drain_timeout:
-                    deadline_task = asyncio.create_task(
-                        self._arm_tts_drain_timeout(interrupt_signal, drain_timeout),
-                        name=(
-                            f"{self.session_id}:tts-drain-deadline:"
-                            f"{effect.turn_id}:{effect.generation}"
-                        ),
+            async for chunk in self._tts_client.stream(request):
+                received_at = self._clock()
+                chunk_count += 1
+                if last_chunk_at is not None:
+                    gap = received_at - last_chunk_at
+                    if gap >= self._slow_stage_warning_seconds:
+                        self._observe(
+                            "tts_chunk_gap_slow",
+                            level=logging.WARNING,
+                            stage="TTS",
+                            turn_id=effect.turn_id,
+                            generation=effect.generation,
+                            trace_id=trace_id,
+                            sequence=chunk.chunk_index,
+                            gap_ms=gap * 1000,
+                        )
+                last_chunk_at = received_at
+                if self._tts_output_suppressed(effect):
+                    self._observe_discarded_tts_audio(
+                        effect.turn_id,
+                        effect.generation,
+                        trace_id,
+                        len(chunk.pcm16_24k),
+                        source="tts_receive",
                     )
-                    try:
-                        async for chunk in self._tts_client.stream(request):
-                            received_at = self._clock()
-                            chunk_count += 1
-                            if last_chunk_at is not None:
-                                gap = received_at - last_chunk_at
-                                if gap >= self._slow_stage_warning_seconds:
-                                    self._observe(
-                                        "tts_chunk_gap_slow",
-                                        level=logging.WARNING,
-                                        stage="TTS",
-                                        turn_id=effect.turn_id,
-                                        generation=effect.generation,
-                                        trace_id=trace_id,
-                                        sequence=chunk.chunk_index,
-                                        gap_ms=gap * 1000,
-                                    )
-                            last_chunk_at = received_at
-                            # 输出被抑制（轮次已切换/已中断）时跳过本块，但仍消费流以触发排空
-                            if self._tts_output_suppressed(effect):
-                                continue
-                            output = resampler.process_pcm16(
-                                chunk.pcm16_24k,
-                                final=chunk.finalize,
-                            )
-                            if output:
-                                if first_audio:
-                                    first_audio = False
-                                    elapsed = self._clock() - started
-                                    self._observe(
-                                        "tts_first_audio",
-                                        stage="TTS",
-                                        turn_id=effect.turn_id,
-                                        generation=effect.generation,
-                                        trace_id=trace_id,
-                                        duration_ms=elapsed * 1000,
-                                    )
-                                    self._observe_slow(
-                                        "tts_first_audio_slow",
-                                        elapsed,
-                                        stage="TTS",
-                                        turn_id=effect.turn_id,
-                                        generation=effect.generation,
-                                        trace_id=trace_id,
-                                    )
-                                    if self._metrics is not None:
-                                        self._metrics.observe_stage_latency("tts", elapsed)
-                                        speech_end = self._turn_speech_ends.pop(
-                                            effect.turn_id, None
-                                        )
-                                        if speech_end is not None:
-                                            self._metrics.observe_speech_end_to_first_tts(
-                                                self._clock() - speech_end
-                                            )
-                                await self._publish_event(
-                                    TtsChunkReceived(
-                                        session_id=self.session_id,
-                                        turn_id=effect.turn_id,
-                                        generation=effect.generation,
-                                        sequence=chunk.chunk_index,
-                                        pcm16=output,
-                                        finalize=chunk.finalize,
-                                    )
-                                )
-                    finally:
-                        deadline_task.cancel()
-                        await asyncio.gather(deadline_task, return_exceptions=True)
-            except TimeoutError:
-                self._observe(
-                    "tts_drain_timeout",
-                    level=logging.WARNING,
-                    stage="TTS",
-                    turn_id=effect.turn_id,
-                    generation=effect.generation,
-                    trace_id=trace_id,
-                    error_code="TTS_DRAIN_TIMEOUT",
-                    error_type="TimeoutError",
+                    continue
+                output = resampler.process_pcm16(
+                    chunk.pcm16_24k,
+                    final=chunk.finalize,
                 )
+                if output:
+                    if first_audio:
+                        first_audio = False
+                        elapsed = self._clock() - started
+                        self._observe(
+                            "tts_first_audio",
+                            stage="TTS",
+                            turn_id=effect.turn_id,
+                            generation=effect.generation,
+                            trace_id=trace_id,
+                            duration_ms=elapsed * 1000,
+                        )
+                        self._observe_slow(
+                            "tts_first_audio_slow",
+                            elapsed,
+                            stage="TTS",
+                            turn_id=effect.turn_id,
+                            generation=effect.generation,
+                            trace_id=trace_id,
+                        )
+                        if self._metrics is not None:
+                            self._metrics.observe_stage_latency("tts", elapsed)
+                            self._observe_speech_end_to_first_tts(effect.turn_id)
+                    await self._publish_event(
+                        TtsChunkReceived(
+                            session_id=self.session_id,
+                            turn_id=effect.turn_id,
+                            generation=effect.generation,
+                            sequence=chunk.chunk_index,
+                            pcm16=output,
+                            finalize=chunk.finalize,
+                        )
+                    )
             self._observe(
                 "tts_completed",
                 stage="TTS",
@@ -1341,6 +1431,20 @@ class SessionRuntime:
                     turn_id=effect.turn_id,
                     generation=effect.generation,
                 )
+            )
+        except asyncio.CancelledError:
+            if not interrupt_signal.is_set():
+                raise
+            self._observe(
+                "tts_cancelled",
+                stage="TTS",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                mode="dialogue_stream",
+            )
+            await self._publish_event(
+                TtsCompleted(self.session_id, effect.turn_id, effect.generation)
             )
         except AdmissionOverloaded as error:
             self._observe(
@@ -1421,25 +1525,299 @@ class SessionRuntime:
             if self._tts_interrupt_signals.get(key) is interrupt_signal:
                 self._tts_interrupt_signals.pop(key, None)
 
-    async def _arm_tts_drain_timeout(
+    async def _run_bistream_tts(
         self,
+        effect: StartBistreamTts,
+        inputs: asyncio.Queue[TtsInput],
         interrupt_signal: asyncio.Event,
-        drain_timeout: asyncio.Timeout,
     ) -> None:
-        await interrupt_signal.wait()
-        drain_timeout.reschedule(asyncio.get_running_loop().time() + self._tts_drain_timeout)
+        """将 Actor 指令队列桥接为 PromptTTSD 的全双工 WebSocket 会话。"""
+        key = (effect.turn_id, effect.generation)
+        first_audio = True
+        started = self._clock()
+        last_chunk_at: float | None = None
+        chunk_count = 0
+        trace_id = self._turn_trace_id(effect.turn_id)
+        resampler = StreamingResampler(TTS_SAMPLE_RATE, self.sample_rate)
+
+        async def input_stream() -> AsyncIterator[TtsInput]:
+            while True:
+                item = await inputs.get()
+                yield item
+                if isinstance(item, TtsEndTurn):
+                    return
+
+        request = TtsRequest(model_reply="", prompt=self._tts_prompt_override or "平和", trace_id=trace_id)
+        self._observe(
+            "tts_started",
+            stage="TTS",
+            turn_id=effect.turn_id,
+            generation=effect.generation,
+            trace_id=trace_id,
+            mode="bistream",
+        )
+        stream = self._tts_client.stream_bistream(request, input_stream())
+        try:
+            async for chunk in stream:
+                received_at = self._clock()
+                chunk_count += 1
+                if last_chunk_at is not None:
+                    gap = received_at - last_chunk_at
+                    if gap >= self._slow_stage_warning_seconds:
+                        self._observe(
+                            "tts_chunk_gap_slow",
+                            level=logging.WARNING,
+                            stage="TTS",
+                            turn_id=effect.turn_id,
+                            generation=effect.generation,
+                            trace_id=trace_id,
+                            sequence=chunk.chunk_index,
+                            gap_ms=gap * 1000,
+                        )
+                last_chunk_at = received_at
+                if self._tts_output_suppressed(effect):
+                    self._observe_discarded_tts_audio(
+                        effect.turn_id,
+                        effect.generation,
+                        trace_id,
+                        len(chunk.pcm16_24k),
+                        source="tts_receive",
+                    )
+                    continue
+                output = resampler.process_pcm16(chunk.pcm16_24k, final=chunk.finalize)
+                if not output:
+                    continue
+                if first_audio:
+                    first_audio = False
+                    elapsed = self._clock() - started
+                    self._observe(
+                        "tts_first_audio",
+                        stage="TTS",
+                        turn_id=effect.turn_id,
+                        generation=effect.generation,
+                        trace_id=trace_id,
+                        duration_ms=elapsed * 1000,
+                        mode="bistream",
+                    )
+                    if self._metrics is not None:
+                        self._metrics.observe_stage_latency("tts", elapsed)
+                        self._observe_speech_end_to_first_tts(effect.turn_id)
+                await self._publish_event(
+                    TtsChunkReceived(
+                        session_id=self.session_id,
+                        turn_id=effect.turn_id,
+                        generation=effect.generation,
+                        sequence=chunk.chunk_index,
+                        pcm16=output,
+                        finalize=chunk.finalize,
+                    )
+                )
+            self._observe(
+                "tts_completed",
+                stage="TTS",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                duration_ms=(self._clock() - started) * 1000,
+                chunk_count=chunk_count,
+                mode="bistream",
+            )
+            await self._publish_event(
+                TtsCompleted(self.session_id, effect.turn_id, effect.generation)
+            )
+        except TtsStreamCancelled as cancelled:
+            self._observe_bistream_cancelled(effect, trace_id, cancelled)
+            await self._publish_event(
+                TtsCompleted(self.session_id, effect.turn_id, effect.generation)
+            )
+        except asyncio.CancelledError:
+            if not interrupt_signal.is_set():
+                raise
+            cancel_bistream = getattr(self._tts_client, "cancel_bistream", None)
+            if cancel_bistream is None:
+                cancelled = TtsStreamCancelled(
+                    cancel_sent=False,
+                    connection_aborted=False,
+                    cancel_error="cancel_bistream_unavailable",
+                )
+            else:
+                cancelled = await asyncio.shield(cancel_bistream(trace_id))
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await asyncio.shield(aclose())
+            self._observe_bistream_cancelled(effect, trace_id, cancelled)
+            await self._publish_event(
+                TtsCompleted(self.session_id, effect.turn_id, effect.generation)
+            )
+        except AdmissionOverloaded as error:
+            if self._metrics is not None:
+                self._metrics.record_error("tts", "SERVICE_OVERLOADED")
+            await self._publish_event(
+                TtsFailed(self.session_id, effect.turn_id, effect.generation, "SERVICE_OVERLOADED", str(error))
+            )
+        except TtsStreamError as error:
+            self._observe(
+                "tts_failed",
+                level=(
+                    logging.WARNING if "TIMEOUT" in error.code else logging.ERROR
+                ),
+                stage="TTS",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                error_code=error.code,
+                error_type=type(error).__name__,
+                mode="bistream",
+            )
+            if self._metrics is not None:
+                self._metrics.record_error("tts", error.code)
+            await self._publish_event(
+                TtsFailed(
+                    self.session_id, effect.turn_id, effect.generation,
+                    error.code, _error_message(error, "TTS stream failed"),
+                )
+            )
+        except Exception as error:  # noqa: BLE001
+            self._observe(
+                "tts_failed", level=logging.ERROR, exc_info=error, stage="TTS",
+                turn_id=effect.turn_id, generation=effect.generation, trace_id=trace_id,
+                error_code="TTS_STREAM_FAILED", error_type=type(error).__name__, mode="bistream",
+            )
+            await self._publish_event(
+                TtsFailed(
+                    self.session_id, effect.turn_id, effect.generation,
+                    "TTS_STREAM_FAILED", _error_message(error, "TTS stream failed"),
+                )
+            )
+        finally:
+            self._bistream_inputs.pop(key, None)
+            if self._tts_interrupt_signals.get(key) is interrupt_signal:
+                self._tts_interrupt_signals.pop(key, None)
+
+    def _observe_bistream_cancelled(
+        self,
+        effect: StartBistreamTts,
+        trace_id: str,
+        cancelled: TtsStreamCancelled,
+    ) -> None:
+        self._observe(
+            "tts_cancel_sent" if cancelled.cancel_sent else "tts_cancel_send_failed",
+            level=logging.INFO if cancelled.cancel_sent else logging.WARNING,
+            stage="TTS",
+            turn_id=effect.turn_id,
+            generation=effect.generation,
+            trace_id=trace_id,
+            mode="bistream",
+            error_type=cancelled.cancel_error,
+        )
+        if cancelled.connection_aborted:
+            self._observe(
+                "tts_connection_aborted",
+                stage="TTS",
+                turn_id=effect.turn_id,
+                generation=effect.generation,
+                trace_id=trace_id,
+                mode="bistream",
+            )
 
     def _signal_tts_interruption(self, turn_id: int) -> None:
-        for (active_turn_id, _), signal in self._tts_interrupt_signals.items():
-            if active_turn_id == turn_id:
+        for key, signal in tuple(self._tts_interrupt_signals.items()):
+            active_turn_id, generation = key
+            if active_turn_id != turn_id:
+                continue
+            newly_requested = not signal.is_set()
+            if newly_requested:
+                self._observe(
+                    "tts_cancel_requested",
+                    stage="TTS",
+                    turn_id=active_turn_id,
+                    generation=generation,
+                    trace_id=self._turn_trace_id(active_turn_id),
+                    mode=("bistream" if key in self._bistream_inputs else "dialogue_stream"),
+                )
                 signal.set()
+            task = self._tts_tasks_by_key.get(key)
+            if newly_requested and task is not None and not task.done():
+                task.cancel()
 
-    def _tts_output_suppressed(self, effect: StartTts) -> bool:
+    def _discard_queued_turn_audio(self, turn_id: int) -> None:
+        """清除尚未被 Sender 取出的旧轮音频，保留其他协议消息。"""
+        turn = self.actor.state.turns.get(turn_id)
+        generation = turn.tts_generation if turn is not None else 0
+        discarded_chunks, discarded_bytes = self.outbound.discard(
+            lambda message: isinstance(message, AudioDelta)
+            and message.turn_id == turn_id
+        )
+        if not discarded_chunks:
+            return
+        self._observe(
+            "tts_queued_audio_discarded",
+            stage="TTS",
+            turn_id=turn_id,
+            generation=generation,
+            trace_id=self._turn_trace_id(turn_id),
+            discarded_chunks=discarded_chunks,
+            discarded_bytes=discarded_bytes,
+        )
+
+    def _observe_discarded_tts_audio(
+        self,
+        turn_id: int,
+        generation: int,
+        trace_id: str,
+        byte_count: int,
+        *,
+        source: str,
+    ) -> None:
+        self._observe(
+            "tts_audio_discarded_after_interrupt",
+            stage="TTS",
+            turn_id=turn_id,
+            generation=generation,
+            trace_id=trace_id,
+            discarded_chunks=1,
+            discarded_bytes=byte_count,
+            source=source,
+        )
+        if self._metrics is not None:
+            self._metrics.record_discarded_tts_chunk(byte_count=byte_count)
+
+    def _tts_output_suppressed(self, effect: StartTts | StartBistreamTts) -> bool:
         if self._closing:
             return True
         turn = self.actor.state.turns.get(effect.turn_id)
         # 抑制条件：轮次不存在 / 已被新 TTS 取代 / 已被显式打断
         return turn is None or turn.tts_generation != effect.generation or turn.interrupted
+
+    def _observe_speech_end_to_first_tts(self, turn_id: int) -> None:
+        """记录原始首音时延及扣除 VAD 实际尾部静音后的展示口径。"""
+        if self._metrics is None:
+            return
+        speech_end = self._turn_speech_ends.pop(turn_id, None)
+        if speech_end is None:
+            return
+        total_seconds = max(0.0, self._clock() - speech_end)
+        turn = self.actor.state.turns.get(turn_id)
+        silence_seconds = (
+            max(0.0, turn.trailing_silence_ms / 1000)
+            if turn is not None
+            else 0.0
+        )
+        self._metrics.observe_speech_end_to_first_tts(total_seconds)
+        self._metrics.observe_speech_end_to_first_tts_excluding_silence(
+            max(0.0, total_seconds - silence_seconds)
+        )
+
+    def _put_bistream_input(self, turn_id: int, generation: int, item: TtsInput) -> None:
+        """非阻塞投递，防止慢 TTS 发送端反向卡住整个 Actor。"""
+        queue = self._bistream_inputs.get((turn_id, generation))
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            # 关闭输入，让会话尽快释放；后续 TTS 失败会被 Actor 统一收尾。
+            self._signal_tts_interruption(turn_id)
 
     def _observe(
         self,
@@ -1506,12 +1884,15 @@ class SessionRuntime:
             if self.turn_end is not None:
                 await self.turn_end.aclose()
             try:
-                # 清理顺序：先停音频采集/发送，再取消 ASR，等待 Thinker 结束，
-                # 排空 TTS，最后（若 Thinker 正常结束）才删除 Thinker 会话
+                # 清理顺序：先停音频采集/发送，再取消 ASR；随后 Thinker 与 TTS
+                # 并发取消。不能等待 Thinker 自然收尾，否则已断开的客户端会长期
+                # 占用下游 LLM/TTS 资源。
                 await self._stop_audio()
                 await self._cancel_asr()
-                thinker_safe = await self._wait_thinker()
-                await self._drain_tts()
+                thinker_safe, _ = await asyncio.gather(
+                    self._cancel_thinker(),
+                    self._cancel_tts(),
+                )
                 if thinker_safe:
                     await self._delete_thinker_session()
                 else:
@@ -1519,7 +1900,7 @@ class SessionRuntime:
                         "thinker_cleanup_skipped",
                         level=logging.WARNING,
                         stage="LLM",
-                        error_code=THINKER_CLEANUP_SKIPPED,
+                        error_code="THINKER_CLEANUP_SKIPPED",
                     )
             finally:
                 # 无论前面是否成功，都要释放注册表准入并标记已清理，避免泄漏
@@ -1558,17 +1939,23 @@ class SessionRuntime:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _wait_thinker(self) -> bool:
-        pending = await _wait_tasks(self._thinker_tasks, self._thinker_cleanup_timeout)
-        if pending:
+    async def _cancel_thinker(self) -> bool:
+        """立即停止本地 Thinker 流，并尽力通知下游同一会话已中断。"""
+        active = {task for task in self._thinker_tasks if not task.done()}
+        if active:
+            # interrupt 不等待网络响应：客户端已断连，本地任务和 TTS 都必须立即释放。
+            # 远端收到该请求后会停止同一 session 的生成；若请求失败，日志记录但不妨碍清理。
+            self._notify_thinker_interrupt()
             self._thinker_cleanup_safe = False
-            await _cancel_tasks(pending)
+            await _cancel_tasks(active)
         return self._thinker_cleanup_safe
 
-    async def _drain_tts(self) -> None:
-        pending = await _wait_tasks(self._tts_tasks, self._tts_drain_timeout)
-        if pending:
-            await _cancel_tasks(pending)
+    async def _cancel_tts(self) -> None:
+        for turn_id, _ in tuple(self._tts_interrupt_signals):
+            self._signal_tts_interruption(turn_id)
+        active = {task for task in self._tts_tasks if not task.done()}
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
 
     async def _delete_thinker_session(self) -> None:
         try:
@@ -1581,14 +1968,6 @@ class SessionRuntime:
                 error_code="THINKER_CLEANUP_FAILED",
                 error_type=type(error).__name__,
             )
-
-
-async def _wait_tasks(tasks: set[asyncio.Task[None]], timeout: float) -> set[asyncio.Task[None]]:
-    active = {task for task in tasks if not task.done()}
-    if not active:
-        return set()
-    _, pending = await asyncio.wait(active, timeout=timeout)
-    return pending
 
 
 async def _cancel_tasks(tasks: set[asyncio.Task[None]]) -> None:

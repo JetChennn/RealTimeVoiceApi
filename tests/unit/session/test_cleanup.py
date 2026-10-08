@@ -10,7 +10,7 @@ from realtime_voice.clients.limits import BoundedAdmission
 from realtime_voice.clients.thinker import DeleteResult, ThinkerDone, ThinkerReplyRequest
 from realtime_voice.clients.tts import TtsChunk, TtsRequest
 from realtime_voice.session.actor import QueueAsr, StartThinker, StartTts
-from realtime_voice.session.runtime import THINKER_CLEANUP_SKIPPED
+from realtime_voice.session.state import TurnContext, TurnStage
 from tests.helpers import valid_wav
 from tests.unit.session.test_runtime import (
     BlockingWorker,
@@ -76,16 +76,25 @@ class OrderedThinker(ImmediateThinker):
         self.delete_result = delete_result
         self.release = release
         self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
 
     async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
         self.started.set()
-        if self.cancelled_asr is not None:
-            await self.cancelled_asr.wait()
-        if self.release is not None:
-            await self.release.wait()
-        self.calls.append("wait_thinker")
-        self.thinker_finished.set()
-        yield ThinkerDone(reply_text="reply", tone="温柔")
+        try:
+            if self.cancelled_asr is not None:
+                await self.cancelled_asr.wait()
+            if self.release is not None:
+                await self.release.wait()
+            self.calls.append("wait_thinker")
+            self.thinker_finished.set()
+            yield ThinkerDone(reply_text="reply", tone="温柔")
+        finally:
+            if not self.thinker_finished.is_set():
+                self.calls.append("cancel_thinker")
+            self.cancelled.set()
+
+    async def interrupt(self, user_id: str, session_id: str) -> None:
+        self.calls.append("interrupt_thinker")
 
     async def delete_session(self, user_id: str, session_id: str) -> DeleteResult:
         self.calls.append("delete_thinker_session")
@@ -93,16 +102,18 @@ class OrderedThinker(ImmediateThinker):
 
 
 class OrderedTts:
-    def __init__(self, calls: list[str], thinker_finished: asyncio.Event) -> None:
+    def __init__(self, calls: list[str]) -> None:
         self.calls = calls
-        self.thinker_finished = thinker_finished
         self.started = asyncio.Event()
 
     async def stream(self, request: TtsRequest) -> AsyncIterator[TtsChunk]:
         self.started.set()
-        await self.thinker_finished.wait()
-        self.calls.append("drain_tts")
-        yield TtsChunk(chunk_index=0, pcm16_24k=b"\x00\x00" * 240, finalize=True)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.calls.append("cancel_tts")
+        if False:
+            yield TtsChunk(chunk_index=0, pcm16_24k=b"\x00\x00" * 240, finalize=True)
 
 
 class OrderedRegistry(RecordingRegistry):
@@ -120,6 +131,7 @@ class HungThinker(ImmediateThinker):
         super().__init__()
         self.started = asyncio.Event()
         self.cancelled = asyncio.Event()
+        self.interrupted = asyncio.Event()
 
     async def stream_reply(self, request: ThinkerReplyRequest) -> AsyncIterator[ThinkerDone]:
         self.started.set()
@@ -130,17 +142,19 @@ class HungThinker(ImmediateThinker):
         if False:
             yield ThinkerDone(reply_text="unreachable", tone="温柔")
 
+    async def interrupt(self, user_id: str, session_id: str) -> None:
+        self.interrupted.set()
+
 
 async def test_disconnect_cleanup_follows_the_required_order() -> None:
     calls: list[str] = []
     stopped_audio = asyncio.Event()
     cancelled_asr = asyncio.Event()
     thinker_finished = asyncio.Event()
-    thinker_release = asyncio.Event()
     receiver = OrderedReceiver(calls, stopped_audio)
     asr = OrderedAsr(calls, stopped_audio, cancelled_asr)
-    thinker = OrderedThinker(calls, None, thinker_finished, release=thinker_release)
-    tts = OrderedTts(calls, thinker_finished)
+    thinker = OrderedThinker(calls, None, thinker_finished, release=asyncio.Event())
+    tts = OrderedTts(calls)
     registry = OrderedRegistry(calls)
     runtime, workers = make_runtime(
         asr=asr,
@@ -150,6 +164,15 @@ async def test_disconnect_cleanup_follows_the_required_order() -> None:
         registry=registry,
         sample_rate=24000,
     )
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_LLM,
+        thinker_generation=1,
+        tts_generation=1,
+    )
+    runtime.actor.state.active_llm_turn_id = 1
     run_task = asyncio.create_task(runtime.run())
     await asyncio.gather(*(worker.started.wait() for worker in workers))
 
@@ -164,6 +187,7 @@ async def test_disconnect_cleanup_follows_the_required_order() -> None:
                 segment=SpeechSegment(segment_id=1, pcm16_16k=b"\x00\x00"),
             )
         )
+        runtime.actor.state.turns[1].stage = TurnStage.STREAMING_TTS
         await runtime.execute_effect(
             StartTts(turn_id=1, generation=1, user_input="question", reply_text="reply", tone="温柔")
         )
@@ -171,29 +195,20 @@ async def test_disconnect_cleanup_follows_the_required_order() -> None:
         await asyncio.wait_for(asr.started.wait(), timeout=1)
 
         runtime.request_close()
-        async with asyncio.timeout(1):
-            while not runtime._long_tasks["asr"].done():
-                await asyncio.sleep(0)
-        thinker_release.set()
         await asyncio.wait_for(run_task, timeout=1)
     finally:
-        thinker_release.set()
         if not run_task.done():
             runtime.request_close()
             await asyncio.wait_for(run_task, timeout=1)
 
-    assert calls == [
-        "stop_audio",
-        "cancel_asr",
-        "wait_thinker",
-        "drain_tts",
-        "delete_thinker_session",
-        "remove_registry",
-    ]
+    assert calls[:2] == ["stop_audio", "cancel_asr"]
+    assert set(calls[2:-1]) == {"interrupt_thinker", "cancel_thinker", "cancel_tts"}
+    assert calls[-1] == "remove_registry"
+    assert thinker.cancelled.is_set()
     assert runtime.background_task_count == 0
 
 
-async def test_thinker_cleanup_timeout_skips_delete_and_logs_stable_code(
+async def test_disconnect_cancels_thinker_without_waiting_and_skips_delete(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     thinker = HungThinker()
@@ -201,7 +216,6 @@ async def test_thinker_cleanup_timeout_skips_delete_and_logs_stable_code(
     runtime, workers = make_runtime(
         thinker=thinker,
         registry=registry,
-        thinker_cleanup_timeout=0.01,
     )
     run_task = asyncio.create_task(runtime.run())
     await asyncio.gather(*(worker.started.wait() for worker in workers))
@@ -215,13 +229,14 @@ async def test_thinker_cleanup_timeout_skips_delete_and_logs_stable_code(
         await asyncio.wait_for(run_task, timeout=1)
 
     assert thinker.cancelled.is_set()
+    assert thinker.interrupted.is_set()
     assert thinker.deleted == 0
     assert registry.removed == ["s"]
     assert runtime.background_task_count == 0
     assert len(caplog.records) == 1
     cleanup_log = json.loads(caplog.records[0].message)
     assert cleanup_log["event"] == "thinker_cleanup_skipped"
-    assert cleanup_log["error_code"] == THINKER_CLEANUP_SKIPPED
+    assert cleanup_log["error_code"] == "THINKER_CLEANUP_SKIPPED"
     assert cleanup_log["session_id"] == "s"
 
 
@@ -282,7 +297,7 @@ class HungTts:
             yield TtsChunk(chunk_index=0, pcm16_24k=b"\x00\x00", finalize=True)
 
 
-async def test_tts_cleanup_timeout_cancels_stream_before_delete() -> None:
+async def test_tts_cleanup_cancels_stream_before_delete() -> None:
     tts = HungTts()
     thinker = ImmediateThinker()
     registry = RecordingRegistry()
@@ -290,7 +305,13 @@ async def test_tts_cleanup_timeout_cancels_stream_before_delete() -> None:
         tts=tts,
         thinker=thinker,
         registry=registry,
-        tts_drain_timeout=0.01,
+    )
+    runtime.actor.state.turns[1] = TurnContext(
+        turn_id=1,
+        asr_text="question",
+        audio_wav=valid_wav(),
+        stage=TurnStage.STREAMING_TTS,
+        tts_generation=1,
     )
     run_task = asyncio.create_task(runtime.run())
     await asyncio.gather(*(worker.started.wait() for worker in workers))

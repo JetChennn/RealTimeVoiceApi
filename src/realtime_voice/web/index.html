@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>实时语音 · 网关测试台</title>
   <link rel="stylesheet" href="./style.css?v=20260924-speaker-ui-1">
-  <script type="module" src="./app.mjs?v=20260924-speaker-ui-1"></script>
+  <script type="module" src="./app.mjs?v=20260930-tts-latency-2"></script>
 </head>
 <body>
 <main>
@@ -25,7 +25,7 @@
   <section aria-label="阶段耗时" class="timing-section">
     <div class="section-heading"><h2>阶段耗时</h2><span id="metrics-status">开始对话后采样</span></div>
     <div id="metrics" class="metrics"></div>
-    <p class="footnote">来自 /metrics 每秒采样的增量平均值；包含网关到下游的等待与通信。全网关统计，不能归属到某一轮或某个用户。Thinker 内部 RAG 耗时包含在 LLM 首包耗时中。</p>
+    <p class="footnote">来自 /metrics 每秒采样的增量平均值；包含网关到下游的等待与通信。全网关统计，不能归属到某一轮或某个用户。“说完话 → TTS 首帧”从服务端检测到最后一段有效语音结束开始，但会扣除实际确认的尾部静音。Thinker 内部 RAG 耗时包含在 LLM 首包耗时中。</p>
   </section>
   <section id="speaker-panel" aria-label="声纹验证" class="speaker-section" data-tone="idle">
     <div class="section-heading"><h2>声纹验证</h2><span>仅在当前会话内生效</span></div>

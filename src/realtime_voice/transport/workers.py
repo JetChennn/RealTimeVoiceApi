@@ -173,13 +173,26 @@ class WebSocketReceiver:
 class WebSocketSender:
     """The single long-lived owner of normal WebSocket text writes."""
 
-    def __init__(self, websocket: WebSocket, outbound: Any) -> None:
+    def __init__(
+        self,
+        websocket: WebSocket,
+        outbound: Any,
+        should_send: Callable[[Any], bool] | None = None,
+        report_discard: Callable[[Any], None] | None = None,
+    ) -> None:
         self._websocket = websocket
         self._outbound = outbound
+        self._should_send = should_send
+        self._report_discard = report_discard
 
     async def run(self) -> None:
         while True:
-            payload = encode_server_message(await self._outbound.get())
+            message = await self._outbound.get()
+            if self._should_send is not None and not self._should_send(message):
+                if self._report_discard is not None:
+                    self._report_discard(message)
+                continue
+            payload = encode_server_message(message)
             try:
                 await self._websocket.send_text(payload)
             except (WebSocketDisconnect, RuntimeError):

@@ -1073,6 +1073,7 @@ dependencies = [
     { name = "torch" },
     { name = "torchaudio" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -1080,7 +1081,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
-    { name = "websockets" },
 ]
 
 [package.metadata]
@@ -1101,7 +1101,7 @@ requires-dist = [
     { name = "torch", specifier = ">=2,<3" },
     { name = "torchaudio", specifier = ">=2,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
-    { name = "websockets", marker = "extra == 'dev'", specifier = ">=14,<16" },
+    { name = "websockets", specifier = ">=14,<16" },
 ]
 provides-extras = ["dev"]
 

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from realtime_voice.config import Settings
 from realtime_voice.main import create_app
 from realtime_voice.protocol.errors import ProtocolViolation
-from realtime_voice.protocol.server_messages import TextDelta
+from realtime_voice.protocol.server_messages import AudioDelta, TextDelta
 from realtime_voice.session.actor import SendOutbound
 from realtime_voice.session.runtime import BoundedByteQueue, SlowClient
 from realtime_voice.transport.websocket import serve_realtime
@@ -35,6 +35,15 @@ class DisconnectingSocket:
 class ClosedSocket:
     async def send_text(self, _: str) -> None:
         raise RuntimeError("Cannot call send once a close message has been sent")
+
+
+class RecordingDisconnectingSocket:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send_text(self, payload: str) -> None:
+        self.sent.append(payload)
+        raise WebSocketDisconnect(1006)
 
 
 class ErrorWriteRaceSocket:
@@ -231,6 +240,44 @@ async def test_sender_absorbs_closed_socket_runtime_error_during_write() -> None
         )
     )
     await WebSocketSender(ClosedSocket(), outbound).run()
+
+
+async def test_sender_rechecks_interrupted_audio_immediately_before_write() -> None:
+    outbound = asyncio.Queue()
+    audio = AudioDelta(
+        type="AUDIO_DELTA",
+        user_id="u",
+        session_id="s",
+        turn_id=1,
+        interrupt=False,
+        sequence=0,
+        audio_format="PCM16",
+        sample_rate=16000,
+        channels=1,
+        audio_b64=base64.b64encode(b"\x00\x00").decode(),
+    )
+    text = TextDelta(
+        type="TEXT_DELTA",
+        user_id="u",
+        session_id="s",
+        turn_id=2,
+        interrupt=False,
+        delta="new",
+    )
+    await outbound.put(audio)
+    await outbound.put(text)
+    discarded: list[object] = []
+    socket = RecordingDisconnectingSocket()
+
+    await WebSocketSender(
+        socket,
+        outbound,
+        lambda message: not isinstance(message, AudioDelta),
+        discarded.append,
+    ).run()
+
+    assert discarded == [audio]
+    assert json.loads(socket.sent[0])["type"] == "TEXT_DELTA"
 
 
 async def test_protocol_error_write_race_does_not_escape_runtime_exception_group(caplog) -> None:

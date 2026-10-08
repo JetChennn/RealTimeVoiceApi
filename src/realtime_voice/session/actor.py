@@ -94,6 +94,39 @@ class StartTts:
 
 
 @dataclass(frozen=True, slots=True)
+class StartBistreamTts:
+    """收到首个 LLM delta 后建立双向 TTS 会话。"""
+
+    turn_id: int
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class SendBistreamText:
+    """向已建立的双向 TTS 会话发送一段原始 delta。"""
+
+    turn_id: int
+    generation: int
+    delta: str
+
+
+@dataclass(frozen=True, slots=True)
+class EndBistreamTts:
+    """通知双向 TTS 本轮文本输入结束。"""
+
+    turn_id: int
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class CancelBistreamTts:
+    """取消双向 TTS，会话清理必须幂等。"""
+
+    turn_id: int
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class ThinkerFallbackPolicy:
     """网关在 Thinker 失败后使用的固定回复策略。"""
 
@@ -141,6 +174,10 @@ SessionEffect: TypeAlias = (
     | StartThinker
     | StartNextThinker
     | StartTts
+    | StartBistreamTts
+    | SendBistreamText
+    | EndBistreamTts
+    | CancelBistreamTts
     | RecordThinkerFallback
     | CloseRuntime
     | RecordStaleEvent
@@ -157,10 +194,12 @@ class SessionActor:
         state: SessionState,
         *,
         thinker_fallback: ThinkerFallbackPolicy | None = None,
+        bistream_enabled: bool = False,
         fallback_selector: Callable[[tuple[str, ...]], str] = choice,
     ):
         self.state = state
         self._thinker_fallback = thinker_fallback
+        self._bistream_enabled = bistream_enabled
         self._fallback_selector = fallback_selector
         if thinker_fallback is not None and thinker_fallback.enabled:
             if not thinker_fallback.texts or any(not text.strip() for text in thinker_fallback.texts):
@@ -247,7 +286,12 @@ class SessionActor:
         effects = self._interrupt_unfinished_turns()
         turn_id = self.state.next_turn_id
         self.state.next_turn_id += 1
-        turn = TurnContext(turn_id, event.text, event.audio_wav)
+        turn = TurnContext(
+            turn_id,
+            event.text,
+            event.audio_wav,
+            trailing_silence_ms=event.trailing_silence_ms,
+        )
         self.state.turns[turn_id] = turn
         self.state.llm_queue.append(turn_id)
         effects.append(
@@ -340,7 +384,7 @@ class SessionActor:
             return [turn]
         if not event.delta:
             return []
-        return [
+        effects: list[SessionEffect] = [
             SendOutbound(
                 TextDelta(
                     type="TEXT_DELTA",
@@ -352,6 +396,14 @@ class SessionActor:
                 )
             )
         ]
+        if self._bistream_enabled:
+            if not turn.tts_started:
+                turn.tts_started = True
+                turn.tts_generation += 1
+                effects.insert(0, StartBistreamTts(turn.turn_id, turn.tts_generation))
+            if turn.tts_failure is None:
+                effects.insert(1, SendBistreamText(turn.turn_id, turn.tts_generation, event.delta))
+        return effects
 
     def _thinker_completed(self, event: ThinkerCompleted) -> list[SessionEffect]:
         """Thinker 完成：落定回复文本、收尾 LLM 阶段；被打断则结束本轮，否则进入 TTS。"""
@@ -386,18 +438,34 @@ class SessionActor:
                 effects.append(self._start_thinker(interrupt_first=True))
             return effects
 
-        # 进入 TTS 流式阶段，发起新的 TTS 合成
+        # 进入 TTS 流式阶段。bistream 的输入已随 Thinker delta 发送，此处只收尾。
         turn.stage = TurnStage.STREAMING_TTS
-        turn.tts_generation += 1
-        effects.append(
-            StartTts(
-                turn.turn_id,
-                turn.tts_generation,
-                user_input=turn.asr_text,
-                reply_text=turn.reply_text,
-                tone=event.tone,
+        if self._bistream_enabled:
+            if turn.tts_failure is not None:
+                code, message = turn.tts_failure
+                turn.stage = TurnStage.FAILED
+                effects.extend([self._error(turn.turn_id, False, "TTS", code, message), self._response_end(turn, "FAILED")])
+            else:
+                if not turn.tts_started:
+                    turn.tts_started = True
+                    turn.tts_generation += 1
+                    effects.extend([
+                        StartBistreamTts(turn.turn_id, turn.tts_generation),
+                        SendBistreamText(turn.turn_id, turn.tts_generation, turn.reply_text),
+                    ])
+                turn.tts_input_closed = True
+                effects.append(EndBistreamTts(turn.turn_id, turn.tts_generation))
+        else:
+            turn.tts_generation += 1
+            effects.append(
+                StartTts(
+                    turn.turn_id,
+                    turn.tts_generation,
+                    user_input=turn.asr_text,
+                    reply_text=turn.reply_text,
+                    tone=event.tone,
+                )
             )
-        )
         return effects
 
     def _thinker_failed(self, event: ThinkerFailed) -> list[SessionEffect]:
@@ -405,12 +473,43 @@ class SessionActor:
         turn = self._thinker_turn(event, event.turn_id, event.generation)
         if not isinstance(turn, TurnContext):
             return [turn]
-        return self._finish_thinker_failure(turn, event.code, event.message)
+        return self._finish_thinker_failure(
+            turn,
+            event.code,
+            event.message,
+            suppress_error_after_interrupt=True,
+        )
 
     def _finish_thinker_failure(
-        self, turn: TurnContext, code: str, message: str
+        self,
+        turn: TurnContext,
+        code: str,
+        message: str,
+        *,
+        suppress_error_after_interrupt: bool = False,
     ) -> list[SessionEffect]:
         """以保底或失败收尾 Thinker，并按需接续下一轮。"""
+        if turn.interrupted and suppress_error_after_interrupt:
+            self.state.active_llm_turn_id = None
+            turn.stage = TurnStage.INTERRUPTED
+            effects: list[SessionEffect] = []
+            if self._bistream_enabled and turn.tts_started:
+                effects.append(CancelBistreamTts(turn.turn_id, turn.tts_generation))
+            effects.append(self._response_end(turn, "INTERRUPTED"))
+            if self.state.llm_queue:
+                effects.append(self._start_thinker(interrupt_first=True))
+            return effects
+        if self._bistream_enabled and turn.tts_started:
+            self.state.active_llm_turn_id = None
+            turn.stage = TurnStage.FAILED
+            effects: list[SessionEffect] = [
+                CancelBistreamTts(turn.turn_id, turn.tts_generation),
+                self._error(turn.turn_id, turn.interrupted, "LLM", code, message),
+                self._response_end(turn, "FAILED"),
+            ]
+            if self.state.llm_queue:
+                effects.append(self._start_thinker(interrupt_first=False))
+            return effects
         fallback = self._thinker_fallback
         if fallback is not None and fallback.enabled:
             return self._start_thinker_fallback(turn, code, fallback)
@@ -459,15 +558,24 @@ class SessionActor:
 
         turn.stage = TurnStage.STREAMING_TTS
         turn.tts_generation += 1
-        effects.append(
-            StartTts(
-                turn.turn_id,
-                turn.tts_generation,
-                user_input=turn.asr_text,
-                reply_text=turn.reply_text,
-                tone=fallback.tone,
+        if self._bistream_enabled:
+            turn.tts_started = True
+            turn.tts_input_closed = True
+            effects.extend([
+                StartBistreamTts(turn.turn_id, turn.tts_generation),
+                SendBistreamText(turn.turn_id, turn.tts_generation, turn.reply_text),
+                EndBistreamTts(turn.turn_id, turn.tts_generation),
+            ])
+        else:
+            effects.append(
+                StartTts(
+                    turn.turn_id,
+                    turn.tts_generation,
+                    user_input=turn.asr_text,
+                    reply_text=turn.reply_text,
+                    tone=fallback.tone,
+                )
             )
-        )
         return effects
 
     def _tts_turn(
@@ -479,7 +587,7 @@ class SessionActor:
             return self._stale(event, "unknown_turn", turn_id)
         if generation != turn.tts_generation:
             return self._stale(event, "tts_generation", turn_id)
-        if turn.stage is not TurnStage.STREAMING_TTS:
+        if turn.stage not in {TurnStage.STREAMING_LLM, TurnStage.STREAMING_TTS}:
             return self._stale(event, "turn_stage", turn_id)
         return turn
 
@@ -515,6 +623,15 @@ class SessionActor:
         turn = self._tts_turn(event, event.turn_id, event.generation)
         if not isinstance(turn, TurnContext):
             return [turn]
+        # 正常 bistream 不会在 end_turn 前结束；若服务异常提前结束，等待 Thinker done
+        # 统一完成最终状态判断。
+        if turn.stage is TurnStage.STREAMING_LLM:
+            # 用户打断时，TTS 提前结束是预期的取消结果；仍由 Thinker 的终态事件
+            # 负责释放 active_llm_turn_id 和发送 INTERRUPTED。
+            if turn.interrupted:
+                return []
+            turn.tts_failure = ("TTS_STREAM_FAILED", "TTS ended before Thinker completed")
+            return []
         status = "INTERRUPTED" if turn.interrupted else "COMPLETED"
         turn.stage = TurnStage.INTERRUPTED if turn.interrupted else TurnStage.COMPLETED  # 进入终态
         return [self._response_end(turn, status)]
@@ -524,6 +641,13 @@ class SessionActor:
         turn = self._tts_turn(event, event.turn_id, event.generation)
         if not isinstance(turn, TurnContext):
             return [turn]
+        if turn.stage is TurnStage.STREAMING_LLM:
+            # 主动打断会关闭 bistream；这不是客户端可见的 TTS 故障。不要抢先
+            # 改写 LLM 状态，否则随后到达的 Thinker 收尾事件会变成 stale。
+            if turn.interrupted:
+                return []
+            turn.tts_failure = (event.code, event.message)
+            return []
         turn.stage = TurnStage.FAILED
         return [
             self._error(turn.turn_id, turn.interrupted, "TTS", event.code, event.message),
