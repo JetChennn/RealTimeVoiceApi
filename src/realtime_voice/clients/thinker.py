@@ -116,7 +116,13 @@ class ThinkerClient:
                 ) as response:
                     response.raise_for_status()
                     async for payload in iter_ndjson(response.aiter_bytes()):
-                        yield _thinker_event(payload)
+                        event = _thinker_event(payload)
+                        # Tool status is a Thinker-internal control event. The
+                        # voice state machine only consumes user-visible text
+                        # and the terminal reply, while the acknowledgement
+                        # remains a normal text_delta and is spoken promptly.
+                        if event is not None:
+                            yield event
             except ThinkerStreamError:
                 raise
             except (httpx.HTTPError, TypeError, ValueError) as error:
@@ -161,8 +167,10 @@ def _quote_path_identifier(value: str) -> str:
     return quote(value, safe="")
 
 
-def _thinker_event(payload: dict[str, object]) -> ThinkerEvent:
+def _thinker_event(payload: dict[str, object]) -> ThinkerEvent | None:
     event_type = payload.get("type")
+    if event_type == "tool_status":
+        return None
     if event_type == "text_delta":
         delta = payload.get("delta")
         if not isinstance(delta, str):

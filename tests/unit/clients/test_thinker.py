@@ -96,6 +96,33 @@ async def test_thinker_streams_text_contract_across_chunk_boundaries() -> None:
     assert "rag" not in payload
 
 
+async def test_thinker_ignores_tool_status_and_keeps_spoken_ack_and_answer() -> None:
+    transport, _ = stream_transport(
+        [
+            b'{"type":"tool_status","status":"queued","run_id":"run-1"}\n',
+            b'{"type":"text_delta","segment":"ack","delta":"\\u6211\\u6b63\\u5728\\u67e5\\u8be2\\uff0c\\u8bf7\\u7a0d\\u7b49\\u4e00\\u4e0b\\u3002"}\n',
+            b'{"type":"tool_status","status":"succeeded","run_id":"run-1"}\n',
+            b'{"type":"text_delta","segment":"answer","delta":"\\u5317\\u4eac\\u73b0\\u5728\\u6674\\u6717\\u3002"}\n',
+            b'{"type":"done","output":{"reply_text":"\\u5317\\u4eac\\u73b0\\u5728\\u6674\\u6717\\u3002","tone":"\\u5e73\\u548c"}}\n',
+        ]
+    )
+    request = ThinkerReplyRequest("u", "s", "北京天气怎么样")
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://thinker") as http:
+        events = [
+            event
+            async for event in ThinkerClient(
+                http, BoundedAdmission("thinker", 1, 1)
+            ).stream_reply(request)
+        ]
+
+    assert events == [
+        ThinkerTextDelta("我正在查询，请稍等一下。"),
+        ThinkerTextDelta("北京现在晴朗。"),
+        ThinkerDone("北京现在晴朗。", "平和"),
+    ]
+
+
 async def test_thinker_forwards_rag_configuration_without_building_knowledge_context() -> None:
     transport, captured = stream_transport(
         [b'{"type":"done","output":{"reply_text":"ok","tone":""}}\n']
