@@ -62,6 +62,24 @@ class Metrics:
             "Characters supplied to ASR as context",
             registry=r,
         )
+        self.asr_keyword_extractions = Counter(
+            "realtime_voice_asr_keyword_extractions",
+            "Local keyword extraction outcomes", ["status"], registry=r,
+        )
+        self.asr_keyword_extraction_seconds = Histogram(
+            "realtime_voice_asr_keyword_extraction_seconds",
+            "Keyword extraction latency including queue wait",
+            buckets=(0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1), registry=r,
+        )
+        self.asr_keyword_compute_seconds = Histogram(
+            "realtime_voice_asr_keyword_compute_seconds",
+            "Successful local keyword computation time",
+            buckets=(0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1), registry=r,
+        )
+        self.asr_keyword_count = Histogram(
+            "realtime_voice_asr_keyword_count", "Extracted keyword count",
+            buckets=(0, 1, 2, 4, 8, 12, 24), registry=r,
+        )
         self.speech_end_to_first_llm = Histogram(
             "realtime_voice_speech_end_to_first_llm_seconds", "Speech end to LLM", registry=r
         )
@@ -161,6 +179,15 @@ class Metrics:
         self._safe(self.asr_context_requests.labels(status).inc)
         if status == "provided":
             self._safe(self.asr_context_chars.observe, char_count)
+
+    def record_asr_keyword_extraction(
+        self, status: str, *, elapsed: float, compute_seconds: float, count: int
+    ) -> None:
+        self._safe(self.asr_keyword_extractions.labels(status).inc)
+        self._safe(self.asr_keyword_extraction_seconds.observe, elapsed)
+        if status in {"success", "empty"}:
+            self._safe(self.asr_keyword_compute_seconds.observe, compute_seconds)
+            self._safe(self.asr_keyword_count.observe, count)
 
     def observe_speech_end_to_first_llm(self, seconds: float) -> None:
         self._safe(self.speech_end_to_first_llm.observe, seconds)

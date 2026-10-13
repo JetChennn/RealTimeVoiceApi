@@ -70,6 +70,16 @@ class ThinkerSkipped:
 
 
 @dataclass(frozen=True, slots=True)
+class AsrKeywordsExtracted:
+    session_id: str
+    turn_id: int
+    generation: int
+    context: str
+    status: str
+    deadline: float
+
+
+@dataclass(frozen=True, slots=True)
 class ThinkerFailed:
     session_id: str
     turn_id: int
@@ -161,6 +171,7 @@ SessionEvent: TypeAlias = (
     | AsrFailed
     | ThinkerDeltaReceived
     | ThinkerCompleted
+    | AsrKeywordsExtracted
     | ThinkerSkipped
     | ThinkerFailed
     | TtsChunkReceived

@@ -6,7 +6,7 @@ import asyncio
 import base64
 import logging
 from collections.abc import AsyncIterator, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from realtime_voice.audio.vad import SpeechSegment
     from realtime_voice.speaker.gate import SessionSpeakerGate
 from realtime_voice.clients.asr import AsrError
+from realtime_voice.clients.asr_keywords import AsrKeywordExtractor, KeywordResult
 from realtime_voice.clients.limits import AdmissionOverloaded
 from realtime_voice.clients.thinker import (
     ThinkerClient,
@@ -52,6 +53,7 @@ from realtime_voice.session.actor import (
     CancelBistreamTts,
     CloseRuntime,
     EndBistreamTts,
+    ExtractAsrKeywords,
     QueueAsr,
     RecordDiscardedAudio,
     RecordStaleEvent,
@@ -68,6 +70,7 @@ from realtime_voice.session.actor import (
 )
 from realtime_voice.session.events import (
     AsrFailed,
+    AsrKeywordsExtracted,
     AsrSucceeded,
     AudioSegmentDiscarded,
     SessionEvent,
@@ -299,6 +302,8 @@ class SessionRuntime:
         audio_queue: BoundedByteQueue[bytes | None] | None = None,
         outbound_queue: BoundedByteQueue[ServerMessage] | None = None,
         asr_context_enabled: bool = True,
+        asr_keyword_extractor: AsrKeywordExtractor | None = None,
+        asr_context_extract_timeout_ms: float = 100,
         thinker_stream_timeout: float = 5.0,
         thinker_reply_total_timeout: float = 20.0,
         thinker_fallback_enabled: bool = False,
@@ -372,6 +377,9 @@ class SessionRuntime:
         self._thinker_rag_scenes = tuple(scenes)
         self._asr_client = asr_client
         self._asr_context_enabled = asr_context_enabled
+        self._asr_keyword_extractor = asr_keyword_extractor
+        self._asr_context_extract_timeout = asr_context_extract_timeout_ms / 1000
+        self._keyword_tasks: set[asyncio.Task[None]] = set()
         self._thinker_client = thinker_client
         self._tts_client = tts_client
         self._receiver = receiver
@@ -582,6 +590,15 @@ class SessionRuntime:
 
     async def execute_effect(self, effect: SessionEffect) -> None:
         """执行 Actor 产出的一条 Effect，避免工作协程直接修改 Actor 状态。"""
+        if isinstance(effect, ExtractAsrKeywords):
+            if not self._closing and self._asr_context_enabled:
+                deadline = monotonic() + self._asr_context_extract_timeout
+                self._spawn_background(
+                    self._extract_asr_keywords(effect, deadline),
+                    tasks=self._keyword_tasks,
+                    name=f"{self.session_id}:keywords:{effect.turn_id}:{effect.generation}",
+                )
+            return
         if isinstance(effect, SendOutbound):
             if isinstance(effect.message, TurnState):
                 # 先启用输出抑制并移除尚未发给设备的旧音频，再异步取消下游。
@@ -792,7 +809,7 @@ class SessionRuntime:
         return [{"role": "assistant", "content": previous.reply_text}]
 
     def _asr_context(self) -> tuple[str, str, int | None]:
-        """返回调用 ASR 当下最近一条合格的完整 Thinker 回复。"""
+        """读取最近一条合格回复的关键词缓存，绝不等待或现场提取。"""
         if not self._asr_context_enabled:
             return "disabled", "", None
         for turn in reversed(self.actor.state.turns.values()):
@@ -803,8 +820,43 @@ class SessionRuntime:
                 and not turn.thinker_fallback_used
                 and turn.thinker_failure_code is None
             ):
-                return "provided", turn.reply_text, turn.turn_id
+                if turn.asr_keywords_status == "success" and turn.asr_keywords:
+                    return "provided", turn.asr_keywords, turn.turn_id
+                return "unavailable", "", None
         return "unavailable", "", None
+
+    async def _extract_asr_keywords(self, effect: ExtractAsrKeywords, deadline: float) -> None:
+        started = deadline - self._asr_context_extract_timeout
+        extractor = self._asr_keyword_extractor
+        result = (
+            await extractor.extract(effect.text, deadline=deadline)
+            if extractor is not None
+            else KeywordResult("failed")
+        )
+        elapsed = monotonic() - started
+        self._observe(
+            "asr_keywords_extracted",
+            stage="ASR_CONTEXT",
+            turn_id=effect.turn_id,
+            generation=effect.generation,
+            status=result.status,
+            duration_ms=elapsed * 1000,
+            keyword_count=result.count,
+            context_chars=len(result.context),
+        )
+        if self._metrics is not None:
+            self._metrics.record_asr_keyword_extraction(
+                result.status,
+                elapsed=elapsed,
+                compute_seconds=result.compute_seconds,
+                count=result.count,
+            )
+        await self._publish_event(
+            AsrKeywordsExtracted(
+                self.session_id, effect.turn_id, effect.generation,
+                result.context, result.status, deadline,
+            )
+        )
 
     async def _actor_loop(self) -> None:
         while True:
@@ -825,6 +877,12 @@ class SessionRuntime:
                 await self._handle_actor_event(event)
 
     async def _handle_actor_event(self, event):
+        if isinstance(event, AsrKeywordsExtracted) and monotonic() >= event.deadline:
+            event = replace(event, context="", status="timeout")
+            self._observe(
+                "asr_keywords_expired", stage="ASR_CONTEXT", turn_id=event.turn_id,
+                generation=event.generation, status="timeout",
+            )
         if isinstance(event, SpeechSegmentReady):
             self._speech_ends.setdefault(
                 event.segment.segment_id,
@@ -1881,6 +1939,9 @@ class SessionRuntime:
             if self._cleaned:
                 return
             self._closing = True
+            for task in tuple(self._keyword_tasks):
+                task.cancel()
+            await asyncio.gather(*tuple(self._keyword_tasks), return_exceptions=True)
             if self.turn_end is not None:
                 await self.turn_end.aclose()
             try:

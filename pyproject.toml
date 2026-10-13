@@ -21,6 +21,7 @@ dependencies = [
   "prometheus-client>=0.21,<1",
   "onnxruntime>=1.23,<2",
   "tokenizers>=0.22,<1",
+  "jieba==0.42.1",
 ]
 
 [project.optional-dependencies]

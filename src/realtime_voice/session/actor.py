@@ -23,6 +23,7 @@ from realtime_voice.protocol.server_messages import (
 )
 from realtime_voice.session.events import (
     AsrFailed,
+    AsrKeywordsExtracted,
     AsrSucceeded,
     AudioSegmentDiscarded,
     SessionDisconnected,
@@ -52,6 +53,13 @@ class QueueAsr:
 
     session_id: str
     segment: SpeechSegment
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractAsrKeywords:
+    turn_id: int
+    generation: int
+    text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +191,7 @@ SessionEffect: TypeAlias = (
     | RecordStaleEvent
     | RecordDiscardedAudio
     | QueueAsr
+    | ExtractAsrKeywords
 )
 
 
@@ -241,6 +250,19 @@ class SessionActor:
             return self._thinker_delta(event)
         if isinstance(event, ThinkerCompleted):
             return self._thinker_completed(event)
+        if isinstance(event, AsrKeywordsExtracted):
+            turn = self.state.turns.get(event.turn_id)
+            if (
+                turn is None
+                or turn.thinker_generation != event.generation
+                or turn.interrupted
+                or turn.thinker_fallback_used
+                or turn.asr_keywords_status != "pending"
+            ):
+                return [self._stale(event, "asr_keywords", event.turn_id)]
+            turn.asr_keywords = event.context if event.status == "success" else ""
+            turn.asr_keywords_status = event.status
+            return []
         if isinstance(event, ThinkerSkipped):
             turn = self._thinker_turn(event, event.turn_id, event.generation)
             if not isinstance(turn, TurnContext):
@@ -466,6 +488,8 @@ class SessionActor:
                     tone=event.tone,
                 )
             )
+        turn.asr_keywords_status = "pending"
+        effects.insert(0, ExtractAsrKeywords(turn.turn_id, turn.thinker_generation, turn.reply_text))
         return effects
 
     def _thinker_failed(self, event: ThinkerFailed) -> list[SessionEffect]:

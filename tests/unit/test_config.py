@@ -25,6 +25,9 @@ def test_settings_defaults():
     assert settings.asr_concurrency == 30
     assert settings.asr_max_waiters == 30
     assert settings.asr_context_enabled is True
+    assert settings.asr_context_max_keywords == 12
+    assert settings.asr_context_max_chars == 128
+    assert settings.asr_context_extract_timeout_ms == 100
 
 
 def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:

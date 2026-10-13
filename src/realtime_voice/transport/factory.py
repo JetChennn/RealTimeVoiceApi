@@ -16,6 +16,7 @@ from realtime_voice.audio.vad import (
     VadWorker,
 )
 from realtime_voice.clients.asr import AsrClient
+from realtime_voice.clients.asr_keywords import AsrKeywordExtractor
 from realtime_voice.clients.limits import BoundedAdmission
 from realtime_voice.clients.thinker import ThinkerClient
 from realtime_voice.clients.tts import TtsClient
@@ -34,6 +35,14 @@ if TYPE_CHECKING:
 def configure_services(services: AppServices) -> None:
     """Attach shared downstream clients and a registry to application services once."""
     settings = services.settings
+    services.asr_keyword_extractor = (
+        AsrKeywordExtractor(
+            max_keywords=settings.asr_context_max_keywords,
+            max_chars=settings.asr_context_max_chars,
+        )
+        if settings.asr_context_enabled
+        else None
+    )
     services.asr_client = AsrClient(
         httpx.AsyncClient(base_url=str(settings.asr_base_url), trust_env=False),
         BoundedAdmission(
@@ -182,6 +191,8 @@ def build_runtime(
         audio_queue=audio,
         outbound_queue=outbound,
         asr_context_enabled=settings.asr_context_enabled,
+        asr_keyword_extractor=services.asr_keyword_extractor,
+        asr_context_extract_timeout_ms=settings.asr_context_extract_timeout_ms,
         thinker_stream_timeout=settings.thinker_stream_timeout_seconds,
         thinker_reply_total_timeout=settings.thinker_reply_total_timeout_seconds,
         thinker_fallback_enabled=settings.thinker_fallback_enabled,

@@ -547,6 +547,8 @@ def test_asr_context_uses_latest_eligible_reply_and_skips_ineligible_turns() -> 
         audio_wav=valid_wav(),
         stage=TurnStage.COMPLETED,
         reply_text="older normal reply",
+        asr_keywords="杭州 西湖",
+        asr_keywords_status="success",
     )
     runtime.actor.state.turns[2] = TurnContext(
         turn_id=2,
@@ -572,7 +574,7 @@ def test_asr_context_uses_latest_eligible_reply_and_skips_ineligible_turns() -> 
         stage=TurnStage.STREAMING_LLM,
     )
 
-    assert runtime._asr_context() == ("provided", "older normal reply", 1)
+    assert runtime._asr_context() == ("provided", "杭州 西湖", 1)
 
 
 def test_asr_context_reports_unavailable_or_disabled_without_reusing_other_sessions() -> None:
@@ -584,9 +586,11 @@ def test_asr_context_reports_unavailable_or_disabled_without_reusing_other_sessi
         audio_wav=valid_wav(),
         stage=TurnStage.COMPLETED,
         reply_text="session-local secret reply",
+        asr_keywords="杭州",
+        asr_keywords_status="success",
     )
 
-    assert first._asr_context() == ("provided", "session-local secret reply", 1)
+    assert first._asr_context() == ("provided", "杭州", 1)
     assert second._asr_context() == ("unavailable", "", None)
 
     disabled, _ = make_runtime(asr_context_enabled=False)
@@ -688,6 +692,8 @@ async def test_asr_dispatch_records_context_metadata_without_logging_reply(
             audio_wav=valid_wav(),
             stage=TurnStage.COMPLETED,
             reply_text="private context reply",
+            asr_keywords=expected_context,
+            asr_keywords_status="success",
         )
 
     asr_task = asyncio.create_task(runtime._asr_loop())

@@ -180,6 +180,7 @@ class FakeServiceHarness:
         runtime = SessionRuntime(
             state=SessionState(create.device_id, create.session_id, create.sample_rate),
             asr_client=self.asr,
+            asr_keyword_extractor=self.keyword_extractor,
             thinker_client=self.thinker,
             rag_enabled=create.rag_enabled,
             scenes=tuple(create.scenes),
@@ -198,10 +199,12 @@ class FakeServiceHarness:
         return runtime
 
     def app(self):
-        return create_app(
+        app = create_app(
             Settings(_env_file=None, turn_end_semantic_enabled=False),
             runtime_factory=self.runtime_factory,
         )
+        self.keyword_extractor = app.state.services.asr_keyword_extractor
+        return app
 
 
 @contextlib.contextmanager

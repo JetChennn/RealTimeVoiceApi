@@ -31,6 +31,8 @@ class TurnContext:
     reply_text: str = ""
     thinker_fallback_used: bool = False
     thinker_failure_code: str | None = None
+    asr_keywords: str = ""
+    asr_keywords_status: str = "unavailable"
     # bistream 允许 LLM 与 TTS 同时活动；这些字段把 TTS 生命周期从 stage 中拆开表示。
     tts_started: bool = False
     tts_input_closed: bool = False

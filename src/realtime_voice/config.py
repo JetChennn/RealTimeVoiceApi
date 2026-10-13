@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     asr_concurrency: int = Field(default=30, ge=1)
     asr_max_waiters: int = Field(default=30, ge=0)
     asr_context_enabled: bool = True
+    asr_context_max_keywords: int = Field(default=12, ge=1, le=128)
+    asr_context_max_chars: int = Field(default=128, ge=1, le=4096)
+    asr_context_extract_timeout_ms: float = Field(default=100, gt=0, allow_inf_nan=False)
     handshake_timeout_seconds: float = Field(default=5.0, gt=0)
     session_event_queue_size: int = Field(default=256, ge=1)
     session_audio_queue_size: int = Field(default=64, ge=1)

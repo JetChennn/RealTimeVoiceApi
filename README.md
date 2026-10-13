@@ -201,7 +201,10 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_CPU_WORKERS` | `8` | 同左 | VAD 等 CPU 任务线程池大小 |
 | `RTVA_CPU_PENDING_JOBS` | `256` | 同左 | CPU 线程池待处理任务上限 |
 | `RTVA_ASR_CONCURRENCY` / `RTVA_ASR_MAX_WAITERS` | `30` / `30` | `64` / `30` | ASR 请求的并发上限与等待队列上限 |
-| `RTVA_ASR_CONTEXT_ENABLED` | `true` | 同左 | 是否将本会话最近一条正常、完整且未被打断的 Thinker 回复原文作为下一次 ASR context；无合格回复时保持原请求格式 |
+| `RTVA_ASR_CONTEXT_ENABLED` | `true` | 同左 | 是否将本会话最近一条正常、完整且未被打断的 Thinker 回复中的专名关键词作为下一次 ASR context |
+| `RTVA_ASR_CONTEXT_MAX_KEYWORDS` | `12` | 同左 | 最多保留的去重关键词数量 |
+| `RTVA_ASR_CONTEXT_MAX_CHARS` | `128` | 同左 | context 字符预算，包含词间空格，不截断单个词 |
+| `RTVA_ASR_CONTEXT_EXTRACT_TIMEOUT_MS` | `100` | 同左 | 后台关键词结果有效时间，包含排队；超时不阻塞对话 |
 | `RTVA_THINKER_STREAM_TIMEOUT_SECONDS` | `5` | 同左 | Thinker 回复首字超时；超时后触发网关保底回复 |
 | `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS` | `20` | 同左 | Thinker 回复总时长上限；超时后触发网关保底回复 |
 | `RTVA_THINKER_CONCURRENCY` / `RTVA_THINKER_MAX_WAITERS` | `30` / `64` | 同左 | Thinker 回复流的并发上限与等待队列上限 |
@@ -215,6 +218,8 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_SLOW_STAGE_WARNING_SECONDS` | `2` | 同左 | ASR、Thinker 首段文本、TTS 首块及相邻音频块间隔的慢请求告警阈值 |
 | `RTVA_TTS_PROMPT_OVERRIDE` | `平和` | 同左 | 所有 TTS 轮次使用的固定 prompt。空值自动回退为“平和”；bistream 必须在首帧提供 prompt，因此网关不再等待 Thinker `done.output.tone`。 |
 | `RTVA_VAD_MIN_SPEECH_MS` | `200` | 同左 | VAD 片段累计有效发声不足此时长时直接过滤，降低“嗯、好”和瞬态噪声误触发 |
+
+ASR context 使用 jieba 自带词典和普通词性标注，保留 `nr/ns/nt/nz` 专名及其子类，无需自定义词典。网关启动时预热；Thinker 正常完成后，通过共享的 2 线程、32 等待任务后台池分析回复末尾最多 2048 字符，按原文顺序去重，排除单字、纯数字和标点，得到空格分隔的完整词组。最近一条合格回复的关键词为空、仍在提取、失败或超时，都发送空 context，不改用整段回复或更早话题。只有紧邻轮次本身尚未正常完成、已中断或为保底时，才按原有规则寻找更早的合格轮次。ASR 不等待提取任务；断连、轮次中断及生成代次变化后的结果会被丢弃。内置词典可能漏掉陌生姓名、昵称和领域术语，关键词只是识别提示，不保证准确率提升。
 
 说话人验证默认关闭；开启后使用 WeSpeaker 导出的 16 kHz ONNX 模型。服务启动时只加载一个共享模型实例，每个会话最多保留一个由客户端显式注册的参考声纹，重复注册时成功结果原子覆盖旧声纹，失败时保留旧声纹，断连时立即清除。将模型文件预先放到 `RTVA_SPEAKER_MODEL_PATH`（默认 `models/wespeaker/cnceleb_resnet34.onnx`）；`start_services.sh` 会在启动网关前检查该文件。
 
@@ -475,6 +480,10 @@ Prometheus 格式，包含会话数、各队列水位、限流器占用、执行
 | `realtime_voice_turn_end_commits_total{reason="..."}` | 按 `semantic_end`、`max_silence`、`max_utterance` 统计提交原因 |
 | `realtime_voice_asr_context_requests_total{status="..."}` | 按 `provided`、`unavailable`、`disabled` 统计 ASR context 使用情况 |
 | `realtime_voice_asr_context_chars` | 实际传入 ASR 的非空 context 字符数直方图 |
+| `realtime_voice_asr_keyword_extractions_total{status="..."}` | `success/empty/timeout/overloaded/failed` 提取结果数 |
+| `realtime_voice_asr_keyword_extraction_seconds` | 后台提取总耗时，包含排队 |
+| `realtime_voice_asr_keyword_compute_seconds` | 成功完成的提取计算耗时 |
+| `realtime_voice_asr_keyword_count` | 成功完成的关键词数量 |
 
 语义结果的 `status` 为 `end`、`wait`、`timeout`、`overloaded`、`failed` 或 `cancelled`。`semantic` 统计调用方看到的总等待，`semantic_queue` 统计进入工作线程前的等待，`semantic_inference` 只统计实际执行。结构化日志 `semantic_evaluated` 记录耗时、状态和概率；`user_input_committed` 记录提交原因和候选片段数量，不记录识别正文。
 
@@ -486,9 +495,12 @@ Prometheus 格式，包含会话数、各队列水位、限流器占用、执行
 uv run pytest -q tests/unit          # 单元测试
 uv run pytest -q tests/integration   # 集成测试（含假下游）
 uv run ruff check .                  # 静态检查
+PYTHONPATH=src uv run python scripts/benchmark_asr_keywords.py # 本地提取与30会话突发基准
 ```
 
 RAG 专项验证覆盖协议参数校验、网关到 Thinker 的请求映射、空场景通用知识模式、逐轮透传和会话隔离；验证说明见 [docs/rag-validation.md](docs/rag-validation.md)。
+
+ASR 关键词上下文的缓存、超时与会话隔离测试，以及宿主性能基准和既有套件问题见 [docs/asr-keyword-validation.md](docs/asr-keyword-validation.md)。`asr_keywords_extracted` 记录提取状态、关键词数量、字符数和耗时；事件队列中超过有效时间的结果记录为 `asr_keywords_expired`，均不记录正文。
 
 语义结束判断专项验证覆盖候选文本合并、恢复说话后的旧结果失效、最短/最长静音、30 秒强制提交、ASR 失败清理、推理超时与过载、4 路真实并行、模型版本和文件哈希校验；集成测试确认一个用户输入只下发一次合并后的 `ASR_RESULT`。
 

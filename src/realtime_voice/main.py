@@ -167,6 +167,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        if services.asr_keyword_extractor is not None:
+            await services.asr_keyword_extractor.start()
         if services.speaker_embedder is not None:
             await services.speaker_embedder.start()
         if resolved.turn_end_semantic_enabled:
@@ -202,6 +204,8 @@ def create_app(
             if services.speaker_embedder is not None:
                 await services.speaker_embedder.aclose()
             await services.detector_offload.aclose()
+            if services.asr_keyword_extractor is not None:
+                await services.asr_keyword_extractor.aclose()
 
     app = FastAPI(title="RealTimeVoiceAPI", version="1.0.0", lifespan=lifespan)
     app.mount(

@@ -1,3 +1,5 @@
+import time
+
 from tests.integration.fake_services import (
     FakeServiceHarness,
     connected_session,
@@ -24,14 +26,20 @@ def test_full_turn_emits_asr_text_and_audio() -> None:
 
 
 def test_second_turn_asr_receives_previous_thinker_reply_as_context() -> None:
-    harness = FakeServiceHarness(["first", "second"])
+    harness = FakeServiceHarness(["李白在杭州游览西湖。", "second"])
     with connected_session(harness) as (websocket, _):
         send_audio(websocket, 0)
         receive_until(websocket, "RESPONSE_END")
-        send_audio(websocket, 1000)
+        deadline = time.monotonic() + 1
+        while harness.runtime._asr_context()[0] != "provided" and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert harness.runtime._asr_context()[0] == "provided"
+        send_audio(websocket, 1)
         receive_until(websocket, "RESPONSE_END")
 
-    assert harness.asr.contexts == ["", "reply:first"]
+    assert harness.asr.contexts[0] == ""
+    assert {"李白", "杭州", "西湖"} <= set(harness.asr.contexts[1].split())
+    assert "reply:" not in harness.asr.contexts[1]
 
 
 def test_websocket_rag_configuration_reaches_thinker_request() -> None:
