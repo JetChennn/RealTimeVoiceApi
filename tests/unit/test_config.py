@@ -46,6 +46,8 @@ def test_settings_defaults():
     assert settings.tts_ref_text == "在一座美丽的森林里，住着许多动物。"
     assert settings.allowed_sample_rates == (16000, 24000, 48000)
     assert settings.max_sessions == 30
+    assert settings.asr_context_workers == 2
+    assert settings.asr_context_extract_timeout_ms == 100
     assert settings.cpu_workers == 8
     assert settings.cpu_pending_jobs == 256
     assert settings.asr_concurrency == 30
@@ -91,6 +93,17 @@ def test_settings_exposes_runtime_queue_and_cleanup_limits() -> None:
     assert settings.speaker_verification_min_audio_ms == 600
     assert settings.speaker_vad_pre_padding_ms == 100
     assert settings.speaker_vad_post_padding_ms == 150
+
+
+def test_keyword_process_count_can_be_configured(monkeypatch):
+    monkeypatch.setenv("RTVA_ASR_CONTEXT_WORKERS", "3")
+    assert Settings(_env_file=None).asr_context_workers == 3
+
+
+@pytest.mark.parametrize("workers", [0, -1, 33])
+def test_invalid_keyword_process_counts_are_rejected(workers):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, asr_context_workers=workers)
 
 
 def test_env_example_covers_every_runtime_setting() -> None:

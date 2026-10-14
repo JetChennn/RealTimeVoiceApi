@@ -1,9 +1,11 @@
 import asyncio
 import json
 import logging
+import multiprocessing
 import threading
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from realtime_voice.audio.vad import SpeechSegment
@@ -21,6 +23,41 @@ from tests.unit.session.test_runtime import make_runtime
 def mark_downstream_ok(app) -> None:
     for state in app.state.services.downstream_health.values():
         state["status"] = "ok"
+
+
+def test_keyword_process_count_is_wired_to_shared_application_service():
+    app = create_app(Settings(_env_file=None, asr_context_workers=3))
+    assert app.state.services.asr_keyword_extractor.workers == 3
+    assert app.state.services.asr_keyword_extractor._pool is None
+    disabled = create_app(Settings(_env_file=None, asr_context_enabled=False))
+    assert disabled.state.services.asr_keyword_extractor is None
+
+
+def test_startup_failure_reclaims_already_warmed_keyword_processes():
+    app = create_app(Settings(_env_file=None, turn_end_semantic_enabled=False))
+    extractor = app.state.services.asr_keyword_extractor
+
+    class BrokenEmbedder:
+        closed = False
+
+        async def start(self):
+            assert len(extractor._worker_pids) == 2
+            raise RuntimeError("test model initialization failure")
+
+        async def aclose(self):
+            self.closed = True
+
+    embedder = app.state.services.speaker_embedder = BrokenEmbedder()
+    with (
+        pytest.raises(RuntimeError, match="test model initialization failure"),
+        TestClient(app),
+    ):
+        pass
+    assert extractor._closed
+    assert not set(extractor._worker_pids) & {
+        child.pid for child in multiprocessing.active_children()
+    }
+    assert embedder.closed
 
 
 def test_health_reports_ready():

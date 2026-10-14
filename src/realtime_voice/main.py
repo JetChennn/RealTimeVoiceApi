@@ -167,38 +167,41 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        if services.asr_keyword_extractor is not None:
-            await services.asr_keyword_extractor.start()
-        if services.speaker_embedder is not None:
-            await services.speaker_embedder.start()
-        if resolved.turn_end_semantic_enabled:
-            from realtime_voice.turn_end.model import SemanticDetector
-
-            services.semantic_detector = SemanticDetector(resolved, services.metrics)
-            await services.semantic_detector.start()
-        sampler = asyncio.create_task(
-            run_event_loop_lag_sampler(
-                services.metrics,
-                interval=event_loop_interval,
-                clock=event_loop_clock,
-                sleep=event_loop_sleep,
-            ),
-            name="event-loop-lag-sampler",
-        )
-        prober = asyncio.create_task(
-            run_downstream_health_prober(
-                services,
-                interval=resolved.downstream_probe_interval_seconds,
-                timeout=resolved.downstream_probe_timeout_seconds,
-            ),
-            name="downstream-health-prober",
-        )
+        background_tasks: list[asyncio.Task] = []
         try:
+            if services.asr_keyword_extractor is not None:
+                await services.asr_keyword_extractor.start()
+            if services.speaker_embedder is not None:
+                await services.speaker_embedder.start()
+            if resolved.turn_end_semantic_enabled:
+                from realtime_voice.turn_end.model import SemanticDetector
+
+                services.semantic_detector = SemanticDetector(resolved, services.metrics)
+                await services.semantic_detector.start()
+            background_tasks.append(asyncio.create_task(
+                run_event_loop_lag_sampler(
+                    services.metrics,
+                    interval=event_loop_interval,
+                    clock=event_loop_clock,
+                    sleep=event_loop_sleep,
+                ),
+                name="event-loop-lag-sampler",
+            ))
+            background_tasks.append(asyncio.create_task(
+                run_downstream_health_prober(
+                    services,
+                    interval=resolved.downstream_probe_interval_seconds,
+                    timeout=resolved.downstream_probe_timeout_seconds,
+                ),
+                name="downstream-health-prober",
+            ))
             yield
         finally:
-            sampler.cancel()
-            prober.cancel()
-            await asyncio.gather(sampler, prober, return_exceptions=True)
+            # Also reclaim prewarmed keyword processes if a later model fails
+            # during startup, before the application ever reaches yield.
+            for task in background_tasks:
+                task.cancel()
+            await asyncio.gather(*background_tasks, return_exceptions=True)
             if services.semantic_detector is not None:
                 await services.semantic_detector.aclose()
             if services.speaker_embedder is not None:

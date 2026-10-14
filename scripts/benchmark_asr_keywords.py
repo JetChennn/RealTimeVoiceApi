@@ -4,12 +4,11 @@ import argparse
 import asyncio
 import json
 import math
+import os
 from collections import Counter
 from time import monotonic
 
 from realtime_voice.clients.asr_keywords import AsrKeywordExtractor
-from realtime_voice.session.runtime import SessionRuntime
-from realtime_voice.session.state import SessionState, TurnContext, TurnStage
 
 
 def percentiles(values):
@@ -20,10 +19,20 @@ def percentiles(values):
     } if ordered else {}
 
 
-async def main(budgets_ms, rounds):
-    extractor = AsrKeywordExtractor()
+async def main(budgets_ms, rounds, workers, concurrency):
+    # Spawned workers re-import this script: do not load the gateway/Torch there.
+    from realtime_voice.session.runtime import SessionRuntime
+    from realtime_voice.session.state import SessionState, TurnContext, TurnStage
+
+    extractor = AsrKeywordExtractor(workers=workers)
+    started = monotonic()
     await extractor.start()
-    reports = {}
+    reports = {"environment": {
+        "backend": "process", "workers": workers, "concurrency": concurrency,
+        "cpu_count": os.cpu_count(), "gateway_pid": os.getpid(),
+        "worker_pids": extractor._worker_pids,
+        "startup_ms": round((monotonic() - started) * 1000, 3),
+    }}
     texts = {
         "short": "李白在杭州游览西湖，还去过北京。",
         "medium": "李白在杭州游览西湖，那里有美丽的风景。" * 10,
@@ -33,10 +42,18 @@ async def main(budgets_ms, rounds):
     try:
         for name, text in texts.items():
             durations = []
+            roundtrips = []
             for _ in range(100):
-                result = extractor.extract_sync(text)
+                started = monotonic()
+                result = await extractor.extract(text, deadline=started + 2)
+                if result.status not in {"success", "empty"}:
+                    raise RuntimeError(f"single extraction failed: {result.status}")
                 durations.append(result.compute_seconds)
-            reports[name] = {"chars": len(text), "compute": percentiles(durations)}
+                roundtrips.append(monotonic() - started)
+            reports[name] = {
+                "chars": len(text), "compute": percentiles(durations),
+                "roundtrip": percentiles(roundtrips),
+            }
 
         class Worker:
             async def run(self):
@@ -47,7 +64,7 @@ async def main(budgets_ms, rounds):
                 state=SessionState("u", str(i), 16000), asr_client=None,
                 thinker_client=None, tts_client=None, receiver=Worker(),
                 vad_worker=Worker(), sender=Worker(), asr_keyword_extractor=extractor,
-            ) for i in range(30)
+            ) for i in range(concurrency)
         ]
         for runtime in runtimes:
             runtime.actor.state.turns[1] = TurnContext(
@@ -79,7 +96,7 @@ async def main(budgets_ms, rounds):
             try:
                 await asyncio.sleep(0.005)
                 for _ in range(rounds):
-                    await asyncio.gather(*(job(i) for i in range(30)))
+                    await asyncio.gather(*(job(i) for i in range(concurrency)))
                     await asyncio.sleep(0.025)
                     # Do not let timed-out work contaminate the next sample.
                     while extractor._inflight:
@@ -96,9 +113,9 @@ async def main(budgets_ms, rounds):
                 "compute": percentiles(compute), "asr_cache_lookup": percentiles(lookup),
             }
 
-        reports["30_session_burst"] = {
+        reports[f"{concurrency}_session_burst"] = {
             name: {str(budget): await burst(texts[name], budget) for budget in budgets_ms}
-            for name in ("medium", "unknown_names")
+            for name in ("medium", "unknown_names", "long")
         }
         print(json.dumps(reports, ensure_ascii=False, indent=2))
     finally:
@@ -107,9 +124,13 @@ async def main(budgets_ms, rounds):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--budgets-ms", nargs="+", type=float, default=[20, 50, 100])
+    parser.add_argument("--budgets-ms", nargs="+", type=float, default=[100])
     parser.add_argument("--rounds", type=int, default=15)
+    parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--concurrency", type=int, default=30)
     args = parser.parse_args()
     if args.rounds < 1 or any(not math.isfinite(b) or b <= 0 for b in args.budgets_ms):
         parser.error("rounds and budgets must be positive and finite")
-    asyncio.run(main(args.budgets_ms, args.rounds))
+    if args.workers < 1 or args.concurrency < 1:
+        parser.error("workers and concurrency must be positive")
+    asyncio.run(main(args.budgets_ms, args.rounds, args.workers, args.concurrency))

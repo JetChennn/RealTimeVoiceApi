@@ -39,6 +39,7 @@ def configure_services(services: AppServices) -> None:
         AsrKeywordExtractor(
             max_keywords=settings.asr_context_max_keywords,
             max_chars=settings.asr_context_max_chars,
+            workers=settings.asr_context_workers,
         )
         if settings.asr_context_enabled
         else None
