@@ -205,6 +205,9 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_ASR_CONTEXT_MAX_KEYWORDS` | `12` | 同左 | 最多保留的去重关键词数量 |
 | `RTVA_ASR_CONTEXT_MAX_CHARS` | `128` | 同左 | context 字符预算，包含词间空格，不截断单个词 |
 | `RTVA_ASR_CONTEXT_EXTRACT_TIMEOUT_MS` | `100` | 同左 | 后台关键词结果有效时间，包含排队；超时不阻塞对话 |
+| `RTVA_ASR_FILLER_FILTER_ENABLED` | `true` | 同左 | 是否静默过滤完整输入中的纯语气词 |
+| `RTVA_ASR_FILLER_FILTER_CHARS` | `嗯哦噢喔啊呃额` | 同左 | 可过滤的单字符集合；不得为空或包含空白、标点，不是分词词典 |
+| `RTVA_ASR_FILLER_FILTER_MAX_CHARS` | `6` | 同左 | 忽略空白和标点后，允许过滤的最多字符数 |
 | `RTVA_THINKER_STREAM_TIMEOUT_SECONDS` | `5` | 同左 | Thinker 回复首字超时；超时后触发网关保底回复 |
 | `RTVA_THINKER_REPLY_TOTAL_TIMEOUT_SECONDS` | `20` | 同左 | Thinker 回复总时长上限；超时后触发网关保底回复 |
 | `RTVA_THINKER_CONCURRENCY` / `RTVA_THINKER_MAX_WAITERS` | `30` / `64` | 同左 | Thinker 回复流的并发上限与等待队列上限 |
@@ -220,6 +223,8 @@ curl http://127.0.0.1:8000/metrics   # Prometheus 指标
 | `RTVA_VAD_MIN_SPEECH_MS` | `200` | 同左 | VAD 片段累计有效发声不足此时长时直接过滤，降低“嗯、好”和瞬态噪声误触发 |
 
 ASR context 使用 jieba 自带词典和普通词性标注，保留 `nr/ns/nt/nz` 专名及其子类，无需自定义词典。网关启动时预热；Thinker 正常完成后，通过共享的 2 线程、32 等待任务后台池分析回复末尾最多 2048 字符，按原文顺序去重，排除单字、纯数字和标点，得到空格分隔的完整词组。最近一条合格回复的关键词为空、仍在提取、失败或超时，都发送空 context，不改用整段回复或更早话题。只有紧邻轮次本身尚未正常完成、已中断或为保底时，才按原有规则寻找更早的合格轮次。ASR 不等待提取任务；断连、轮次中断及生成代次变化后的结果会被丢弃。内置词典可能漏掉陌生姓名、昵称和领域术语，关键词只是识别提示，不保证准确率提升。
+
+纯语气词过滤在完整用户输入提交时执行，语义分段模式会先合并所有片段。默认仅过滤全部由 `嗯、哦、噢、喔、啊、呃、额` 构成且不超过 6 个有效字符的输入，忽略空白和 Unicode 标点；只要包含 `?`、`？`、其他字符或超过长度上限就完整保留原文。例如 `嗯……` 被过滤，`嗯？`、`嗯，我想去杭州。`、`好`、`不` 均保留。不删除句子内部语气词，不额外调用模型或线程池，不修改 VAD 阈值。命中后不创建轮次、不发送 `ASR_RESULT`、不调用 Thinker/TTS，也不打断已有生成或播放；仅记录 `user_input_filtered` 的原因和字符数，不记录正文。单独的 `嗯` 即使表示肯定也会被过滤，这是本规则的已知边界；需要保留时可关闭开关。修改配置后需重启网关。
 
 说话人验证默认关闭；开启后使用 WeSpeaker 导出的 16 kHz ONNX 模型。服务启动时只加载一个共享模型实例，每个会话最多保留一个由客户端显式注册的参考声纹，重复注册时成功结果原子覆盖旧声纹，失败时保留旧声纹，断连时立即清除。将模型文件预先放到 `RTVA_SPEAKER_MODEL_PATH`（默认 `models/wespeaker/cnceleb_resnet34.onnx`）；`start_services.sh` 会在启动网关前检查该文件。
 
@@ -479,6 +484,7 @@ Prometheus 格式，包含会话数、各队列水位、限流器占用、执行
 | `realtime_voice_semantic_results_total{status="..."}` | `end`、`wait`、`timeout`、`overloaded`、`failed`、`cancelled` 结果数 |
 | `realtime_voice_turn_end_commits_total{reason="..."}` | 按 `semantic_end`、`max_silence`、`max_utterance` 统计提交原因 |
 | `realtime_voice_asr_context_requests_total{status="..."}` | 按 `provided`、`unavailable`、`disabled` 统计 ASR context 使用情况 |
+| `realtime_voice_user_inputs_filtered_total{reason="filler_only"}` | 完整用户输入中的纯语气词过滤次数，不含正文或 turn id 标签 |
 | `realtime_voice_asr_context_chars` | 实际传入 ASR 的非空 context 字符数直方图 |
 | `realtime_voice_asr_keyword_extractions_total{status="..."}` | `success/empty/timeout/overloaded/failed` 提取结果数 |
 | `realtime_voice_asr_keyword_extraction_seconds` | 后台提取总耗时，包含排队 |

@@ -6,6 +6,32 @@ from pydantic import ValidationError
 from realtime_voice.config import Settings
 
 
+def test_filler_filter_defaults_and_environment(monkeypatch):
+    settings = Settings(_env_file=None)
+    assert settings.asr_filler_filter_enabled is True
+    assert settings.asr_filler_filter_chars == "嗯哦噢喔啊呃额"
+    assert settings.asr_filler_filter_max_chars == 6
+    monkeypatch.setenv("RTVA_ASR_FILLER_FILTER_ENABLED", "false")
+    monkeypatch.setenv("RTVA_ASR_FILLER_FILTER_CHARS", "嗯嗯啊")
+    monkeypatch.setenv("RTVA_ASR_FILLER_FILTER_MAX_CHARS", "2")
+    settings = Settings(_env_file=None)
+    assert settings.asr_filler_filter_enabled is False
+    assert settings.asr_filler_filter_chars == "嗯啊"
+    assert settings.asr_filler_filter_max_chars == 2
+
+
+@pytest.mark.parametrize("chars", ["", "嗯 哦", "嗯？", "啊?", "嗯，", "嗯\n"])
+def test_invalid_filler_character_sets_fail_validation(chars):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, asr_filler_filter_chars=chars)
+
+
+@pytest.mark.parametrize("limit", [0, -1, 129])
+def test_invalid_filler_limits_fail_validation(limit):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, asr_filler_filter_max_chars=limit)
+
+
 def test_settings_defaults():
     settings = Settings(_env_file=None)
 

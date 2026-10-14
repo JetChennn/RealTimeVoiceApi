@@ -56,6 +56,7 @@ from realtime_voice.session.actor import (
     ExtractAsrKeywords,
     QueueAsr,
     RecordDiscardedAudio,
+    RecordFilteredInput,
     RecordStaleEvent,
     RecordThinkerFallback,
     SendBistreamText,
@@ -84,6 +85,7 @@ from realtime_voice.session.events import (
     TtsFailed,
     UserInputCommitted,
 )
+from realtime_voice.session.input_filter import DEFAULT_FILLER_CHARS, FillerFilter
 from realtime_voice.session.registry import SessionRegistry
 from realtime_voice.session.state import TERMINAL_TURN_STAGES, SessionState, TurnStage
 
@@ -304,6 +306,9 @@ class SessionRuntime:
         asr_context_enabled: bool = True,
         asr_keyword_extractor: AsrKeywordExtractor | None = None,
         asr_context_extract_timeout_ms: float = 100,
+        asr_filler_filter_enabled: bool = True,
+        asr_filler_filter_chars: str = DEFAULT_FILLER_CHARS,
+        asr_filler_filter_max_chars: int = 6,
         thinker_stream_timeout: float = 5.0,
         thinker_reply_total_timeout: float = 20.0,
         thinker_fallback_enabled: bool = False,
@@ -335,6 +340,11 @@ class SessionRuntime:
 
         self.actor = SessionActor(
             state,
+            filler_filter=FillerFilter(
+                enabled=asr_filler_filter_enabled,
+                chars=asr_filler_filter_chars,
+                max_chars=asr_filler_filter_max_chars,
+            ),
             thinker_fallback=ThinkerFallbackPolicy(
                 enabled=thinker_fallback_enabled,
                 texts=thinker_fallback_texts,
@@ -709,6 +719,13 @@ class SessionRuntime:
             if self._metrics is not None:
                 self._metrics.record_discarded_tts_chunk(byte_count=effect.byte_count)
             return
+        if isinstance(effect, RecordFilteredInput):
+            self._observe(
+                "user_input_filtered", reason=effect.reason, text_chars=effect.char_count,
+            )
+            if self._metrics is not None:
+                self._metrics.record_filtered_input(effect.reason)
+            return
         if isinstance(effect, RecordThinkerFallback):
             self._observe(
                 "thinker_fallback_selected",
@@ -892,7 +909,8 @@ class SessionRuntime:
         next_turn_id = self.actor.state.next_turn_id
         effects = self.actor.handle(event)
         if isinstance(event, UserInputCommitted):
-            self._turn_speech_ends[next_turn_id] = event.speech_end_at
+            if self.actor.state.next_turn_id == next_turn_id + 1:
+                self._turn_speech_ends[next_turn_id] = event.speech_end_at
         elif isinstance(event, AsrSucceeded):
             speech_end = self._speech_ends.pop(event.segment_id, None)
             if speech_end is not None and self._metrics is not None:

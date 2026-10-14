@@ -51,6 +51,11 @@ class Metrics:
         self.speech_end_to_asr = Histogram(
             "realtime_voice_speech_end_to_asr_seconds", "Speech end to ASR", registry=r
         )
+        self.user_inputs_filtered = Counter(
+            "realtime_voice_user_inputs_filtered",
+            "Complete user inputs silently filtered before turn creation",
+            ["reason"], registry=r,
+        )
         self.asr_context_requests = Counter(
             "realtime_voice_asr_context_requests",
             "ASR requests grouped by context availability",
@@ -174,6 +179,9 @@ class Metrics:
 
     def observe_speech_end_to_asr(self, seconds: float) -> None:
         self._safe(self.speech_end_to_asr.observe, seconds)
+
+    def record_filtered_input(self, reason: str) -> None:
+        self._safe(self.user_inputs_filtered.labels(reason).inc)
 
     def record_asr_context(self, status: str, *, char_count: int) -> None:
         self._safe(self.asr_context_requests.labels(status).inc)

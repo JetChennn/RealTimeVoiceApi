@@ -39,6 +39,7 @@ from realtime_voice.session.events import (
     UserInputCommitted,
     UserInputFailed,
 )
+from realtime_voice.session.input_filter import FillerFilter
 from realtime_voice.session.state import (
     TERMINAL_TURN_STAGES,
     SessionState,
@@ -153,6 +154,14 @@ class RecordThinkerFallback:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordFilteredInput:
+    """仅记录过滤原因及有效字符数，不携带输入正文。"""
+
+    char_count: int
+    reason: str = "filler_only"
+
+
+@dataclass(frozen=True, slots=True)
 class CloseRuntime:
     """关闭会话运行时。"""
 
@@ -187,6 +196,7 @@ SessionEffect: TypeAlias = (
     | EndBistreamTts
     | CancelBistreamTts
     | RecordThinkerFallback
+    | RecordFilteredInput
     | CloseRuntime
     | RecordStaleEvent
     | RecordDiscardedAudio
@@ -204,11 +214,13 @@ class SessionActor:
         *,
         thinker_fallback: ThinkerFallbackPolicy | None = None,
         bistream_enabled: bool = False,
+        filler_filter: FillerFilter | None = None,
         fallback_selector: Callable[[tuple[str, ...]], str] = choice,
     ):
         self.state = state
         self._thinker_fallback = thinker_fallback
         self._bistream_enabled = bistream_enabled
+        self._filler_filter = filler_filter if filler_filter is not None else FillerFilter()
         self._fallback_selector = fallback_selector
         if thinker_fallback is not None and thinker_fallback.enabled:
             if not thinker_fallback.texts or any(not text.strip() for text in thinker_fallback.texts):
@@ -304,6 +316,10 @@ class SessionActor:
         return self._commit_user_input(event)
 
     def _commit_user_input(self, event: AsrSucceeded | UserInputCommitted) -> list[SessionEffect]:
+        # 语义模式只在片段合并后判断；必须早于打断、分配 turn_id 和出站消息。
+        char_count = self._filler_filter.filtered_char_count(event.text)
+        if char_count is not None:
+            return [RecordFilteredInput(char_count)]
         # 新一轮用户输入到达：打断所有未完成轮次，开新轮并入 LLM 队列
         effects = self._interrupt_unfinished_turns()
         turn_id = self.state.next_turn_id

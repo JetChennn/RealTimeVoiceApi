@@ -47,6 +47,7 @@ from realtime_voice.session.events import (
     TtsChunkReceived,
     TtsCompleted,
     TtsFailed,
+    UserInputCommitted,
 )
 from realtime_voice.session.runtime import (
     BoundedByteQueue,
@@ -391,6 +392,45 @@ def make_runtime(
         **runtime_options,
     )
     return runtime, (resolved_receiver, vad, resolved_sender)
+
+
+@pytest.mark.parametrize("semantic", [False, True])
+async def test_filtered_input_cleans_timing_and_records_metadata_only(caplog, semantic):
+    metrics = Metrics()
+    logger = logging.getLogger(f"test.filler.{semantic}")
+    runtime, _ = make_runtime(metrics=metrics, logger=logger, clock=lambda: 20.0)
+    text = "嗯，哦！"
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        if semantic:
+            await runtime._handle_actor_event(
+                UserInputCommitted("s", text, valid_wav(), 19.0, "semantic_end")
+            )
+        else:
+            await runtime._handle_actor_event(SpeechSegmentReady("s", SpeechSegment(1, bytes(2))))
+            await runtime._handle_actor_event(AsrSucceeded("s", 1, text, valid_wav()))
+    assert runtime.actor.state.turns == {}
+    assert runtime.actor.state.pending_asr_segment_ids == set()
+    assert runtime.actor.state.next_turn_id == 1
+    assert runtime._speech_ends == {}
+    assert runtime._turn_speech_ends == {}
+    assert runtime.outbound.empty()
+    assert not runtime._llm_milestones
+    filtered = next(
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "user_input_filtered"
+    )
+    assert filtered["reason"] == "filler_only"
+    assert filtered["text_chars"] == 2
+    assert "turn_id" not in filtered
+    assert (
+        metrics.registry.get_sample_value(
+            "realtime_voice_user_inputs_filtered_total", {"reason": "filler_only"}
+        )
+        == 1
+    )
+    assert text not in caplog.text
+    assert text not in metrics.render().decode()
 
 
 async def test_interrupt_purges_only_that_turns_queued_audio_and_fixes_byte_count() -> None:

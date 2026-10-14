@@ -1,7 +1,10 @@
 from typing import Literal
+from unicodedata import category
 
 from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from realtime_voice.session.input_filter import DEFAULT_FILLER_CHARS
 
 
 class Settings(BaseSettings):
@@ -31,6 +34,9 @@ class Settings(BaseSettings):
     asr_context_max_keywords: int = Field(default=12, ge=1, le=128)
     asr_context_max_chars: int = Field(default=128, ge=1, le=4096)
     asr_context_extract_timeout_ms: float = Field(default=100, gt=0, allow_inf_nan=False)
+    asr_filler_filter_enabled: bool = True
+    asr_filler_filter_chars: str = DEFAULT_FILLER_CHARS
+    asr_filler_filter_max_chars: int = Field(default=6, ge=1, le=128)
     handshake_timeout_seconds: float = Field(default=5.0, gt=0)
     session_event_queue_size: int = Field(default=256, ge=1)
     session_audio_queue_size: int = Field(default=64, ge=1)
@@ -87,6 +93,13 @@ class Settings(BaseSettings):
     turn_end_max_pending_jobs: int = Field(default=32, ge=0)
     turn_end_max_utterance_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     turn_end_cpu_threads: int = Field(default=16, ge=1, le=16)
+
+    @field_validator("asr_filler_filter_chars")
+    @classmethod
+    def validate_filler_chars(cls, value: str) -> str:
+        if not value or any(char.isspace() or category(char).startswith("P") for char in value):
+            raise ValueError("filler characters must be non-empty and exclude whitespace/punctuation")
+        return "".join(dict.fromkeys(value))
 
     @field_validator(
         "thinker_fallback_text_1",

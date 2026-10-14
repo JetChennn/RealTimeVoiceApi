@@ -55,6 +55,7 @@ _SAFE = frozenset(
         "replaced",
         "context_status",
         "context_chars",
+        "text_chars",
         "context_turn_id",
         "keyword_count",
     }

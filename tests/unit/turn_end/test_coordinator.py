@@ -2,9 +2,12 @@ import asyncio
 import io
 import wave
 
+import pytest
+
 from realtime_voice.audio.pcm import pcm16_wav_bytes
 from realtime_voice.config import Settings
 from realtime_voice.observability.metrics import Metrics
+from realtime_voice.session.actor import RecordFilteredInput, SessionActor
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
@@ -14,6 +17,7 @@ from realtime_voice.session.events import (
     UserInputCommitted,
     UserInputFailed,
 )
+from realtime_voice.session.state import SessionState
 from realtime_voice.turn_end.audio import TurnEndAudio
 from realtime_voice.turn_end.coordinator import TurnEndCoordinator
 from realtime_voice.turn_end.model import Decision
@@ -135,6 +139,48 @@ async def test_resumption_combines_once_and_does_not_commit_before_minimum():
         assert w.getnframes() == 52 * 512
     assert h.detector.calls == ["真不知道。", result.text]
     await h.coordinator.aclose()
+
+
+@pytest.mark.parametrize("second", ["啊！", "我想去杭州。"])
+async def test_filler_filter_runs_after_resumed_fragments_merge_and_release(second):
+    h = Harness(end=True, turn_end_min_silence_ms=1000)
+    actor = SessionActor(SessionState("u", "s", 16000))
+    try:
+        h.feed(True, 10)
+        h.feed(False, 16)
+        h.asr("嗯，")
+        await h.predictions()
+        assert h.outputs == []
+        h.feed(True, 10)
+        h.feed(False, 16)
+        h.asr(second)
+        await h.predictions()
+        h.feed(False, 16)
+        assert len(h.outputs) == 1
+        committed = h.outputs[0]
+        assert committed.text == f"嗯， {second}"
+        effects = actor.handle(committed)
+        if second == "啊！":
+            assert effects == [RecordFilteredInput(2)]
+            assert actor.state.turns == {}
+        else:
+            assert actor.state.turns[1].asr_text == committed.text
+        assert h.coordinator.inputs == {}
+        assert h.coordinator.segment_inputs == {}
+        assert not h.audio.started
+        assert not h.audio.fragment
+        assert h.audio.input_id == 2
+        # 过滤完的输入已退休，后续输入不受影响。
+        h.outputs.clear()
+        h.feed(True, 10)
+        h.feed(False, 32)
+        h.asr("继续介绍")
+        await h.predictions()
+        assert len(h.outputs) == 1
+        actor.handle(h.outputs[0])
+        assert actor.state.turns[actor.state.next_turn_id - 1].asr_text == "继续介绍"
+    finally:
+        await h.coordinator.aclose()
 
 
 async def test_semantic_end_commits_immediately_when_minimum_is_zero():
