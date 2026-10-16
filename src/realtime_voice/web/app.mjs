@@ -1,10 +1,11 @@
-import {STAGES, parseMetrics, metricDelta, parseScenes, base64Pcm, decodePcm, wavBlob, isStaleAudioChunk, shouldDropAudioDelta} from './core.mjs?v=20261008-tts-cancel-1';
+import {STAGES, parseMetrics, metricDelta, parseScenes, base64Pcm, decodePcm, wavBlob, isStaleAudioChunk, shouldDropAudioDelta, createChatScroller, createTimingPanel, renderTurnTiming, acceptTimingSnapshot, finishTimingSnapshot} from './core.mjs?v=20261015-turn-timing-1';
 
 const $ = id => document.getElementById(id);
 const url = new URL('/v1/realtime', location.href);
 url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 $('endpoint').textContent = `WebSocket：${url.href} · 指标：${location.origin}/metrics`;
 $('connection').textContent = location.host;
+const chat = createChatScroller($('chat-viewport'), $('chat-latest'));
 const descriptions = {
   semantic: ['语义判断总耗时', '排队 → 判断返回（含超时）'],
   semantic_inference: ['语义模型执行', '实际预处理与推理耗时'],
@@ -12,7 +13,8 @@ const descriptions = {
   asr: ['ASR 识别', '转写调用 → 识别完成'],
   thinker: ['LLM 首包', '回复调用 → 首段文本'],
   tts: ['TTS 首音频', '合成调用 → 首块可发送音频'],
-  speech_end_to_first_tts_excluding_silence: ['说完话 → TTS 首帧', '末段有效语音结束 → 首块音频；已扣除实际尾部静音'],
+  vad_ready_to_first_tts: ['VAD 切段 → 首音', '新口径 · 最终切段 → 网关首块可发送音频'],
+  speech_end_to_first_tts_excluding_silence: ['旧：扣静音首音', '旧口径 · 最后发声 → 首音减累计静音'],
 };
 // 按 code 前置一句友好提示，便于理解超时/会话忙类错误；原文案仍完整展示。
 const errorHints = {
@@ -64,7 +66,9 @@ function resetSpeakerPanel() {
   setSpeakerSimilarity(null);
   setSpeakerButton(`录取声纹（${speakerRegisterSeconds} 秒）`);
   $('speaker-register').disabled = true;
-  $('speaker-detail').textContent = '注册前不会过滤普通语音；声纹仅保存在当前会话中。';
+  $('speaker-detail').textContent = active?.ready
+    ? '点击录取声纹，连续说话 3 秒；未注册时不会过滤普通语音。'
+    : '开始对话后可录取声纹，连续说话 3 秒。';
 }
 function updateSpeakerStatus(session, message) {
   const state = speakerStates[message.state] || message.state;
@@ -167,12 +171,17 @@ function stop(session = active, message = '已取消，连接已关闭', error =
     session.socket.close(1000, 'test ended');
   }
   for (const turn of turns.values()) if (!turn.done) finishTurn(turn, '已取消');
+  chat.changed();
   $('level').value = 0; $('mic-label').textContent = '麦克风已关闭';
+  setSpeakerTone('idle'); $('speaker-state').textContent = '会话已结束';
+  $('speaker-summary').textContent = '声纹已随会话结束清除';
+  $('speaker-detail').textContent = '重新开始对话后，可再次录取声纹。';
   $('metrics-status').textContent = '采样已停止'; lock(false); status(error ? '连接异常' : '已结束'); notice(message, error);
 }
 function clearTurns() {
   for (const turn of turns.values()) if (turn.objectUrl) URL.revokeObjectURL(turn.objectUrl);
   turns = new Map(); totalTurns = 0; $('turns').replaceChildren(); $('empty').classList.remove('hidden'); $('turn-count').textContent = '0 轮';
+  chat.reset();
 }
 function makeTurn(id) {
   if (turns.has(id)) return turns.get(id);
@@ -186,11 +195,12 @@ function makeTurn(id) {
     const text = document.createElement('p'); text.textContent = '…'; row.append(label, text); element.append(row); return text;
   }
   element.append(heading);
-  const asr = row('识别', 'asr'), reply = row('回复', 'reply');
+  const asr = row('你', 'asr'), reply = row('助手', 'reply');
   const audioRow = document.createElement('div'); audioRow.className = 'audio-row';
   const audioNote = document.createElement('span'); audioNote.className = 'audio-note'; audioNote.textContent = '等待语音';
   audioRow.append(audioNote); element.append(audioRow);
-  const turn = {id, element, asr, reply, state, audioRow, audioNote, text: '', chunks: [], audioBytes: 0, next: 0, rate: null, interrupted: false, done: false};
+  const timingPanel = createTimingPanel(document); element.append(timingPanel.element);
+  const turn = {id, element, asr, reply, state, audioRow, audioNote, timingPanel, timingSnapshot: null, text: '', chunks: [], audioBytes: 0, next: 0, rate: null, interrupted: false, done: false};
   turns.set(id, turn); $('turns').append(element); $('empty').classList.add('hidden');
   $('turn-count').textContent = `${++totalTurns} 轮 · 保留最近 50 轮`;
   // Remove completed records only; late terminal events still belong to their original turn.
@@ -207,6 +217,11 @@ function makeTurn(id) {
 }
 function finishTurn(turn, label) {
   turn.done = true; turn.state.textContent = label;
+  if (!turn.timingSnapshot || turn.timingSnapshot.status === 'pending') {
+    const terminal = {'已完成': 'completed', '已打断': 'interrupted', '失败': 'failed'}[label] || 'cancelled';
+    turn.timingSnapshot = finishTimingSnapshot(turn.timingSnapshot || {}, terminal);
+    renderTurnTiming(document, turn.timingPanel, turn.timingSnapshot);
+  }
   if (!turn.text) turn.reply.textContent = '本轮未生成回复';
   if (turn.objectUrl || !turn.chunks.length) {
     if (!turn.chunks.length && !turn.objectUrl) turn.audioNote.textContent = turn.interrupted ? '已打断，无可重播音频' : '无音频';
@@ -275,6 +290,12 @@ function receive(session, message) {
   if (!turn) return;
   if (message.interrupt) { turn.interrupted = true; turn.element.classList.add('interrupted'); }
   switch (message.type) {
+    case 'TURN_METRICS':
+      if (acceptTimingSnapshot(turn.timingSnapshot, message)) {
+        turn.timingSnapshot = message;
+        renderTurnTiming(document, turn.timingPanel, message);
+      }
+      break;
     case 'TURN_STATE':
       stopPlayback(session); turn.interrupted = true; turn.state.textContent = '已打断'; turn.element.classList.add('interrupted'); break;
     case 'TEXT_DELTA':
@@ -388,9 +409,9 @@ async function start() {
     session.connectTimer = setTimeout(() => stop(session, '连接或会话创建超时，请检查网关', true), 12000);
     socket.onopen = () => {
       if (active !== session) { socket.close(); return; }
-      socket.send(JSON.stringify({type: 'CREATE_SESSION', protocol_version: 1, device_id: $('device').value.trim(), session_id: session.id, audio_format: 'PCM16', audio_transport: 'BASE64_JSON', sample_rate: session.context.sampleRate, channels: 1, rag_enabled: $('rag').checked, scenes}));
+      socket.send(JSON.stringify({type: 'CREATE_SESSION', protocol_version: 1, device_id: $('device').value.trim(), session_id: session.id, audio_format: 'PCM16', audio_transport: 'BASE64_JSON', sample_rate: session.context.sampleRate, channels: 1, rag_enabled: $('rag').checked, scenes, enable_turn_metrics: true}));
     };
-    socket.onmessage = event => { try { receive(session, JSON.parse(event.data)); } catch (error) { stop(session, `处理消息失败：${error.message}`, true); } };
+    socket.onmessage = event => { try { receive(session, JSON.parse(event.data)); chat.changed(); } catch (error) { stop(session, `处理消息失败：${error.message}`, true); } };
     socket.onerror = () => stop(session, 'WebSocket 连接失败，请确认端口转发与网关状态', true);
     socket.onclose = () => stop(session, '网关已断开连接，录音已停止', true);
   } catch (error) {

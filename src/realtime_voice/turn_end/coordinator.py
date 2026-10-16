@@ -7,9 +7,11 @@ import io
 import wave
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from time import monotonic
 
 from realtime_voice.audio.pcm import pcm16_wav_bytes
 from realtime_voice.observability.logging import log_event
+from realtime_voice.observability.turn_timing import InputTiming, StageTiming, current_stage
 from realtime_voice.session.events import (
     AsrFailed,
     AsrSucceeded,
@@ -35,6 +37,7 @@ class PendingInput:
     requested: tuple[int, int] | None = None
     end: bool = False
     job: asyncio.Task | None = None
+    timing: InputTiming = field(default_factory=InputTiming)
 
 
 class TurnEndCoordinator:
@@ -49,9 +52,11 @@ class TurnEndCoordinator:
         context,
         *,
         user_id="unknown",
+        clock=monotonic,
     ):
         self.session_id = session_id
         self.user_id = user_id
+        self.clock = clock
         self.settings = settings
         self.detector = detector
         self.audio = audio
@@ -65,6 +70,8 @@ class TurnEndCoordinator:
 
     def cancel(self, item):
         if item.job is not None:
+            for stage in item.timing.semantics:
+                stage.finish("cancelled")
             item.job.cancel()
             item.job = None
 
@@ -84,6 +91,8 @@ class TurnEndCoordinator:
                 item.segments.setdefault(event.segment.segment_id, None)
                 self.segment_inputs[event.segment.segment_id] = input_id
                 item.forced |= event.force_commit
+                if event.timing is not None:
+                    item.timing.segments.append(event.timing)
             else:
                 if event.version != item.version:
                     self.cancel(item)
@@ -93,11 +102,14 @@ class TurnEndCoordinator:
                 item.silence_ms = event.silence_ms
                 item.speech_end_at = event.speech_end_at
                 item.forced |= event.force_commit
+                item.timing.version = item.version
         elif isinstance(event, AudioSegmentDiscarded):
             input_id = self.segment_inputs.pop(event.segment_id, None)
             if input_id not in self.inputs:
                 return output
             self.inputs[input_id].segments.pop(event.segment_id, None)
+            timing = self.inputs[input_id].timing
+            timing.segments = [s for s in timing.segments if s.segment_id != event.segment_id]
         elif isinstance(event, (AsrSucceeded, AsrFailed)):
             input_id = self.segment_inputs.pop(event.segment_id, None)
             if input_id not in self.inputs:
@@ -145,8 +157,13 @@ class TurnEndCoordinator:
                     self.cancel(item)
                     item.requested = key
                     item.end = False
+                    timing = StageTiming(
+                        "semantic", self.clock(), self.clock,
+                        version=item.version, segment_count=len(item.segments),
+                    )
+                    item.timing.semantics.append(timing)
                     item.job = asyncio.create_task(
-                        self._predict(item.input_id, key, " ".join(texts))
+                        self._predict(item.input_id, key, " ".join(texts), timing)
                     )
                     self.tasks.add(item.job)
                     item.job.add_done_callback(self.tasks.discard)
@@ -170,6 +187,8 @@ class TurnEndCoordinator:
             )
             if reason is None:
                 break
+            item.timing.wait(self.clock(), False)
+            item.timing.reason = reason
             self.cancel(item)
             del self.inputs[input_id]
             self.retired = input_id
@@ -190,6 +209,7 @@ class TurnEndCoordinator:
                         item.speech_end_at,
                         reason,
                         item.silence_ms,
+                        item.timing,
                     )
                 )
                 self.metrics.turn_end_commits.labels(reason).inc()
@@ -202,10 +222,32 @@ class TurnEndCoordinator:
                     reason=reason,
                     segment_count=len(item.segments),
                 )
+        for item in self.inputs.values():
+            busy = any(v is None for v in item.segments.values()) or any(
+                stage.finished_at is None for stage in item.timing.semantics
+            )
+            # Only silence-threshold waiting counts; queued inputs waiting for an
+            # older utterance, speech resumption and actual work are excluded.
+            eligible = (
+                not item.speaking and not item.failed and not item.forced and not busy
+                and bool(item.segments)
+                and item.silence_ms < self.settings.turn_end_max_silence_ms
+                and (not item.end or item.silence_ms < self.settings.turn_end_min_silence_ms)
+            )
+            item.timing.wait(self.clock(), eligible)
         return output
 
-    async def _predict(self, input_id, key, text):
-        decision = await self.detector.predict(self.context(), text)
+    async def _predict(self, input_id, key, text, timing):
+        token = current_stage.set(timing)
+        timing.begin()
+        try:
+            decision = await self.detector.predict(self.context(), text)
+            timing.finish(decision.status)
+        except asyncio.CancelledError:
+            timing.finish("cancelled")
+            raise
+        finally:
+            current_stage.reset(token)
         await self.events.put(
             SemanticEvaluated(
                 self.session_id,

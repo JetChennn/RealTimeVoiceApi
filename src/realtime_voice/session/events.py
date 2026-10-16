@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, TypeAlias
 
 if TYPE_CHECKING:
     from realtime_voice.audio.vad import SpeechSegment
+    from realtime_voice.observability.turn_timing import InputTiming, SegmentTiming
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,6 +17,8 @@ class SpeechSegmentReady:
     speech_end_at: float | None = None
     input_id: int = 0
     force_commit: bool = False
+    ready_at: float | None = None
+    timing: SegmentTiming | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +38,7 @@ class AsrSucceeded:
     audio_wav: bytes
     # VAD 在这段用户输入末尾已经确认的静音；用于首音指标扣除静音等待。
     trailing_silence_ms: float = 0.0
+    timing: SegmentTiming | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +155,7 @@ class UserInputCommitted:
     reason: str
     # 语义结束器已观测到的真实尾部静音；不包含 ASR、语义推理或队列等待。
     trailing_silence_ms: float = 0.0
+    timing: InputTiming | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -24,7 +24,10 @@ class EndModel:
 
 
 @pytest.mark.parametrize("end", [True, False])
-def test_real_transport_asr_accumulation_emits_one_turn_and_releases_session(monkeypatch, end):
+@pytest.mark.parametrize("turn_metrics", [False, True])
+def test_real_transport_asr_accumulation_emits_one_turn_and_releases_session(
+    monkeypatch, end, turn_metrics,
+):
     from realtime_voice.transport import factory
     from realtime_voice.turn_end import model
 
@@ -55,7 +58,10 @@ def test_real_transport_asr_accumulation_emits_one_turn_and_releases_session(mon
             "pending_jobs": 0,
         }
         with client.websocket_connect("/v1/realtime") as ws:
-            ws.send_json(_create())
+            create = _create()
+            if turn_metrics:
+                create["enable_turn_metrics"] = True
+            ws.send_json(create)
             assert ws.receive_json()["type"] == "SESSION_CREATED"
             seq = 0
             # Continuous input including all silence; no extra ASR of previous segments.
@@ -85,6 +91,16 @@ def test_real_transport_asr_accumulation_emits_one_turn_and_releases_session(mon
             assert messages[-1]["status"] == "COMPLETED"
             assert any(m["type"] == "AUDIO_DELTA" for m in messages)
             assert harness.asr.calls == 2
+            snapshots = [m for m in messages if m["type"] == "TURN_METRICS"]
+            assert bool(snapshots) == turn_metrics
+            if turn_metrics:
+                final = snapshots[-1]
+                assert final["status"] == "completed"
+                assert final["total"]["ms"] >= final["tts"]["ms"] >= 0
+                asr_details = [d for d in final["details"] if d["stage"] == "asr"]
+                assert len(asr_details) == 2
+                assert final["asr"]["ms"] == asr_details[-1]["ms"]
+                assert final["pre_segment_silence_ms"] >= 500
             runtime = services.registry._runtimes["session-1"]
             ws.send_json({"type": "CLOSE_SESSION", "session_id": "session-1"})
             deadline = time.monotonic() + 2

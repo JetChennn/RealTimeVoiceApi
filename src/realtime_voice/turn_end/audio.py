@@ -98,7 +98,8 @@ class TurnEndAudio:
             )
             result.append(
                 SpeechSegmentReady(
-                    self.session_id, segment, self.speech_end_at, self.input_id, limit
+                    self.session_id, segment, self.speech_end_at, self.input_id, limit,
+                    ready_at=self.clock(),
                 )
             )
             self.fragment.clear()

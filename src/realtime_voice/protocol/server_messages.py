@@ -103,6 +103,39 @@ class ResponseEnd(ServerMessageBase):
     status: Literal["COMPLETED", "INTERRUPTED", "FAILED"]
 
 
+class TimingValue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    queue_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    call_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    status: str
+
+
+class TimingDetail(TimingValue):
+    stage: Literal["asr", "semantic", "llm", "tts", "speaker"]
+    segment_id: int | None = None
+    version: int | None = None
+    generation: int = 0
+    offset_ms: float = Field(allow_inf_nan=False)
+
+
+class TurnMetrics(ServerMessageBase):
+    type: Literal["TURN_METRICS"]
+    sequence: int = Field(ge=1)
+    status: Literal["pending", "completed", "interrupted", "failed"]
+    commit_reason: str
+    fallback: bool
+    asr: TimingValue
+    semantic: TimingValue
+    llm: TimingValue
+    tts: TimingValue
+    total: TimingValue
+    pre_segment_silence_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    post_segment_wait_ms: float = Field(ge=0, allow_inf_nan=False)
+    details: list[TimingDetail]
+
+
 class ErrorMessage(ServerMessageBase):
     type: Literal["ERROR"]
     stage: str = Field(min_length=1)
@@ -121,6 +154,7 @@ ServerMessage = Annotated[
     | AudioDelta
     | TurnState
     | ResponseEnd
+    | TurnMetrics
     | ErrorMessage,
     Field(discriminator="type"),
 ]

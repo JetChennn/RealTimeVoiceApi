@@ -74,9 +74,58 @@ curl http://127.0.0.1:8000/health
 | `audio_transport` | 固定为 `BASE64_JSON` |
 | `channels` | 固定为 `1` |
 | `rag_enabled` | 可选，默认 `false` |
+| `enable_turn_metrics` | 可选布尔值，默认 `false`；开启后额外接收逐轮 `TURN_METRICS` 快照 |
 | `scenes` | 可选，默认 `[]`；去空白、去重后最多 3 个非空场景名 |
 
-除 RAG 字段外，其余字段必填，不要添加未定义字段。
+除 RAG 和逐轮指标字段外，其余字段必填，不要添加未定义字段。
+
+### 3.1 逐轮计时（可选）
+
+创建会话时设置 `"enable_turn_metrics": true`。未开启的会话不会收到新消息；协议版本仍为 1。测试台默认开启。计时均使用网关的单调时钟，单位为毫秒，不包括浏览器收包或播放缓冲。
+
+网关在 `ASR_RESULT` 建立轮次后推送首个快照，首段非空回复文本、首块可发送音频和本轮结束时更新。打断时立即冻结已有数据；终态快照在 `RESPONSE_END` 之前发送。客户端以 `(session_id, turn_id)` 关联，用单轮递增的 `sequence` 拒绝旧快照，并忽略终态后的更新。
+
+```json
+{
+  "type": "TURN_METRICS",
+  "user_id": "device-demo",
+  "session_id": "session-demo-001",
+  "turn_id": 1,
+  "interrupt": false,
+  "sequence": 4,
+  "status": "completed",
+  "commit_reason": "max_silence",
+  "fallback": false,
+  "asr": {"ms": 100, "queue_ms": 10, "call_ms": 90, "status": "completed"},
+  "semantic": {"ms": 20, "queue_ms": 2, "call_ms": 18, "status": "wait"},
+  "llm": {"ms": 200, "queue_ms": 0, "call_ms": 200, "status": "completed"},
+  "tts": {"ms": 100, "queue_ms": 0, "call_ms": 100, "status": "completed"},
+  "total": {"ms": 800, "status": "completed"},
+  "pre_segment_silence_ms": 500,
+  "post_segment_wait_ms": 380,
+  "details": [
+    {"stage": "asr", "segment_id": 1, "generation": 0, "offset_ms": 0,
+     "ms": 100, "queue_ms": 10, "call_ms": 90, "status": "completed"}
+  ]
+}
+```
+
+| 字段 | 计时口径 |
+|---|---|
+| `asr` | 最终有效语音段的 ASR 排队与识别；声纹预检单列，不混入 ASR |
+| `semantic` | 最终语音版本、最终分段组合对应的语义任务，提交到返回，包含执行器排队 |
+| `llm` | 输入提交并进入 LLM 队列到网关收到首段非空文本，包含会话排队、准入和 Thinker 内部 RAG |
+| `tts` | 网关提交合成任务到首块可发送音频，包含排队、通信和必要重采样；双向流包含后续文本等待 |
+| `total` | **最终有效语音段由 VAD 交出到网关首块可发送音频**，包含之后的处理与等待 |
+| `pre_segment_silence_ms` | 最终切段前已确认的尾部静音，不计入 `total` |
+| `post_segment_wait_ms` | 最终切段后，仅等待静音阈值且没有 ASR/语义任务排队或执行的区间，已包含在 `total` |
+| `details` | 全轮各段声纹/ASR、所有语义尝试和 LLM/TTS 明细；`offset_ms` 是任务提交相对最终切段的偏移，可为负值 |
+
+阶段的 `queue_ms` 包含网关会话排队与下游准入等待；`call_ms` 为其余调用耗时，包含无法从网关拆分的下游内部排队。LLM/TTS 可重叠，不能将阶段值直接相加得到总耗时。
+
+顶层 `status` 为 `pending`、`completed`、`interrupted` 或 `failed`。阶段还可能为 `end`、`wait`、`not_run`、`cancelled`、`timeout`、`not_produced`。成功到达的里程碑保留数值；缺失里程碑的 `ms` **省略**，不能当成 0。失败/取消尝试的已耗时间仅在 `details` 展示。语义未执行时显示 `not_run`，是否静音兜底由 `commit_reason` 判断；`fallback=true` 表示使用网关兜底文本，该文本不作为正常 LLM 首包。
+
+单独的 Prometheus 指标 `realtime_voice_vad_ready_to_first_tts_seconds` 使用相同总耗时口径，统计所有会话，不添加用户/轮次标签。已有指标保留原含义。
 
 RAG 在整个会话内固定：
 

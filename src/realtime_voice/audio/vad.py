@@ -403,6 +403,7 @@ class VadWorker:
                     session_id=self._session_id,
                     segment=segment,
                     speech_end_at=self._speech_end_at(segment),
+                    ready_at=self._clock(),
                 )
             )
 
@@ -426,6 +427,7 @@ class VadWorker:
                         session_id=self._session_id,
                         segment=segment,
                         speech_end_at=self._speech_end_at(segment),
+                        ready_at=self._clock(),
                     )
                 )
             await self._publish_ready_segments()
@@ -437,5 +439,6 @@ class VadWorker:
                     session_id=self._session_id,
                     segment=segment,
                     speech_end_at=self._speech_end_at(segment),
+                    ready_at=self._clock(),
                 )
             )

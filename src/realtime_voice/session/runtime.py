@@ -15,6 +15,13 @@ from realtime_voice.audio.pcm import pcm16_wav_bytes
 from realtime_voice.audio.resampler import StreamingResampler
 from realtime_voice.observability.logging import log_event
 from realtime_voice.observability.metrics import Metrics
+from realtime_voice.observability.turn_timing import (
+    InputTiming,
+    SegmentTiming,
+    StageTiming,
+    TurnTiming,
+    current_stage,
+)
 
 if TYPE_CHECKING:
     from realtime_voice.audio.vad import SpeechSegment
@@ -41,12 +48,16 @@ from realtime_voice.clients.tts import (
 )
 from realtime_voice.protocol.decoder import DecodedSpeakerRegister
 from realtime_voice.protocol.server_messages import (
+    AsrResult,
     AudioDelta,
     ErrorMessage,
     ResponseEnd,
     ServerMessage,
     SpeakerRegisterResult,
     SpeakerStatus,
+    TextDelta,
+    TextEnd,
+    TurnMetrics,
     TurnState,
 )
 from realtime_voice.session.actor import (
@@ -322,6 +333,7 @@ class SessionRuntime:
         turn_end_settings=None,
         semantic_detector=None,
         speaker_gate: SessionSpeakerGate | None = None,
+        enable_turn_metrics: bool = False,
     ) -> None:
         if min(event_queue_size, audio_queue_size, asr_queue_size, outbound_queue_size) < 1:
             raise ValueError("session queue sizes must be at least 1")
@@ -404,6 +416,10 @@ class SessionRuntime:
         self._metrics = metrics
         self._clock = clock
         self._speaker_gate = speaker_gate
+        self._enable_turn_metrics = enable_turn_metrics
+        self._segment_timings: dict[int, SegmentTiming] = {}
+        self._turn_timings: dict[int, TurnTiming] = {}
+        self._timing_dirty: set[int] = set()
         self._last_audio_backpressure_notice_at: float | None = None
 
         self._close_requested = asyncio.Event()
@@ -437,6 +453,7 @@ class SessionRuntime:
                 metrics,
                 self._semantic_context,
                 user_id=state.user_id,
+                clock=clock,
             )
 
     @property
@@ -535,7 +552,11 @@ class SessionRuntime:
         return (
             turn is not None
             and not turn.interrupted
-            and turn.stage in {TurnStage.STREAMING_LLM, TurnStage.STREAMING_TTS}
+            # Completed synthesis can still have valid audio waiting in the
+            # sender queue. Only failed/interrupted output must be suppressed.
+            and turn.stage in {
+                TurnStage.STREAMING_LLM, TurnStage.STREAMING_TTS, TurnStage.COMPLETED,
+            }
         )
 
     def report_outbound_discard(self, message: ServerMessage) -> None:
@@ -611,6 +632,10 @@ class SessionRuntime:
             return
         if isinstance(effect, SendOutbound):
             if isinstance(effect.message, TurnState):
+                timing = self._turn_timings.get(effect.message.turn_id)
+                if timing is not None:
+                    timing.finish("interrupted")
+                    self._timing_dirty.add(effect.message.turn_id)
                 # 先启用输出抑制并移除尚未发给设备的旧音频，再异步取消下游。
                 self._discard_queued_turn_audio(effect.message.turn_id)
                 self._signal_tts_interruption(effect.message.turn_id)
@@ -622,7 +647,19 @@ class SessionRuntime:
                 self._discard_queued_turn_audio(effect.message.turn_id)
             if not self._closing:
                 try:
+                    timing = self._turn_timings.get(effect.message.turn_id)
+                    if isinstance(effect.message, ResponseEnd) and timing is not None:
+                        timing.finish(effect.message.status.lower())
+                        self._timing_dirty.add(effect.message.turn_id)
+                        self._emit_turn_metrics(effect.message.turn_id)
                     self.outbound.put_nowait(effect.message)
+                    if isinstance(effect.message, (
+                        AsrResult, TextDelta, TextEnd, AudioDelta, TurnState, ErrorMessage,
+                    )):
+                        self._emit_turn_metrics(effect.message.turn_id)
+                    if isinstance(effect.message, ResponseEnd):
+                        self._turn_timings.pop(effect.message.turn_id, None)
+                        self._timing_dirty.discard(effect.message.turn_id)
                 except (asyncio.QueueFull, SessionQueueOverloaded) as error:
                     self.request_close()
                     self._observe(
@@ -643,6 +680,9 @@ class SessionRuntime:
             return
         if isinstance(effect, (StartThinker, StartNextThinker)):
             if not self._closing:
+                timing = self._turn_timings.get(effect.turn_id)
+                if timing is not None:
+                    timing.llm.generation = effect.generation
                 self._spawn_background(
                     self._run_thinker(effect),
                     tasks=self._thinker_tasks,
@@ -652,6 +692,7 @@ class SessionRuntime:
             return
         if isinstance(effect, StartTts):
             if not self._closing:
+                self._start_tts_timing(effect)
                 key = (effect.turn_id, effect.generation)
                 interrupt_signal = asyncio.Event()
                 self._tts_interrupt_signals[key] = interrupt_signal
@@ -672,6 +713,7 @@ class SessionRuntime:
                 key = (effect.turn_id, effect.generation)
                 if key in self._bistream_inputs:
                     return
+                self._start_tts_timing(effect)
                 inputs: asyncio.Queue[TtsInput] = asyncio.Queue(maxsize=256)
                 self._bistream_inputs[key] = inputs
                 interrupt_signal = asyncio.Event()
@@ -878,6 +920,8 @@ class SessionRuntime:
     async def _actor_loop(self) -> None:
         while True:
             event = await self.events.get()
+            if isinstance(event, SpeechSegmentReady):
+                event = self._prepare_segment_timing(event)
             if self.turn_end is not None:
                 if isinstance(event, SpeechSegmentReady):
                     self._speech_ends[event.segment.segment_id] = event.speech_end_at
@@ -890,6 +934,8 @@ class SessionRuntime:
                     self._speech_ends.pop(event.segment_id, None)
                 for ready in self.turn_end.process(event):
                     await self._handle_actor_event(ready)
+                if isinstance(event, (AsrSucceeded, AsrFailed, AudioSegmentDiscarded)):
+                    self._segment_timings.pop(event.segment_id, None)
             else:
                 await self._handle_actor_event(event)
 
@@ -901,13 +947,43 @@ class SessionRuntime:
                 generation=event.generation, status="timeout",
             )
         if isinstance(event, SpeechSegmentReady):
+            event = self._prepare_segment_timing(event)
             self._speech_ends.setdefault(
                 event.segment.segment_id,
                 event.speech_end_at if event.speech_end_at is not None else self._clock(),
             )
             self._observe("vad_segment_ready", segment_id=event.segment.segment_id)
         next_turn_id = self.actor.state.next_turn_id
+        timing = self._turn_timings.get(getattr(event, "turn_id", 0))
+        if timing is not None and timing.status == "pending":
+            if isinstance(event, (ThinkerFailed, ThinkerCompleted)):
+                if event.generation == timing.llm.generation:
+                    if isinstance(event, ThinkerFailed):
+                        timing.llm.finish("timeout" if "TIMEOUT" in event.code else "failed")
+                    else:
+                        timing.llm.finish("not_produced")
+                    self._timing_dirty.add(event.turn_id)
+            elif (
+                isinstance(event, TtsFailed) and timing.tts is not None
+                and event.generation == timing.tts.generation
+            ):
+                timing.tts.finish("timeout" if "TIMEOUT" in event.code else "failed")
+                self._timing_dirty.add(event.turn_id)
         effects = self.actor.handle(event)
+        if self.actor.state.next_turn_id == next_turn_id + 1:
+            source = event.timing if isinstance(event, UserInputCommitted) else None
+            if isinstance(event, AsrSucceeded) and event.timing is not None:
+                source = InputTiming(segments=[event.timing])
+            if source is not None:
+                self._turn_timings[next_turn_id] = TurnTiming(
+                    source, StageTiming("llm", self._clock(), self._clock),
+                )
+                self._timing_dirty.add(next_turn_id)
+        if timing is not None:
+            turn = self.actor.state.turns.get(getattr(event, "turn_id", 0))
+            if turn is not None and turn.thinker_fallback_used:
+                timing.fallback = True
+                self._timing_dirty.add(turn.turn_id)
         if isinstance(event, UserInputCommitted):
             if self.actor.state.next_turn_id == next_turn_id + 1:
                 self._turn_speech_ends[next_turn_id] = event.speech_end_at
@@ -920,6 +996,8 @@ class SessionRuntime:
         elif isinstance(event, (AsrFailed, AudioSegmentDiscarded)):
             # ASR 失败不产生 turn，也不再需要这段的结束时间，及时清理避免字典随段数无限增长
             self._speech_ends.pop(event.segment_id, None)
+        if isinstance(event, (AsrSucceeded, AsrFailed, AudioSegmentDiscarded)):
+            self._segment_timings.pop(event.segment_id, None)
         if isinstance(event, (ThinkerCompleted, ThinkerFailed, TtsCompleted, TtsFailed)):
             turn = self.actor.state.turns.get(event.turn_id)
             if turn is not None and turn.stage in TERMINAL_TURN_STAGES:
@@ -928,12 +1006,79 @@ class SessionRuntime:
         for effect in effects:
             await self.execute_effect(effect)
 
+    def _prepare_segment_timing(self, event: SpeechSegmentReady) -> SpeechSegmentReady:
+        timing = event.timing or self._segment_timings.get(event.segment.segment_id)
+        if timing is None:
+            ready_at = event.ready_at if event.ready_at is not None else self._clock()
+            timing = SegmentTiming(
+                event.segment.segment_id, ready_at,
+                event.segment.trailing_silence_samples / 16,
+                StageTiming("asr", ready_at, self._clock, segment_id=event.segment.segment_id),
+            )
+            self._segment_timings[event.segment.segment_id] = timing
+        return replace(event, timing=timing)
+
+    def _start_tts_timing(self, effect) -> None:
+        timing = self._turn_timings.get(effect.turn_id)
+        if timing is not None and timing.status == "pending":
+            timing.tts = StageTiming(
+                "tts", self._clock(), self._clock, generation=effect.generation,
+            )
+
+    def _emit_turn_metrics(self, turn_id: int) -> None:
+        timing = self._turn_timings.get(turn_id)
+        if timing is None or turn_id not in self._timing_dirty:
+            return
+        if self._enable_turn_metrics:
+            self.outbound.put_nowait(TurnMetrics(
+                type="TURN_METRICS", user_id=self.user_id, session_id=self.session_id,
+                turn_id=turn_id, interrupt=timing.status == "interrupted",
+                **timing.snapshot(),
+            ))
+        self._timing_dirty.discard(turn_id)
+
+    def _stage_timing(self, turn_id: int, generation: int, stage: str) -> StageTiming | None:
+        timing = self._turn_timings.get(turn_id)
+        turn = self.actor.state.turns.get(turn_id)
+        if timing is None or timing.status != "pending" or turn is None or turn.interrupted:
+            return None
+        result = timing.llm if stage == "llm" else timing.tts
+        active_generation = turn.thinker_generation if stage == "llm" else turn.tts_generation
+        if result is None or result.generation != generation or active_generation != generation:
+            return None
+        return result
+
+    def _record_first_audio(self, effect) -> None:
+        stage = self._stage_timing(effect.turn_id, effect.generation, "tts")
+        if stage is None or stage.finished_at is not None:
+            return
+        stage.finish()
+        timing = self._turn_timings[effect.turn_id]
+        if timing.first_audio_at is None:
+            timing.first_audio_at = self._clock()
+            if self._metrics is not None and timing.input.final is not None:
+                self._metrics.observe_vad_ready_to_first_tts(
+                    max(0, timing.first_audio_at - timing.input.final.ready_at),
+                )
+        self._timing_dirty.add(effect.turn_id)
+
     async def _asr_loop(self) -> None:
         while True:
             segment = await self._asr_queue.get()
+            timing = self._segment_timings.get(segment.segment_id)
             trace_id = self._segment_trace_id(segment.segment_id)
             if self._speaker_gate is not None:
+                if timing is not None:
+                    timing.speaker = StageTiming(
+                        "speaker", self._clock(), self._clock, segment_id=segment.segment_id,
+                    )
+                    timing.speaker.begin()
                 decision = await self._speaker_gate.evaluate(segment)
+                if timing is not None:
+                    timing.speaker.finish(decision.reason)
+                    timing.asr.excluded_seconds += (
+                        timing.speaker.finished_at - timing.speaker.submitted_at
+                    )
                 if self._metrics is not None:
                     self._metrics.record_speaker_decision(decision.reason)
                 self._observe(
@@ -979,6 +1124,9 @@ class SessionRuntime:
                         )
                     continue
             started = self._clock()
+            if timing is not None:
+                timing.asr.begin()
+            current_stage.set(timing.asr if timing is not None else None)
             context_status, context, context_turn_id = self._asr_context()
             self._observe(
                 "asr_started",
@@ -1053,6 +1201,11 @@ class SessionRuntime:
                     message=_error_message(error, "ASR transcription failed"),
                 )
             elapsed = self._clock() - started
+            current_stage.set(None)
+            if timing is not None:
+                timing.asr.finish("failed" if isinstance(event, AsrFailed) else "completed")
+                if isinstance(event, AsrSucceeded):
+                    event = replace(event, timing=timing)
             if self._metrics is not None:
                 self._metrics.observe_stage_latency("asr", elapsed)
                 if isinstance(event, AsrFailed):
@@ -1113,6 +1266,8 @@ class SessionRuntime:
 
     async def _run_thinker(self, effect: StartThinker | StartNextThinker) -> None:
         first_event_seen = False
+        stage = self._stage_timing(effect.turn_id, effect.generation, "llm")
+        current_stage.set(stage)
         trace_id = self._turn_trace_id(effect.turn_id)
         try:
             async with self._thinker_lock:
@@ -1146,6 +1301,8 @@ class SessionRuntime:
                 tone = ""
                 first_delta = True
                 first_delta_ts: float | None = None
+                if stage is not None:
+                    stage.begin()
                 started = self._clock()
                 self._observe(
                     "thinker_started",
@@ -1173,9 +1330,15 @@ class SessionRuntime:
                         except StopAsyncIteration:
                             break
                         if isinstance(item, ThinkerTextDelta):
-                            if first_delta:
+                            if first_delta and item.delta:
                                 first_delta = False
                                 first_delta_ts = self._clock()
+                                active_stage = self._stage_timing(
+                                    effect.turn_id, effect.generation, "llm",
+                                )
+                                if active_stage is not None:
+                                    active_stage.finish()
+                                    self._timing_dirty.add(effect.turn_id)
                                 elapsed = first_delta_ts - started
                                 self._observe(
                                     "thinker_first_delta",
@@ -1409,6 +1572,10 @@ class SessionRuntime:
     ) -> None:
         key = (effect.turn_id, effect.generation)
         first_audio = True
+        stage = self._stage_timing(effect.turn_id, effect.generation, "tts")
+        current_stage.set(stage)
+        if stage is not None:
+            stage.begin()
         started = self._clock()
         last_chunk_at: float | None = None
         chunk_count = 0
@@ -1462,6 +1629,7 @@ class SessionRuntime:
                 if output:
                     if first_audio:
                         first_audio = False
+                        self._record_first_audio(effect)
                         elapsed = self._clock() - started
                         self._observe(
                             "tts_first_audio",
@@ -1610,6 +1778,10 @@ class SessionRuntime:
         """将 Actor 指令队列桥接为 PromptTTSD 的全双工 WebSocket 会话。"""
         key = (effect.turn_id, effect.generation)
         first_audio = True
+        stage = self._stage_timing(effect.turn_id, effect.generation, "tts")
+        current_stage.set(stage)
+        if stage is not None:
+            stage.begin()
         started = self._clock()
         last_chunk_at: float | None = None
         chunk_count = 0
@@ -1665,6 +1837,7 @@ class SessionRuntime:
                     continue
                 if first_audio:
                     first_audio = False
+                    self._record_first_audio(effect)
                     elapsed = self._clock() - started
                     self._observe(
                         "tts_first_audio",
@@ -1987,6 +2160,9 @@ class SessionRuntime:
                     await self._registry.remove(self.session_id)
                 self._speech_ends.clear()
                 self._turn_speech_ends.clear()
+                self._segment_timings.clear()
+                self._turn_timings.clear()
+                self._timing_dirty.clear()
                 self._llm_milestones.clear()
                 if self._speaker_gate is not None:
                     self._speaker_gate.clear()

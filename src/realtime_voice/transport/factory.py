@@ -170,6 +170,7 @@ def build_runtime(
         metrics=services.metrics,
     )
     runtime = SessionRuntime(
+        enable_turn_metrics=create.enable_turn_metrics,
         turn_end_settings=settings,
         semantic_detector=services.semantic_detector,
         state=state,

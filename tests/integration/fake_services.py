@@ -178,6 +178,7 @@ class FakeServiceHarness:
             ),
         )
         runtime = SessionRuntime(
+            enable_turn_metrics=create.enable_turn_metrics,
             state=SessionState(create.device_id, create.session_id, create.sample_rate),
             asr_client=self.asr,
             asr_keyword_extractor=self.keyword_extractor,
@@ -214,6 +215,7 @@ def connected_session(
     session_id: str = "session-1",
     rag_enabled: bool = False,
     scenes: list[str] | None = None,
+    enable_turn_metrics: bool = False,
 ) -> Iterator[tuple[WebSocketTestSession, dict[str, object]]]:
     with (
         TestClient(harness.app()) as client,
@@ -231,6 +233,7 @@ def connected_session(
                 "channels": 1,
                 "rag_enabled": rag_enabled,
                 "scenes": scenes or [],
+                "enable_turn_metrics": enable_turn_metrics,
             }
         )
         yield websocket, websocket.receive_json()

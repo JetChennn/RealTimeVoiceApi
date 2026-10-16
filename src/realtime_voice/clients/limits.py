@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import TYPE_CHECKING, TypeVar
 
+from realtime_voice.observability.turn_timing import current_stage
+
 if TYPE_CHECKING:
     from realtime_voice.observability.metrics import Metrics
 
@@ -65,7 +67,17 @@ class BoundedAdmission:
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:
         """预留一个容量槽，直到外层 async 上下文退出。"""
-        await self._acquire()
+        timing = current_stage.get()
+        if timing is not None and self.name == {"llm": "thinker"}.get(
+            timing.stage, timing.stage
+        ):
+            timing.begin_admission()
+            try:
+                await self._acquire()
+            finally:
+                timing.end_admission()
+        else:
+            await self._acquire()
         try:
             yield
         finally:

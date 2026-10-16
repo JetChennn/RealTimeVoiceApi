@@ -14,6 +14,7 @@ from pathlib import Path
 from time import monotonic
 
 from realtime_voice.observability.metrics import Metrics
+from realtime_voice.observability.turn_timing import current_stage
 
 MODEL_REPOSITORY = "livekit/turn-detector"
 MODEL_REVISION = "87e35fcb1e60a569bea70346191c4886ea92e281"  # v0.4.1-intl
@@ -155,6 +156,9 @@ class SemanticDetector:
 
     async def predict(self, context: list[dict[str, str]], text: str) -> Decision:
         start = monotonic()
+        timing = current_stage.get()
+        if timing is not None and timing.finished_at is None:
+            timing.started_at = None  # The executor marks the actual execution start.
         status = "failed"
         try:
             if self.closed or self.model is None:
@@ -169,6 +173,8 @@ class SemanticDetector:
             loop = asyncio.get_running_loop()
 
             def infer():
+                if timing is not None:
+                    timing.begin()
                 self.metrics.observe_stage_latency("semantic_queue", monotonic() - start)
                 executing = monotonic()
                 try:

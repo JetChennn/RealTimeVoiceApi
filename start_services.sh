@@ -469,7 +469,7 @@ launch_service() {
             ;;
         kbservice)
             start_process_in_dir kbservice "$KB_DIR" \
-                env HOST=127.0.0.1 PORT="$KB_PORT" \
+                env HOST=0.0.0.0 PORT="$KB_PORT" \
                 "$KB_PYTHON" scripts/server.py
             ;;
         thinker)

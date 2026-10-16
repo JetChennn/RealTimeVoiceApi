@@ -96,6 +96,11 @@ class Metrics:
             "Speech end to TTS excluding VAD-confirmed trailing silence",
             registry=r,
         )
+        self.vad_ready_to_first_tts = Histogram(
+            "realtime_voice_vad_ready_to_first_tts_seconds",
+            "Final VAD segment ready to first sendable TTS audio, including subsequent wait",
+            registry=r,
+        )
         self.thinker_full = Histogram(
             "realtime_voice_thinker_full_seconds", "Thinker request start to reply done", registry=r
         )
@@ -205,6 +210,9 @@ class Metrics:
 
     def observe_speech_end_to_first_tts_excluding_silence(self, seconds: float) -> None:
         self._safe(self.speech_end_to_first_tts_excluding_silence.observe, seconds)
+
+    def observe_vad_ready_to_first_tts(self, seconds: float) -> None:
+        self._safe(self.vad_ready_to_first_tts.observe, seconds)
 
     def observe_thinker_full(self, seconds: float) -> None:
         self._safe(self.thinker_full.observe, seconds)

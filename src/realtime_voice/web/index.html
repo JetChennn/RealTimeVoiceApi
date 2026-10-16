@@ -5,58 +5,68 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>实时语音 · 网关测试台</title>
-  <link rel="stylesheet" href="./style.css?v=20260924-speaker-ui-1">
-  <script type="module" src="./app.mjs?v=20260930-tts-latency-2"></script>
+  <link rel="stylesheet" href="./style.css?v=20261015-console-voiceprint-1">
+  <script type="module" src="./app.mjs?v=20261015-console-voiceprint-1"></script>
 </head>
 <body>
 <main>
-  <header><div><p class="eyebrow">REALTIME VOICE / TEST CONSOLE</p><h1>实时语音测试台</h1></div><span id="status" class="badge">未连接</span></header>
-  <section class="panel controls" aria-label="连接与录音设置">
-    <div class="fields">
-      <label>设备标识<input id="device" value="browser-test" maxlength="128" autocomplete="off"></label>
-      <label class="scene-field">知识场景 <span>可留空，逗号分隔，最多 3 个</span><input id="scenes" placeholder="留空仅用通用知识" disabled></label>
-      <label class="toggle"><input id="rag" type="checkbox">开启 RAG</label>
+  <header class="page-header">
+    <div class="page-brand">
+      <div class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <div><p class="eyebrow">REALTIME VOICE / TEST CONSOLE</p><h1>实时语音测试台</h1><p class="page-description">自然对话，观察每一轮的响应。</p></div>
     </div>
-    <div class="actions"><button id="start" class="primary">开始对话</button><button id="cancel" disabled>取消</button><div class="mic"><span id="mic-label">麦克风未开启</span><meter id="level" min="0" max="1" value="0" aria-label="麦克风音量"></meter></div><span id="connection" class="connection"></span></div>
-    <p id="notice" role="status">开始后持续录音并自动播放回复，推荐佩戴耳机。取消将停止录音、播放并关闭连接。</p>
-    <p class="footnote">Thinker 回复默认 5 秒内开始、最长 20 秒完成（可配置），超时会提示并可直接继续对话。</p>
-    <details><summary>连接信息</summary><p id="endpoint"></p><p id="session-label">会话尚未创建</p></details>
-  </section>
-  <section aria-label="阶段耗时" class="timing-section">
-    <div class="section-heading"><h2>阶段耗时</h2><span id="metrics-status">开始对话后采样</span></div>
-    <div id="metrics" class="metrics"></div>
-    <p class="footnote">来自 /metrics 每秒采样的增量平均值；包含网关到下游的等待与通信。全网关统计，不能归属到某一轮或某个用户。“说完话 → TTS 首帧”从服务端检测到最后一段有效语音结束开始，但会扣除实际确认的尾部静音。Thinker 内部 RAG 耗时包含在 LLM 首包耗时中。</p>
-  </section>
-  <section id="speaker-panel" aria-label="声纹验证" class="speaker-section" data-tone="idle">
-    <div class="section-heading"><h2>声纹验证</h2><span>仅在当前会话内生效</span></div>
-    <div class="speaker-card">
-      <div class="speaker-hero">
-        <div class="speaker-orb" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-        <div class="speaker-copy"><span class="speaker-kicker">SESSION VOICEPRINT</span><h3 id="speaker-summary">当前会话尚未注册声纹</h3><p>注册后，每段语音会在进入 ASR 前完成身份验证。</p></div>
-        <strong id="speaker-state" class="speaker-pill">未注册</strong>
-      </div>
-      <div class="speaker-content">
-        <div class="speaker-score">
-          <div class="speaker-score-heading"><span>与参考声纹相似度</span><strong id="speaker-similarity">—</strong></div>
-          <div class="speaker-score-track" aria-hidden="true"><i id="speaker-similarity-fill"></i></div>
-          <div class="speaker-score-scale"><span>低</span><span>验证阈值</span><span>高</span></div>
+    <span id="status" class="badge">未连接</span>
+  </header>
+
+  <section class="panel controls" aria-label="会话控制台">
+    <div class="console-heading"><div><span class="section-kicker">CONTROLS</span><h2>会话控制台</h2></div><span id="connection" class="connection"></span></div>
+    <div class="console-grid">
+      <div class="session-settings">
+        <div class="fields">
+          <label>设备标识<input id="device" value="browser-test" maxlength="128" autocomplete="off"></label>
+          <label class="scene-field">知识场景 <span>选填</span><input id="scenes" placeholder="输入场景，逗号分隔" disabled></label>
         </div>
-        <div class="speaker-metrics">
-          <div class="speaker-metric"><span>本段有效发声</span><strong id="speaker-audio">—</strong><small>有效时长 / 最低要求</small></div>
-          <div class="speaker-metric"><span>已过滤音频</span><strong id="speaker-filtered">0 段</strong><small>声纹不符或时长不足</small></div>
+        <div class="rag-row"><label class="toggle"><input id="rag" type="checkbox"><span>开启知识检索 <small>RAG</small></span></label><span class="field-hint">最多 3 个场景，留空使用通用知识</span></div>
+        <div class="setup-note"><span class="note-icon" aria-hidden="true">♪</span><p>开始后持续聆听，说完稍作停顿即可。<br><span>回复会自动播放，推荐佩戴耳机。</span></p></div>
+      </div>
+
+      <section id="speaker-panel" aria-label="声纹验证" class="speaker-section" data-tone="idle">
+        <div class="speaker-heading"><div class="speaker-title"><div class="speaker-orb" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><h3>声纹验证</h3></div><strong id="speaker-state" class="speaker-pill">未注册</strong></div>
+        <div class="speaker-copy"><p id="speaker-summary">当前会话尚未注册声纹</p><span>录取一次，只让当前说话人的语音进入对话。</span></div>
+        <div class="speaker-stats">
+          <div class="speaker-score"><span>声纹相似度</span><strong id="speaker-similarity">—</strong><div class="speaker-score-track" aria-hidden="true"><i id="speaker-similarity-fill"></i></div></div>
+          <div class="speaker-metric"><span>有效发声 / 最低要求</span><strong id="speaker-audio">—</strong><small>最近一段语音</small></div>
+          <div class="speaker-metric"><span>已过滤音频</span><strong id="speaker-filtered">0 段</strong><small>仅当前会话</small></div>
         </div>
-      </div>
-      <div class="speaker-footer">
-        <button id="speaker-register" class="speaker-register" disabled><span class="speaker-button-icon" aria-hidden="true">◉</span><span id="speaker-register-label">录取声纹（3 秒）</span></button>
-        <div class="speaker-message"><i aria-hidden="true"></i><p id="speaker-detail">注册前不会过滤普通语音；声纹仅保存在当前会话中。</p></div>
-      </div>
+        <div class="speaker-footer"><button id="speaker-register" class="speaker-register" disabled><span class="speaker-button-icon" aria-hidden="true">◉</span><span id="speaker-register-label">录取声纹（3 秒）</span></button><p id="speaker-detail" role="status">开始对话后可录取声纹，连续说话 3 秒。</p></div>
+      </section>
+    </div>
+    <div class="console-footer">
+      <div class="actions"><button id="start" class="primary"><span class="start-icon" aria-hidden="true">▶</span>开始对话</button><button id="cancel" disabled>取消</button><div class="mic"><span class="mic-dot" aria-hidden="true"></span><span id="mic-label">麦克风未开启</span><meter id="level" min="0" max="1" value="0" aria-label="麦克风音量"></meter></div></div>
+      <p id="notice" role="status">准备就绪后开始对话；声纹注册仅在当前会话内生效。</p>
+      <details class="connection-details"><summary>连接与运行信息</summary><p id="endpoint"></p><p id="session-label">会话尚未创建</p><p>Thinker 默认 5 秒内开始回复、最长 20 秒完成，超时后可继续对话。</p></details>
     </div>
   </section>
+
   <section class="conversation-section" aria-label="对话记录">
-    <div class="section-heading"><h2>对话记录</h2><span id="turn-count">0 轮</span></div>
-    <div id="empty" class="empty"><div class="sound-icon" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><h3>准备好，就开始说话</h3><p>识别内容、流式回复与可重播音频将按轮次显示在这里。</p></div>
-    <div id="turns"></div>
+    <div class="section-heading"><div><span class="section-kicker">CONVERSATION</span><h2>对话记录</h2></div><span id="turn-count">0 轮</span></div>
+    <p class="footnote conversation-note">每轮回复下方展示实测耗时 · 从最终切段计至网关首音，不含切段前的尾部静音</p>
+    <div class="chat-container">
+      <div id="chat-viewport" class="chat-viewport" tabindex="0" role="region" aria-label="聊天记录，可上下滚动">
+        <div id="empty" class="empty"><div class="sound-icon" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><h3>开始一段自然的对话</h3><p>识别、回复与每轮耗时，都会出现在这里。</p><span class="empty-hint">点击上方「开始对话」，然后说出你的第一句话</span></div>
+        <div id="turns"></div>
+      </div>
+      <button id="chat-latest" class="chat-latest hidden">回到最新 ↓</button>
+    </div>
   </section>
+  <details class="gateway-diagnostics">
+    <summary>全网关诊断 · 聚合统计</summary>
+    <section aria-label="全网关阶段耗时" class="timing-section">
+      <div class="section-heading"><h2>全网关阶段耗时</h2><span id="metrics-status">开始对话后采样</span></div>
+      <div id="metrics" class="metrics"></div>
+      <p class="footnote">来自 /metrics 每秒新增样本的平均值，包含所有会话，不能归属到某一轮。除“VAD 切段 → 首音”外均保留旧统计口径：ASR、LLM、TTS 未完整包含阶段前排队；旧“扣静音首音”采用最后发声到首音减累计静音，与逐轮口径不同。请以回复下方的逐轮数据为准。</p>
+    </section>
+  </details>
 </main>
 </body>
 </html>

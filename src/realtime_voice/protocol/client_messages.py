@@ -17,6 +17,7 @@ class CreateSession(BaseModel):
     sample_rate: Literal[16000, 24000, 48000]
     channels: Literal[1]
     rag_enabled: StrictBool = False
+    enable_turn_metrics: StrictBool = False
     scenes: list[str] = Field(default_factory=list)
 
     @field_validator("scenes")
